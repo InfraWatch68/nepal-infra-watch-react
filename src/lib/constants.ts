@@ -1,0 +1,74 @@
+export const SECTORS = [
+  'Roads & Highways', 'Bridges', 'Hydropower', 'Airports', 'Railways',
+  'Water Supply', 'Irrigation', 'Healthcare', 'Education', 'Telecom',
+  'Urban Development', 'Tourism', 'Energy Transmission'
+] as const;
+
+export const PROVINCES = [
+  'Koshi', 'Madhesh', 'Bagmati', 'Gandaki', 'Lumbini', 'Karnali', 'Sudurpashchim'
+] as const;
+
+export type Province = typeof PROVINCES[number];
+
+// Nepal's 77 districts grouped by province (2020 federal reorganization).
+export const DISTRICTS_BY_PROVINCE: Record<Province, readonly string[]> = {
+  Koshi: [
+    'Bhojpur', 'Dhankuta', 'Ilam', 'Jhapa', 'Khotang', 'Morang', 'Okhaldhunga',
+    'Panchthar', 'Sankhuwasabha', 'Solukhumbu', 'Sunsari', 'Taplejung', 'Terhathum', 'Udayapur',
+  ],
+  Madhesh: [
+    'Bara', 'Dhanusha', 'Mahottari', 'Parsa', 'Rautahat', 'Saptari', 'Sarlahi', 'Siraha',
+  ],
+  Bagmati: [
+    'Bhaktapur', 'Chitwan', 'Dhading', 'Dolakha', 'Kathmandu', 'Kavrepalanchok',
+    'Lalitpur', 'Makwanpur', 'Nuwakot', 'Ramechhap', 'Rasuwa', 'Sindhuli', 'Sindhupalchok',
+  ],
+  Gandaki: [
+    'Baglung', 'Gorkha', 'Kaski', 'Lamjung', 'Manang', 'Mustang',
+    'Myagdi', 'Nawalpur', 'Parbat', 'Syangja', 'Tanahun',
+  ],
+  Lumbini: [
+    'Arghakhanchi', 'Banke', 'Bardiya', 'Dang', 'Eastern Rukum', 'Gulmi',
+    'Kapilvastu', 'Palpa', 'Parasi', 'Pyuthan', 'Rolpa', 'Rupandehi',
+  ],
+  Karnali: [
+    'Dailekh', 'Dolpa', 'Humla', 'Jajarkot', 'Jumla',
+    'Kalikot', 'Mugu', 'Salyan', 'Surkhet', 'Western Rukum',
+  ],
+  Sudurpashchim: [
+    'Achham', 'Baitadi', 'Bajhang', 'Bajura', 'Dadeldhura',
+    'Darchula', 'Doti', 'Kailali', 'Kanchanpur',
+  ],
+};
+
+// Flat sorted list of every district (used when no province is selected).
+export const ALL_DISTRICTS = Object.values(DISTRICTS_BY_PROVINCE)
+  .flat()
+  .slice()
+  .sort((a, b) => a.localeCompare(b));
+
+// Returns districts for a province, or all districts if no/invalid province.
+export function districtsFor(province?: string | null): readonly string[] {
+  if (province && (province in DISTRICTS_BY_PROVINCE)) {
+    return DISTRICTS_BY_PROVINCE[province as Province];
+  }
+  return ALL_DISTRICTS;
+}
+
+export const STATUS_LABELS: Record<string, string> = {
+  proposed: 'Proposed',
+  approved: 'Approved',
+  in_progress: 'In Progress',
+  delayed: 'Delayed',
+  completed: 'Completed',
+  cancelled: 'Cancelled',
+};
+
+export const STATUS_COLORS: Record<string, string> = {
+  proposed: 'bg-muted text-muted-foreground',
+  approved: 'bg-info/15 text-info',
+  in_progress: 'bg-warning/15 text-warning',
+  delayed: 'bg-destructive/15 text-destructive',
+  completed: 'bg-success/15 text-success',
+  cancelled: 'bg-muted text-muted-foreground',
+};

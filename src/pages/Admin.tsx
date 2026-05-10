@@ -1,0 +1,853 @@
+// After any schema migration, regenerate types with:
+//   npx supabase gen types typescript --project-id vlioybqqswbohdhpnjym > src/integrations/supabase/types.ts
+
+import { useEffect, useState } from 'react';
+import { Link, Navigate } from 'react-router-dom';
+import { supabase } from '@/integrations/supabase/client';
+import { useAuth } from '@/hooks/useAuth';
+import { SiteHeader } from '@/components/layout/SiteHeader';
+import { SiteFooter } from '@/components/layout/SiteFooter';
+import { Card } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Textarea } from '@/components/ui/textarea';
+import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
+import { toast } from 'sonner';
+import { Shield, Megaphone, Sparkles, Loader2, ExternalLink, Users as UsersIcon } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { SECTORS, PROVINCES, districtsFor } from '@/lib/constants';
+import { DetailsModerationTab } from '@/components/admin/DetailsModerationTab';
+
+const APPROVAL_COLORS: Record<string, string> = {
+  pending: 'bg-warning/15 text-warning',
+  approved: 'bg-success/15 text-success',
+  rejected: 'bg-destructive/15 text-destructive',
+  changes_requested: 'bg-info/15 text-info',
+};
+
+// supabase.functions.invoke returns a generic "non-2xx status" message and
+// stashes the actual response on error.context. Pull the JSON body so the
+// admin sees the real error text from the function (Tavily 502, no keys, etc.)
+async function extractFnError(error: any): Promise<string> {
+  if (!error) return 'Unknown error';
+  try {
+    const ctx = error.context;
+    if (ctx && typeof ctx.json === 'function') {
+      const body = await ctx.clone().json();
+      if (body?.error) return String(body.error);
+    }
+  } catch {
+    /* fall through to default message */
+  }
+  return error.message ?? 'Unknown error';
+}
+
+const AiBadge = () => (
+  <Badge variant="outline" className="text-[10px] uppercase tracking-wider font-mono border-accent text-accent">
+    <Sparkles className="h-3 w-3 mr-1" /> AI
+  </Badge>
+);
+
+export default function Admin() {
+  const { user, isReviewer, isAdmin, isCoadmin, loading } = useAuth();
+  const [projects, setProjects] = useState<any[]>([]);
+  const [pendingUpdates, setPendingUpdates] = useState<any[]>([]);
+  const [pendingSources, setPendingSources] = useState<any[]>([]);
+  const [ads, setAds] = useState<any[]>([]);
+  const [users, setUsers] = useState<any[]>([]);
+  const [stats, setStats] = useState({ pending: 0, approved: 0, total: 0, aiInserted: 0, aiApproved: 0 });
+  const [discoverTopic, setDiscoverTopic] = useState('');
+  const [discoverRegion, setDiscoverRegion] = useState('');
+  const [discoverMax, setDiscoverMax] = useState(2);
+  const [discovering, setDiscovering] = useState(false);
+  const [discoverErrors, setDiscoverErrors] = useState<string[]>([]);
+  const [busyRow, setBusyRow] = useState<string | null>(null);
+  const [globalScope, setGlobalScope] = useState<'all' | 'province' | 'sector'>('all');
+  const [globalProvince, setGlobalProvince] = useState<string>('');
+  const [globalSector, setGlobalSector] = useState<string>('');
+  const [busyGlobal, setBusyGlobal] = useState<string | null>(null);
+
+  const refresh = async () => {
+    const { data } = await supabase.from('projects').select('*').order('created_at', { ascending: false });
+    setProjects(data ?? []);
+    const d = data ?? [];
+    setStats({
+      pending: d.filter(p => p.approval_status === 'pending').length,
+      approved: d.filter(p => p.approval_status === 'approved').length,
+      total: d.length,
+      aiInserted: d.filter(p => p.submitted_by_ai).length,
+      aiApproved: d.filter(p => p.submitted_by_ai && p.approval_status === 'approved').length,
+    });
+
+    const { data: pu } = await supabase
+      .from('project_updates')
+      .select('id, title, content, update_type, created_at, approval_status, submitted_by_ai, project_id, projects(title, slug)')
+      .in('approval_status', ['pending', 'changes_requested'])
+      .order('created_at', { ascending: false });
+    setPendingUpdates(pu ?? []);
+
+    const { data: ps } = await supabase
+      .from('project_sources')
+      .select('id, title, url, source_type, created_at, approval_status, submitted_by_ai, project_id, projects(title, slug)')
+      .in('approval_status', ['pending', 'changes_requested'])
+      .order('created_at', { ascending: false });
+    setPendingSources(ps ?? []);
+
+    if (isAdmin || isCoadmin) {
+      const { data: a } = await supabase.from('ad_slots').select('*').order('created_at', { ascending: false });
+      setAds(a ?? []);
+    }
+
+    if (isAdmin) {
+      const [{ data: profiles }, { data: roleRows }] = await Promise.all([
+        supabase.from('profiles').select('id, email, full_name, organization, created_at').order('created_at', { ascending: false }),
+        supabase.from('user_roles').select('user_id, role'),
+      ]);
+      const rolesByUser = new Map<string, string[]>();
+      (roleRows ?? []).forEach((r: any) => {
+        const arr = rolesByUser.get(r.user_id) ?? [];
+        arr.push(r.role);
+        rolesByUser.set(r.user_id, arr);
+      });
+      setUsers((profiles ?? []).map((p: any) => ({ ...p, roles: rolesByUser.get(p.id) ?? [] })));
+    }
+  };
+
+  useEffect(() => { if (user && isReviewer) refresh(); /* eslint-disable-next-line */ }, [user, isReviewer, isAdmin, isCoadmin]);
+
+  if (loading) return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
+  if (!user) return <Navigate to="/auth" replace />;
+  if (!isReviewer) return (
+    <div className="min-h-screen flex flex-col"><SiteHeader />
+      <div className="container py-20 text-center">
+        <Shield className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
+        <h1 className="font-display text-2xl font-bold mb-2">Reviewer access required</h1>
+        <p className="text-muted-foreground mb-6">Ask an admin to grant you the reviewer role.</p>
+        <Button asChild><Link to="/dashboard">Back to dashboard</Link></Button>
+      </div>
+      <SiteFooter />
+    </div>
+  );
+
+  const review = async (
+    id: string,
+    approval_status: string,
+    review_notes?: string,
+    status?: string,
+    edits?: Record<string, any>,
+  ) => {
+    const update: any = { ...(edits ?? {}), approval_status, reviewed_by: user.id };
+    if (review_notes !== undefined) update.review_notes = review_notes;
+    if (status) update.status = status;
+    if (approval_status === 'approved' && !status) update.status = 'approved';
+    const { error } = await supabase.from('projects').update(update).eq('id', id);
+    if (error) toast.error(error.message); else { toast.success('Updated'); refresh(); }
+  };
+
+  const reviewUpdate = async (
+    id: string,
+    approval: 'approved' | 'rejected' | 'changes_requested',
+    notes?: string,
+    edits?: Record<string, any>,
+  ) => {
+    const upd: any = { ...(edits ?? {}), approval_status: approval, reviewed_by: user.id };
+    if (notes !== undefined) upd.review_notes = notes;
+    if (approval === 'approved') upd.published = true;
+    if (approval === 'rejected') upd.published = false;
+    const { error } = await supabase.from('project_updates').update(upd).eq('id', id);
+    if (error) toast.error(error.message); else { toast.success('Update reviewed'); refresh(); }
+  };
+
+  const reviewSource = async (
+    id: string,
+    approval: 'approved' | 'rejected' | 'changes_requested',
+    notes?: string,
+    edits?: Record<string, any>,
+  ) => {
+    const upd: any = { ...(edits ?? {}), approval_status: approval, reviewed_by: user.id };
+    if (notes !== undefined) upd.review_notes = notes;
+    if (approval === 'approved') upd.verified = true;
+    if (approval === 'rejected') upd.verified = false;
+    const { error } = await supabase.from('project_sources').update(upd).eq('id', id);
+    if (error) toast.error(error.message); else { toast.success('Source reviewed'); refresh(); }
+  };
+
+  const runDiscover = async () => {
+    setDiscovering(true);
+    setDiscoverErrors([]);
+    const { data, error } = await supabase.functions.invoke('ai-discover-projects', {
+      body: {
+        topic: discoverTopic.trim() || undefined,
+        region: discoverRegion.trim() || undefined,
+        maxResults: discoverMax,
+      },
+    });
+    setDiscovering(false);
+    if (error) return toast.error(await extractFnError(error));
+    const errs: string[] = data?.errors ?? [];
+    setDiscoverErrors(errs);
+    toast.success(`Inserted ${data?.inserted ?? 0}, skipped ${data?.skipped ?? 0}${errs.length ? ` — ${errs.length} error(s) below` : ''}`);
+    refresh();
+  };
+
+  const fetchNews = async (projectId: string) => {
+    setBusyRow(projectId + ':news');
+    const { data, error } = await supabase.functions.invoke('ai-fetch-project-news', {
+      body: { projectId, maxResults: 3 },
+    });
+    setBusyRow(null);
+    if (error) return toast.error(await extractFnError(error));
+    const errs: string[] = data?.errors ?? [];
+    toast.success(`Inserted ${data?.inserted ?? 0} news update${(data?.inserted ?? 0) === 1 ? '' : 's'}${errs.length ? ` (${errs.length} errors)` : ''}`);
+    if (errs.length) console.warn('ai-fetch-project-news errors:', errs);
+    refresh();
+  };
+
+  const setUserRole = async (targetUserId: string, role: 'admin' | 'coadmin' | 'reviewer', enabled: boolean) => {
+    if (targetUserId === user.id && role === 'admin' && !enabled) {
+      return toast.error("You can't revoke your own admin role from this UI.");
+    }
+    if (enabled) {
+      const { error } = await supabase.from('user_roles').insert({ user_id: targetUserId, role });
+      if (error && !error.message.includes('duplicate')) return toast.error(error.message);
+    } else {
+      const { error } = await supabase.from('user_roles').delete().eq('user_id', targetUserId).eq('role', role);
+      if (error) return toast.error(error.message);
+    }
+    toast.success(`${enabled ? 'Granted' : 'Revoked'} ${role}`);
+    refresh();
+  };
+
+  const generateBrief = async (projectId: string) => {
+    setBusyRow(projectId + ':brief');
+    const { data, error } = await supabase.functions.invoke('ai-generate-brief', {
+      body: { projectId },
+    });
+    setBusyRow(null);
+    if (error) return toast.error(await extractFnError(error));
+    if (data?.updateId) toast.success('AI brief queued for review');
+    else toast.error('Brief generation returned no update');
+    refresh();
+  };
+
+  const runGlobalBrief = async () => {
+    const body: any = {};
+    if (globalScope === 'province') {
+      if (!globalProvince) return toast.error('Pick a province');
+      body.province = globalProvince;
+    } else if (globalScope === 'sector') {
+      if (!globalSector) return toast.error('Pick a sector');
+      body.sector = globalSector;
+    }
+    setBusyGlobal('brief');
+    const { data, error } = await supabase.functions.invoke('ai-generate-global-brief', { body });
+    setBusyGlobal(null);
+    if (error) return toast.error(await extractFnError(error));
+    toast.success(`Global brief published (${data?.scope ?? 'global'})`);
+  };
+
+  const runFetchNewsAll = async () => {
+    setBusyGlobal('news');
+    const { data, error } = await supabase.functions.invoke('ai-fetch-news-all', {
+      body: { maxProjects: 8, newsPerProject: 2 },
+    });
+    setBusyGlobal(null);
+    if (error) return toast.error(await extractFnError(error));
+    const errs: string[] = data?.errors ?? [];
+    toast.success(`Inserted ${data?.inserted ?? 0} updates across ${data?.projectsScanned ?? 0} projects${errs.length ? ` (${errs.length} errors)` : ''}`);
+    if (errs.length) console.warn('ai-fetch-news-all errors:', errs);
+    refresh();
+  };
+
+  return (
+    <div className="min-h-screen flex flex-col">
+      <SiteHeader />
+      <section className="border-b bg-primary text-primary-foreground">
+        <div className="container py-8">
+          <p className="text-xs uppercase tracking-[0.2em] font-mono text-accent mb-2">Internal</p>
+          <h1 className="font-display text-4xl font-bold flex items-center gap-3">
+            <Shield className="h-8 w-8 text-accent" /> {isAdmin ? 'Admin' : isCoadmin ? 'Co-admin' : 'Reviewer'} console
+          </h1>
+        </div>
+      </section>
+
+      <div className="container py-8 space-y-6">
+        <div className="grid sm:grid-cols-2 md:grid-cols-5 gap-4">
+          <Card className="p-5"><div className="text-xs uppercase font-mono text-muted-foreground">Pending</div><div className="font-display text-3xl font-bold mt-2">{stats.pending}</div></Card>
+          <Card className="p-5"><div className="text-xs uppercase font-mono text-muted-foreground">Approved</div><div className="font-display text-3xl font-bold mt-2 text-success">{stats.approved}</div></Card>
+          <Card className="p-5"><div className="text-xs uppercase font-mono text-muted-foreground">Total</div><div className="font-display text-3xl font-bold mt-2">{stats.total}</div></Card>
+          <Card className="p-5 border-accent/30">
+            <div className="text-xs uppercase font-mono text-muted-foreground flex items-center gap-1"><Sparkles className="h-3 w-3 text-accent" /> AI discovered</div>
+            <div className="font-display text-3xl font-bold mt-2">{stats.aiInserted}</div>
+          </Card>
+          <Card className="p-5 border-accent/30">
+            <div className="text-xs uppercase font-mono text-muted-foreground flex items-center gap-1"><Sparkles className="h-3 w-3 text-accent" /> AI approval rate</div>
+            <div className="font-display text-3xl font-bold mt-2">
+              {stats.aiInserted > 0 ? `${Math.round((stats.aiApproved / stats.aiInserted) * 100)}%` : '—'}
+            </div>
+          </Card>
+        </div>
+
+        <Card className="p-5 border-accent/30 bg-accent/5 space-y-5">
+          <div className="flex items-center gap-2">
+            <Sparkles className="h-5 w-5 text-accent" />
+            <h3 className="font-semibold">AI tools</h3>
+          </div>
+
+          <div className="space-y-2">
+            <p className="text-xs text-muted-foreground">
+              <span className="font-semibold text-foreground">Discover new projects.</span>{' '}
+              Tavily searches Nepali infrastructure news; Gemini extracts a structured project record. New rows land in the review queue with an AI badge.
+            </p>
+            <div className="flex gap-2 flex-wrap items-center">
+              <Input
+                placeholder='Topic e.g. "Kathmandu metro"'
+                value={discoverTopic}
+                onChange={e => setDiscoverTopic(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && !discovering && runDiscover()}
+                className="max-w-xs"
+              />
+              <Input
+                placeholder="Region (optional)"
+                value={discoverRegion}
+                onChange={e => setDiscoverRegion(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && !discovering && runDiscover()}
+                className="max-w-xs"
+              />
+              <Select value={String(discoverMax)} onValueChange={v => setDiscoverMax(Number(v))}>
+                <SelectTrigger className="w-[110px]"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {[2, 3, 5, 8, 10].map(n => (
+                    <SelectItem key={n} value={String(n)}>{n} results</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button disabled={discovering} onClick={runDiscover} className="bg-accent hover:bg-accent/90 text-accent-foreground">
+                {discovering ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Discover new projects'}
+              </Button>
+            </div>
+            {discoverErrors.length > 0 && (
+              <ul className="mt-2 space-y-1">
+                {discoverErrors.map((e, i) => (
+                  <li key={i} className="text-xs text-destructive font-mono bg-destructive/10 px-2 py-1 rounded">{e}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="space-y-2 pt-3 border-t border-accent/20">
+            <p className="text-xs text-muted-foreground">
+              <span className="font-semibold text-foreground">Global brief.</span>{' '}
+              Aggregates approved projects into a single brief shown on the homepage hero. Optionally narrow by province or sector.
+            </p>
+            <div className="flex gap-2 flex-wrap items-center">
+              <Select value={globalScope} onValueChange={v => setGlobalScope(v as any)}>
+                <SelectTrigger className="max-w-[180px]"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All projects</SelectItem>
+                  <SelectItem value="province">By province</SelectItem>
+                  <SelectItem value="sector">By sector</SelectItem>
+                </SelectContent>
+              </Select>
+              {globalScope === 'province' && (
+                <Select value={globalProvince} onValueChange={setGlobalProvince}>
+                  <SelectTrigger className="max-w-[180px]"><SelectValue placeholder="Province" /></SelectTrigger>
+                  <SelectContent>{PROVINCES.map(p => <SelectItem key={p} value={p}>{p}</SelectItem>)}</SelectContent>
+                </Select>
+              )}
+              {globalScope === 'sector' && (
+                <Select value={globalSector} onValueChange={setGlobalSector}>
+                  <SelectTrigger className="max-w-[200px]"><SelectValue placeholder="Sector" /></SelectTrigger>
+                  <SelectContent>{SECTORS.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent>
+                </Select>
+              )}
+              <Button disabled={busyGlobal === 'brief'} onClick={runGlobalBrief} variant="outline">
+                {busyGlobal === 'brief' ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Generate global brief'}
+              </Button>
+              <Button disabled={busyGlobal === 'news'} onClick={runFetchNewsAll} variant="outline">
+                {busyGlobal === 'news' ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Fetch news for all projects'}
+              </Button>
+            </div>
+          </div>
+        </Card>
+
+        <Tabs defaultValue="queue">
+          <TabsList>
+            <TabsTrigger value="queue">Review queue ({projects.filter(p => p.approval_status === 'pending' || p.approval_status === 'changes_requested').length})</TabsTrigger>
+            <TabsTrigger value="all">All projects</TabsTrigger>
+            <TabsTrigger value="updates">Pending updates ({pendingUpdates.length})</TabsTrigger>
+            <TabsTrigger value="sources">Pending sources ({pendingSources.length})</TabsTrigger>
+            <TabsTrigger value="details">Project details</TabsTrigger>
+            {isAdmin && <TabsTrigger value="users"><UsersIcon className="h-4 w-4 mr-1" /> Users ({users.length})</TabsTrigger>}
+            {(isAdmin || isCoadmin) && <TabsTrigger value="ads"><Megaphone className="h-4 w-4 mr-1" /> Ad slots</TabsTrigger>}
+          </TabsList>
+
+          <TabsContent value="queue" className="mt-4">
+            <ProjectList
+              projects={projects.filter(p => p.approval_status === 'pending' || p.approval_status === 'changes_requested')}
+              onReview={review}
+              onFetchNews={fetchNews}
+              onGenerateBrief={generateBrief}
+              busyRow={busyRow}
+            />
+          </TabsContent>
+          <TabsContent value="all" className="mt-4">
+            <ProjectList
+              projects={projects}
+              onReview={review}
+              onFetchNews={fetchNews}
+              onGenerateBrief={generateBrief}
+              busyRow={busyRow}
+            />
+          </TabsContent>
+          <TabsContent value="updates" className="mt-4">
+            <PendingUpdatesList items={pendingUpdates} onReview={reviewUpdate} />
+          </TabsContent>
+          <TabsContent value="sources" className="mt-4">
+            <PendingSourcesList items={pendingSources} onReview={reviewSource} />
+          </TabsContent>
+          <TabsContent value="details" className="mt-4">
+            <DetailsModerationTab />
+          </TabsContent>
+          {isAdmin && (
+            <TabsContent value="users" className="mt-4">
+              <UsersManager users={users} currentUserId={user.id} onSetRole={setUserRole} />
+            </TabsContent>
+          )}
+          {(isAdmin || isCoadmin) && (
+            <TabsContent value="ads" className="mt-4">
+              <AdsManager ads={ads} onChange={refresh} />
+            </TabsContent>
+          )}
+        </Tabs>
+      </div>
+      <SiteFooter />
+    </div>
+  );
+}
+
+function ProjectList({ projects, onReview, onFetchNews, onGenerateBrief, busyRow }: any) {
+  if (projects.length === 0) return <Card className="p-12 text-center text-muted-foreground">Queue empty.</Card>;
+  return (
+    <Card>
+      <div className="divide-y">
+        {projects.map((p: any) => {
+          const isApproved = p.approval_status === 'approved';
+          return (
+            <div key={p.id} className="p-4 flex items-start justify-between gap-4">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 mb-1 flex-wrap">
+                  <Badge className={cn("text-[10px] uppercase tracking-wider font-mono", APPROVAL_COLORS[p.approval_status])}>{p.approval_status.replace('_', ' ')}</Badge>
+                  {p.submitted_by_ai && <AiBadge />}
+                  <span className="text-xs text-muted-foreground">{p.sector} · {p.province ?? '—'} · {new Date(p.created_at).toLocaleDateString()}</span>
+                </div>
+                <Link to={`/projects/${p.slug}`} className="font-semibold hover:text-accent">{p.title}</Link>
+                <p className="text-xs text-muted-foreground line-clamp-2 mt-1">{p.description}</p>
+              </div>
+              <div className="flex gap-2 shrink-0 flex-wrap justify-end">
+                {isApproved && (
+                  <>
+                    <Button size="sm" variant="outline" disabled={busyRow === p.id + ':news'} onClick={() => onFetchNews(p.id)}>
+                      {busyRow === p.id + ':news' ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Fetch news'}
+                    </Button>
+                    <Button size="sm" variant="outline" disabled={busyRow === p.id + ':brief'} onClick={() => onGenerateBrief(p.id)}>
+                      {busyRow === p.id + ':brief' ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Generate brief'}
+                    </Button>
+                  </>
+                )}
+                <Dialog>
+                  <DialogTrigger asChild><Button size="sm" variant="outline">Review</Button></DialogTrigger>
+                  <ReviewDialog project={p} onReview={onReview} />
+                </Dialog>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+function ReviewDialog({ project, onReview }: any) {
+  const [title, setTitle] = useState(project.title ?? '');
+  const [description, setDescription] = useState(project.description ?? '');
+  const [sector, setSector] = useState(project.sector ?? SECTORS[0]);
+  const [province, setProvince] = useState<string>(project.province ?? '');
+  const [district, setDistrict] = useState<string>(project.district ?? '');
+  const districtOptions = districtsFor(province || null);
+  const [contractor, setContractor] = useState(project.contractor ?? '');
+  const [agency, setAgency] = useState(project.implementing_agency ?? '');
+  const [budget, setBudget] = useState<string>(
+    project.budget_npr === null || project.budget_npr === undefined ? '' : String(project.budget_npr),
+  );
+  const [notes, setNotes] = useState(project.review_notes ?? '');
+  const [status, setStatus] = useState(project.status);
+
+  const collectEdits = (): Record<string, any> => {
+    const edits: Record<string, any> = {
+      title: title.trim(),
+      description: description.trim() || null,
+      sector,
+      province: province || null,
+      district: district.trim() || null,
+      contractor: contractor.trim() || null,
+      implementing_agency: agency.trim() || null,
+    };
+    if (budget === '') edits.budget_npr = null;
+    else edits.budget_npr = Number(budget);
+    return edits;
+  };
+
+  const validate = (): boolean => {
+    if (!title.trim()) { toast.error('Title cannot be empty'); return false; }
+    if (budget !== '' && (Number.isNaN(Number(budget)) || Number(budget) < 0)) {
+      toast.error('Budget must be a positive number or leave it blank');
+      return false;
+    }
+    return true;
+  };
+
+  return (
+    <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+      <DialogHeader><DialogTitle>Review: {project.title}</DialogTitle></DialogHeader>
+      <div className="space-y-4">
+        <p className="text-xs text-muted-foreground">Edit any field below. Changes save with your approval/rejection.</p>
+        <div className="grid sm:grid-cols-2 gap-3">
+          <div className="sm:col-span-2">
+            <Label>Title</Label>
+            <Input value={title} onChange={e => setTitle(e.target.value)} maxLength={200} />
+          </div>
+          <div className="sm:col-span-2">
+            <Label>Description</Label>
+            <Textarea rows={3} value={description} onChange={e => setDescription(e.target.value)} maxLength={5000} />
+          </div>
+          <div>
+            <Label>Sector</Label>
+            <Select value={sector} onValueChange={setSector}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {SECTORS.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <Label>Province</Label>
+            <Select value={province || '__none'} onValueChange={v => { setProvince(v === '__none' ? '' : v); setDistrict(''); }}>
+              <SelectTrigger><SelectValue placeholder="—" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none">— none —</SelectItem>
+                {PROVINCES.map(p => <SelectItem key={p} value={p}>{p}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <Label>District</Label>
+            <Select value={district || '__none'} onValueChange={v => setDistrict(v === '__none' ? '' : v)}>
+              <SelectTrigger><SelectValue placeholder="—" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none">— none —</SelectItem>
+                {districtOptions.map(d => <SelectItem key={d} value={d}>{d}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <Label>Budget (NPR)</Label>
+            <Input type="number" value={budget} onChange={e => setBudget(e.target.value)} />
+          </div>
+          <div>
+            <Label>Contractor</Label>
+            <Input value={contractor} onChange={e => setContractor(e.target.value)} maxLength={200} />
+          </div>
+          <div>
+            <Label>Implementing agency</Label>
+            <Input value={agency} onChange={e => setAgency(e.target.value)} maxLength={200} />
+          </div>
+          <div>
+            <Label>Project status</Label>
+            <Select value={status} onValueChange={setStatus}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {['proposed','approved','in_progress','delayed','completed','cancelled'].map(s =>
+                  <SelectItem key={s} value={s}>{s}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+        <div>
+          <Label>Reviewer notes</Label>
+          <Textarea rows={2} value={notes} onChange={e => setNotes(e.target.value)} maxLength={1000} />
+        </div>
+        <div className="flex gap-2 pt-2 flex-wrap">
+          <Button className="bg-success hover:bg-success/90" onClick={() => { if (validate()) onReview(project.id, 'approved', notes, status, collectEdits()); }}>Approve</Button>
+          <Button variant="outline" onClick={() => { if (validate()) onReview(project.id, 'changes_requested', notes, status, collectEdits()); }}>Request changes</Button>
+          <Button variant="destructive" onClick={() => { if (validate()) onReview(project.id, 'rejected', notes, status, collectEdits()); }}>Reject</Button>
+        </div>
+      </div>
+    </DialogContent>
+  );
+}
+
+function PendingUpdatesList({ items, onReview }: any) {
+  if (items.length === 0) return <Card className="p-12 text-center text-muted-foreground">No pending updates.</Card>;
+  return (
+    <Card>
+      <div className="divide-y">
+        {items.map((u: any) => (
+          <div key={u.id} className="p-4 flex items-start justify-between gap-4">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 mb-1 flex-wrap">
+                <Badge className={cn("text-[10px] uppercase tracking-wider font-mono", APPROVAL_COLORS[u.approval_status])}>{u.approval_status.replace('_', ' ')}</Badge>
+                {u.submitted_by_ai && <AiBadge />}
+                <span className="text-xs text-muted-foreground font-mono uppercase tracking-wider">{u.update_type}</span>
+                <span className="text-xs text-muted-foreground">· {new Date(u.created_at).toLocaleDateString()}</span>
+              </div>
+              {u.projects?.slug
+                ? <Link to={`/projects/${u.projects.slug}`} className="text-xs text-accent hover:underline">{u.projects?.title ?? '—'}</Link>
+                : <span className="text-xs text-muted-foreground">{u.projects?.title ?? '—'}</span>}
+              <h4 className="font-semibold mt-1">{u.title}</h4>
+              <p className="text-xs text-muted-foreground line-clamp-3 mt-1 whitespace-pre-wrap">{u.content}</p>
+            </div>
+            <div className="flex gap-2 shrink-0">
+              <Dialog>
+                <DialogTrigger asChild><Button size="sm" variant="outline">Review</Button></DialogTrigger>
+                <ReviewUpdateDialog item={u} onReview={onReview} />
+              </Dialog>
+            </div>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+function PendingSourcesList({ items, onReview }: any) {
+  if (items.length === 0) return <Card className="p-12 text-center text-muted-foreground">No pending sources.</Card>;
+  return (
+    <Card>
+      <div className="divide-y">
+        {items.map((s: any) => (
+          <div key={s.id} className="p-4 flex items-start justify-between gap-4">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 mb-1 flex-wrap">
+                <Badge className={cn("text-[10px] uppercase tracking-wider font-mono", APPROVAL_COLORS[s.approval_status])}>{s.approval_status.replace('_', ' ')}</Badge>
+                {s.submitted_by_ai && <AiBadge />}
+                <span className="text-xs text-muted-foreground font-mono uppercase tracking-wider">{s.source_type}</span>
+                <span className="text-xs text-muted-foreground">· {new Date(s.created_at).toLocaleDateString()}</span>
+              </div>
+              {s.projects?.slug
+                ? <Link to={`/projects/${s.projects.slug}`} className="text-xs text-accent hover:underline">{s.projects?.title ?? '—'}</Link>
+                : <span className="text-xs text-muted-foreground">{s.projects?.title ?? '—'}</span>}
+              <div className="font-semibold mt-1 truncate">{s.title}</div>
+              <a href={s.url} target="_blank" rel="noreferrer" className="text-xs text-accent hover:underline inline-flex items-center gap-1 mt-1 truncate max-w-full">
+                {s.url} <ExternalLink className="h-3 w-3" />
+              </a>
+            </div>
+            <div className="flex gap-2 shrink-0">
+              <Dialog>
+                <DialogTrigger asChild><Button size="sm" variant="outline">Review</Button></DialogTrigger>
+                <ReviewSourceDialog item={s} onReview={onReview} />
+              </Dialog>
+            </div>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+function ReviewUpdateDialog({ item, onReview }: any) {
+  const [editTitle, setEditTitle] = useState(item.title ?? '');
+  const [editContent, setEditContent] = useState(item.content ?? '');
+  const [notes, setNotes] = useState(item.review_notes ?? '');
+  const edits = () => ({
+    title: editTitle.trim() || item.title,
+    content: editContent.trim() || item.content,
+  });
+  return (
+    <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+      <DialogHeader><DialogTitle>Review update: {item.title}</DialogTitle></DialogHeader>
+      <div className="space-y-4">
+        <p className="text-xs text-muted-foreground">Edit any field below. Changes save with your approval/rejection.</p>
+        <div>
+          <Label>Title</Label>
+          <Input value={editTitle} onChange={e => setEditTitle(e.target.value)} maxLength={200} />
+        </div>
+        <div>
+          <Label>Content</Label>
+          <Textarea rows={8} value={editContent} onChange={e => setEditContent(e.target.value)} maxLength={5000} />
+        </div>
+        <div>
+          <Label>Reviewer notes</Label>
+          <Textarea rows={2} value={notes} onChange={e => setNotes(e.target.value)} maxLength={1000} />
+        </div>
+        <div className="flex gap-2 pt-2 flex-wrap">
+          <Button className="bg-success hover:bg-success/90" onClick={() => onReview(item.id, 'approved', notes, edits())}>Approve</Button>
+          <Button variant="outline" onClick={() => onReview(item.id, 'changes_requested', notes, edits())}>Request changes</Button>
+          <Button variant="destructive" onClick={() => onReview(item.id, 'rejected', notes, edits())}>Reject</Button>
+        </div>
+      </div>
+    </DialogContent>
+  );
+}
+
+function ReviewSourceDialog({ item, onReview }: any) {
+  const [editTitle, setEditTitle] = useState(item.title ?? '');
+  const [editUrl, setEditUrl] = useState(item.url ?? '');
+  const [notes, setNotes] = useState(item.review_notes ?? '');
+  const edits = () => ({
+    title: editTitle.trim() || item.title,
+    url: editUrl.trim() || item.url,
+  });
+  return (
+    <DialogContent className="max-w-2xl">
+      <DialogHeader><DialogTitle>Review source: {item.title}</DialogTitle></DialogHeader>
+      <div className="space-y-4">
+        <p className="text-xs text-muted-foreground">Edit any field below. Changes save with your approval/rejection.</p>
+        <div>
+          <Label>Title</Label>
+          <Input value={editTitle} onChange={e => setEditTitle(e.target.value)} maxLength={200} />
+        </div>
+        <div>
+          <Label>URL</Label>
+          <Input value={editUrl} onChange={e => setEditUrl(e.target.value)} />
+          {item.url && (
+            <a href={item.url} target="_blank" rel="noreferrer" className="text-xs text-accent hover:underline inline-flex items-center gap-1 mt-1">
+              Open original <ExternalLink className="h-3 w-3" />
+            </a>
+          )}
+        </div>
+        <div>
+          <Label>Reviewer notes</Label>
+          <Textarea rows={2} value={notes} onChange={e => setNotes(e.target.value)} maxLength={1000} />
+        </div>
+        <div className="flex gap-2 pt-2 flex-wrap">
+          <Button className="bg-success hover:bg-success/90" onClick={() => onReview(item.id, 'approved', notes, edits())}>Approve</Button>
+          <Button variant="outline" onClick={() => onReview(item.id, 'changes_requested', notes, edits())}>Request changes</Button>
+          <Button variant="destructive" onClick={() => onReview(item.id, 'rejected', notes, edits())}>Reject</Button>
+        </div>
+      </div>
+    </DialogContent>
+  );
+}
+
+function UsersManager({ users, currentUserId, onSetRole }: any) {
+  if (users.length === 0) return <Card className="p-12 text-center text-muted-foreground">No users yet.</Card>;
+  return (
+    <Card>
+      <div className="p-5 border-b">
+        <h3 className="font-display text-lg font-semibold">Users &amp; roles</h3>
+        <p className="text-xs text-muted-foreground mt-1">
+          <span className="font-mono">admin</span> grants full access including user management.
+          <span className="font-mono"> coadmin</span> grants reviewer powers + ad management.
+          <span className="font-mono"> reviewer</span> grants moderation queue access only.
+        </p>
+      </div>
+      <div className="divide-y">
+        {users.map((u: any) => {
+          const roles: string[] = u.roles ?? [];
+          const isSelf = u.id === currentUserId;
+          return (
+            <div key={u.id} className="p-4 flex items-start justify-between gap-4 flex-wrap">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 flex-wrap mb-1">
+                  <span className="font-semibold truncate">{u.full_name || '(no name)'}</span>
+                  {isSelf && <Badge variant="outline" className="text-[10px]">you</Badge>}
+                  {roles.length === 0 && <Badge variant="outline" className="text-[10px] uppercase tracking-wider font-mono">contributor</Badge>}
+                  {roles.map(r => (
+                    <Badge key={r} className={cn(
+                      'text-[10px] uppercase tracking-wider font-mono',
+                      r === 'admin' && 'bg-destructive/15 text-destructive',
+                      r === 'coadmin' && 'bg-warning/15 text-warning',
+                      r === 'reviewer' && 'bg-info/15 text-info',
+                    )}>{r}</Badge>
+                  ))}
+                </div>
+                {u.email && <div className="text-xs text-foreground font-mono truncate">{u.email}</div>}
+                <div className="text-xs text-muted-foreground font-mono truncate">
+                  {u.organization ? `${u.organization} · ` : ''}joined {new Date(u.created_at).toLocaleDateString()}
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-3 items-center shrink-0">
+                <RoleToggle label="Admin" enabled={roles.includes('admin')} disabled={isSelf && roles.includes('admin')}
+                  onChange={v => onSetRole(u.id, 'admin', v)} />
+                <RoleToggle label="Co-admin" enabled={roles.includes('coadmin')}
+                  onChange={v => onSetRole(u.id, 'coadmin', v)} />
+                <RoleToggle label="Reviewer" enabled={roles.includes('reviewer')}
+                  onChange={v => onSetRole(u.id, 'reviewer', v)} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+function RoleToggle({ label, enabled, disabled, onChange }: { label: string; enabled: boolean; disabled?: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <label className={cn("flex items-center gap-2 text-xs cursor-pointer", disabled && "opacity-60 cursor-not-allowed")}>
+      <Switch checked={enabled} disabled={disabled} onCheckedChange={onChange} />
+      <span className="font-mono uppercase tracking-wider">{label}</span>
+    </label>
+  );
+}
+
+function AdsManager({ ads, onChange }: any) {
+  const [form, setForm] = useState<any>({ active: true });
+  const set = (k: string, v: any) => setForm((f: any) => ({ ...f, [k]: v }));
+
+  const save = async () => {
+    if (!form.slot_key || !form.title) return toast.error('Slot key and title required');
+    const { error } = await supabase.from('ad_slots').insert({
+      slot_key: form.slot_key, title: form.title,
+      image_url: form.image_url || null, target_url: form.target_url || null,
+      advertiser: form.advertiser || null, active: form.active,
+    });
+    if (error) toast.error(error.message); else { toast.success('Ad added'); setForm({ active: true }); onChange(); }
+  };
+
+  const toggle = async (id: string, active: boolean) => {
+    await supabase.from('ad_slots').update({ active }).eq('id', id); onChange();
+  };
+  const remove = async (id: string) => { await supabase.from('ad_slots').delete().eq('id', id); onChange(); };
+
+  return (
+    <div className="grid lg:grid-cols-[1fr_360px] gap-6">
+      <Card>
+        <div className="p-5 border-b"><h3 className="font-display text-lg font-semibold">Ad slots</h3></div>
+        {ads.length === 0 ? <div className="p-8 text-center text-muted-foreground text-sm">No ads yet.</div> :
+          <div className="divide-y">
+            {ads.map((a: any) => (
+              <div key={a.id} className="p-4 flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="font-semibold truncate">{a.title}</div>
+                  <div className="text-xs text-muted-foreground font-mono">{a.slot_key} · {a.advertiser ?? '—'}</div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Switch checked={a.active} onCheckedChange={v => toggle(a.id, v)} />
+                  <Button size="sm" variant="outline" onClick={() => remove(a.id)}>Delete</Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        }
+      </Card>
+      <Card className="p-5 space-y-3 h-fit">
+        <h3 className="font-semibold">Add ad slot</h3>
+        <Input placeholder="Slot key (e.g. home_mid)" value={form.slot_key ?? ''} onChange={e => set('slot_key', e.target.value)} />
+        <Input placeholder="Title" value={form.title ?? ''} onChange={e => set('title', e.target.value)} />
+        <Input placeholder="Advertiser" value={form.advertiser ?? ''} onChange={e => set('advertiser', e.target.value)} />
+        <Input placeholder="Image URL (optional)" value={form.image_url ?? ''} onChange={e => set('image_url', e.target.value)} />
+        <Input placeholder="Target URL" value={form.target_url ?? ''} onChange={e => set('target_url', e.target.value)} />
+        <div className="flex items-center gap-2"><Switch checked={form.active} onCheckedChange={v => set('active', v)} /><Label>Active</Label></div>
+        <Button onClick={save} className="w-full bg-accent hover:bg-accent/90 text-accent-foreground">Add slot</Button>
+        <p className="text-xs text-muted-foreground">Slot keys used: home_hero, home_mid, home_cta, browse_sidebar, project_sidebar, analytics_bottom</p>
+      </Card>
+    </div>
+  );
+}

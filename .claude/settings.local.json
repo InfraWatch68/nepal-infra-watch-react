@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" -X POST \"https://vlioybqqswbohdhpnjym.supabase.co/functions/v1/ai-discover-projects\" -H \"Authorization: Bearer bad_token\" -H \"Content-Type: application/json\" -d '{}')",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" -X POST \"https://vlioybqqswbohdhpnjym.supabase.co/functions/v1/ai-fetch-project-news\" -H \"Authorization: Bearer bad_token\" -H \"Content-Type: application/json\" -d '{}')"
+    ]
+  }
+}

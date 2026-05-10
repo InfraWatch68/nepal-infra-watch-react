@@ -1,0 +1,102 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700;9..144,800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+/* Nepal Infra Watch — deep navy + crimson editorial */
+@layer base {
+  :root {
+    --background: 220 30% 98%;
+    --foreground: 220 45% 12%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 220 45% 12%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 45% 12%;
+
+    --primary: 220 60% 14%;            /* deep navy */
+    --primary-foreground: 0 0% 98%;
+    --primary-glow: 220 55% 22%;
+
+    --accent: 350 78% 48%;             /* Nepal crimson */
+    --accent-foreground: 0 0% 100%;
+
+    --secondary: 220 20% 94%;
+    --secondary-foreground: 220 45% 14%;
+
+    --muted: 220 20% 95%;
+    --muted-foreground: 220 12% 42%;
+
+    --destructive: 0 75% 50%;
+    --destructive-foreground: 0 0% 98%;
+
+    --success: 152 60% 36%;
+    --warning: 38 92% 50%;
+    --info: 210 90% 50%;
+
+    --border: 220 20% 88%;
+    --input: 220 20% 90%;
+    --ring: 350 78% 48%;
+
+    --radius: 0.5rem;
+
+    --gradient-hero: linear-gradient(135deg, hsl(220 60% 14%) 0%, hsl(220 65% 8%) 60%, hsl(350 78% 30%) 100%);
+    --gradient-accent: linear-gradient(135deg, hsl(350 78% 48%), hsl(15 85% 55%));
+    --shadow-elegant: 0 10px 40px -10px hsl(220 60% 14% / 0.25);
+    --shadow-card: 0 1px 3px hsl(220 30% 20% / 0.06), 0 4px 16px hsl(220 30% 20% / 0.04);
+
+    --sidebar-background: 220 60% 10%;
+    --sidebar-foreground: 220 20% 88%;
+    --sidebar-primary: 350 78% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 220 50% 16%;
+    --sidebar-accent-foreground: 0 0% 98%;
+    --sidebar-border: 220 50% 18%;
+    --sidebar-ring: 350 78% 48%;
+  }
+
+  .dark {
+    --background: 220 50% 6%;
+    --foreground: 220 15% 95%;
+    --card: 220 45% 9%;
+    --card-foreground: 220 15% 95%;
+    --popover: 220 45% 9%;
+    --popover-foreground: 220 15% 95%;
+    --primary: 220 15% 95%;
+    --primary-foreground: 220 60% 10%;
+    --secondary: 220 40% 14%;
+    --secondary-foreground: 220 15% 95%;
+    --muted: 220 40% 14%;
+    --muted-foreground: 220 12% 65%;
+    --accent: 350 78% 55%;
+    --accent-foreground: 0 0% 100%;
+    --border: 220 40% 16%;
+    --input: 220 40% 16%;
+    --ring: 350 78% 55%;
+  }
+}
+
+@layer base {
+  * { @apply border-border; }
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Inter', system-ui, sans-serif;
+    font-feature-settings: 'cv02','cv03','cv04','cv11';
+  }
+  h1, h2, h3, .font-display {
+    font-family: 'Fraunces', Georgia, serif;
+    font-feature-settings: 'ss01';
+    letter-spacing: -0.02em;
+  }
+  .font-mono { font-family: 'JetBrains Mono', monospace; }
+}
+
+@layer utilities {
+  .gradient-hero { background: var(--gradient-hero); }
+  .gradient-accent { background: var(--gradient-accent); }
+  .shadow-elegant { box-shadow: var(--shadow-elegant); }
+  .shadow-card { box-shadow: var(--shadow-card); }
+  .text-balance { text-wrap: balance; }
+}
