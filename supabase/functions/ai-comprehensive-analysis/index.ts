@@ -142,36 +142,36 @@ const EXTRACTION_SYSTEM = `You are an information-extraction system for Nepal in
 - a project context block (title, sector, location, current data),
 - a corpus of search-result excerpts grouped by source bucket (news, government, procurement, audit_compliance, international_org).
 
-Return ONLY a JSON object with the schema below. Each array may be empty if the corpus has no evidence. Every fact must be grounded in a corpus excerpt — DO NOT invent. Every item MUST include "source_url" pointing to the corpus URL it came from. Skip items you cannot ground.
+Return ONLY a JSON object with the schema below. Each array may be empty if the corpus has no evidence. Every fact must be grounded in a corpus excerpt — DO NOT invent. Every item MUST include a non-empty "sources" array of corpus URLs that support it. **Merge duplicate facts**: if the same fact appears in multiple corpus entries (e.g. news + government), emit ONE item with all corroborating URLs in "sources" — do NOT emit duplicates. The first URL should be the strongest / most authoritative source. Skip items you cannot ground.
 
 {
   "funding": [
     { "source_name": str, "source_type": "government|multilateral|bilateral|private|loan|grant|equity|ppp|other",
       "amount_npr": num|null, "amount_usd": num|null, "currency": str|null,
       "committed_at": "YYYY-MM-DD"|null, "disbursed_amount": num|null,
-      "lender_terms": str|null, "notes": str|null, "source_url": str }
+      "lender_terms": str|null, "notes": str|null, "sources": [str, ...] }
   ],
   "documents": [
     { "title": str, "doc_type": "eia|iee|contract|tender|audit|progress_report|completion_report|blueprint|financial|press_release|legal|other",
       "url": str, "source_org": str|null, "language": "en|ne"|null,
-      "published_at": "YYYY-MM-DD"|null, "notes": str|null, "source_url": str }
+      "published_at": "YYYY-MM-DD"|null, "notes": str|null, "sources": [str, ...] }
   ],
   "stakeholders": [
     { "role": "implementing_agency|executing_ministry|contractor|sub_contractor|consultant|donor|beneficiary|regulator|community|other",
       "org_name": str, "contact_name": str|null, "contact_email": str|null, "contact_phone": str|null,
-      "website": str|null, "country": str|null, "notes": str|null, "source_url": str }
+      "website": str|null, "country": str|null, "notes": str|null, "sources": [str, ...] }
   ],
   "risks": [
     { "category": "financial|legal|environmental|social|political|technical|schedule|audit|corruption|other",
       "severity": "low|medium|high|critical", "title": str, "description": str|null,
       "status": "open|mitigated|closed|escalated",
-      "reported_at": "YYYY-MM-DD"|null, "resolved_at": "YYYY-MM-DD"|null, "source_url": str }
+      "reported_at": "YYYY-MM-DD"|null, "resolved_at": "YYYY-MM-DD"|null, "sources": [str, ...] }
   ],
   "impact": [
     { "metric_type": "beneficiaries|jobs_temporary|jobs_permanent|displacement|area_served_sq_km|households_served|co2_reduction_t|revenue_generated_npr|energy_capacity_mw|water_capacity_mld|other",
       "metric_value": num|null, "unit": str|null,
       "baseline_value": num|null, "target_value": num|null,
-      "measured_at": "YYYY-MM-DD"|null, "methodology": str|null, "notes": str|null, "source_url": str }
+      "measured_at": "YYYY-MM-DD"|null, "methodology": str|null, "notes": str|null, "sources": [str, ...] }
   ],
   "procurement": [
     { "tender_id_external": str|null, "tender_title": str, "tender_url": str|null,
@@ -180,14 +180,21 @@ Return ONLY a JSON object with the schema below. Each array may be empty if the 
       "contract_value_npr": num|null, "contract_type": "epc|design_build|itb|icb|ncb|limited|direct|framework|ppp|other"|null,
       "procurement_method": str|null,
       "status": "planned|published|bidding|evaluation|awarded|cancelled|disputed",
-      "notes": str|null, "source_url": str }
+      "notes": str|null, "sources": [str, ...] }
   ],
   "compliance": [
     { "item_type": "eia|iee|land_acquisition|right_of_way|forest_clearance|social_impact|audit_oag|audit_ciaa|blacklist|court_case|other",
       "status": "not_started|in_progress|approved|rejected|conditional|blacklisted|dismissed|pending",
       "authority": str|null, "decided_at": "YYYY-MM-DD"|null, "document_url": str|null,
-      "finding": str|null, "notes": str|null, "source_url": str }
-  ]
+      "finding": str|null, "notes": str|null, "sources": [str, ...] }
+  ],
+  "basic_updates": {
+    "procurement_method": str|null,                           // e.g. "ICB (international)", "NCB (national)", "Direct"
+    "esia_status": "not_started|in_progress|iee_approved|eia_approved|rejected|exempt"|null,
+    "funding_committed_npr": num|null,
+    "estimated_beneficiaries": num|null,
+    "project_type": str|null                                  // physical artifact: Road, Bridge, Hydropower, Hospital, …
+  }
 }
 
 Rules:
@@ -214,6 +221,23 @@ const inEnum = (v: any, e: string[]) => typeof v === "string" && e.includes(v);
 const validDate = (v: any) => v == null || (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v));
 const numOrNull = (v: any) => (typeof v === "number" && Number.isFinite(v)) ? v : null;
 const strOrNull = (v: any) => (typeof v === "string" && v.trim().length > 0) ? v.trim() : null;
+// Normalise the "sources" field — accept array (preferred) or single source_url
+// from older prompts. Returns { primary, all } where primary is sources[0] and
+// all is a deduped array of valid URLs (max 6).
+const normSources = (item: any): { primary: string | null; all: string[] } => {
+  const raw: any[] = Array.isArray(item?.sources) ? item.sources : (item?.source_url ? [item.source_url] : []);
+  const seen = new Set<string>();
+  const all: string[] = [];
+  for (const u of raw) {
+    if (typeof u !== "string") continue;
+    const t = u.trim();
+    if (!t || seen.has(t)) continue;
+    try { new URL(t); } catch { continue; }
+    seen.add(t); all.push(t);
+    if (all.length >= 6) break;
+  }
+  return { primary: all[0] ?? null, all };
+};
 
 // ----- Insert helpers -----
 async function insertAll(admin: any, projectId: number, parsed: any) {
@@ -227,85 +251,113 @@ async function insertAll(admin: any, projectId: number, parsed: any) {
     else stats[table] = rows.length;
   };
 
-  // funding
-  await safeInsert("project_funding", (parsed.funding ?? []).filter((f: any) =>
-    f && strOrNull(f.source_name) && inEnum(f.source_type, ENUM.fund_source_type) && strOrNull(f.source_url) && validDate(f.committed_at)
-  ).slice(0, 6).map((f: any) => ({
-    project_id: projectId, source_name: f.source_name, source_type: f.source_type,
-    amount_npr: numOrNull(f.amount_npr), amount_usd: numOrNull(f.amount_usd),
-    currency: strOrNull(f.currency) ?? "NPR", committed_at: f.committed_at ?? null,
-    disbursed_amount: numOrNull(f.disbursed_amount), lender_terms: strOrNull(f.lender_terms),
-    notes: strOrNull(f.notes), source_url: f.source_url,
-    submitted_by_ai: true, approval_status: "pending",
-  })));
+  const fundingRows = (parsed.funding ?? []).map((f: any) => {
+    const src = normSources(f);
+    if (!src.primary) return null;
+    if (!strOrNull(f.source_name) || !inEnum(f.source_type, ENUM.fund_source_type) || !validDate(f.committed_at)) return null;
+    return {
+      project_id: projectId, source_name: f.source_name, source_type: f.source_type,
+      amount_npr: numOrNull(f.amount_npr), amount_usd: numOrNull(f.amount_usd),
+      currency: strOrNull(f.currency) ?? "NPR", committed_at: f.committed_at ?? null,
+      disbursed_amount: numOrNull(f.disbursed_amount), lender_terms: strOrNull(f.lender_terms),
+      notes: strOrNull(f.notes), source_url: src.primary, sources: src.all,
+      submitted_by_ai: true, approval_status: "pending",
+    };
+  }).filter(Boolean).slice(0, 6);
+  await safeInsert("project_funding", fundingRows);
 
-  await safeInsert("project_documents", (parsed.documents ?? []).filter((d: any) =>
-    d && strOrNull(d.title) && inEnum(d.doc_type, ENUM.doc_type) && strOrNull(d.url) && strOrNull(d.source_url) && validDate(d.published_at)
-  ).slice(0, 6).map((d: any) => ({
-    project_id: projectId, title: d.title, doc_type: d.doc_type, url: d.url,
-    source_org: strOrNull(d.source_org), language: strOrNull(d.language) ?? "en",
-    published_at: d.published_at ?? null, notes: strOrNull(d.notes),
-    submitted_by_ai: true, approval_status: "pending",
-  })));
+  const docRows = (parsed.documents ?? []).map((d: any) => {
+    const src = normSources(d);
+    if (!src.primary) return null;
+    if (!strOrNull(d.title) || !inEnum(d.doc_type, ENUM.doc_type) || !strOrNull(d.url) || !validDate(d.published_at)) return null;
+    return {
+      project_id: projectId, title: d.title, doc_type: d.doc_type, url: d.url,
+      source_org: strOrNull(d.source_org), language: strOrNull(d.language) ?? "en",
+      published_at: d.published_at ?? null, notes: strOrNull(d.notes), sources: src.all,
+      submitted_by_ai: true, approval_status: "pending",
+    };
+  }).filter(Boolean).slice(0, 6);
+  await safeInsert("project_documents", docRows);
 
-  await safeInsert("project_stakeholders", (parsed.stakeholders ?? []).filter((s: any) =>
-    s && inEnum(s.role, ENUM.stake_role) && strOrNull(s.org_name) && strOrNull(s.source_url)
-  ).slice(0, 6).map((s: any) => ({
-    project_id: projectId, role: s.role, org_name: s.org_name,
-    contact_name: strOrNull(s.contact_name), contact_email: strOrNull(s.contact_email),
-    contact_phone: strOrNull(s.contact_phone), website: strOrNull(s.website),
-    country: strOrNull(s.country), notes: strOrNull(s.notes), source_url: s.source_url,
-    submitted_by_ai: true, approval_status: "pending",
-  })));
+  const stakeholderRows = (parsed.stakeholders ?? []).map((s: any) => {
+    const src = normSources(s);
+    if (!src.primary) return null;
+    if (!inEnum(s.role, ENUM.stake_role) || !strOrNull(s.org_name)) return null;
+    return {
+      project_id: projectId, role: s.role, org_name: s.org_name,
+      contact_name: strOrNull(s.contact_name), contact_email: strOrNull(s.contact_email),
+      contact_phone: strOrNull(s.contact_phone), website: strOrNull(s.website),
+      country: strOrNull(s.country), notes: strOrNull(s.notes),
+      source_url: src.primary, sources: src.all,
+      submitted_by_ai: true, approval_status: "pending",
+    };
+  }).filter(Boolean).slice(0, 6);
+  await safeInsert("project_stakeholders", stakeholderRows);
 
-  await safeInsert("project_risks", (parsed.risks ?? []).filter((r: any) =>
-    r && inEnum(r.category, ENUM.risk_cat) && inEnum(r.severity, ENUM.risk_sev)
-      && inEnum(r.status, ENUM.risk_status) && strOrNull(r.title) && strOrNull(r.source_url)
-      && validDate(r.reported_at) && validDate(r.resolved_at)
-  ).slice(0, 6).map((r: any) => ({
-    project_id: projectId, category: r.category, severity: r.severity,
-    title: r.title, description: strOrNull(r.description), status: r.status,
-    reported_at: r.reported_at ?? null, resolved_at: r.resolved_at ?? null,
-    source_url: r.source_url, submitted_by_ai: true, approval_status: "pending",
-  })));
+  const riskRows = (parsed.risks ?? []).map((r: any) => {
+    const src = normSources(r);
+    if (!src.primary) return null;
+    if (!inEnum(r.category, ENUM.risk_cat) || !inEnum(r.severity, ENUM.risk_sev)
+        || !inEnum(r.status, ENUM.risk_status) || !strOrNull(r.title)
+        || !validDate(r.reported_at) || !validDate(r.resolved_at)) return null;
+    return {
+      project_id: projectId, category: r.category, severity: r.severity,
+      title: r.title, description: strOrNull(r.description), status: r.status,
+      reported_at: r.reported_at ?? null, resolved_at: r.resolved_at ?? null,
+      source_url: src.primary, sources: src.all,
+      submitted_by_ai: true, approval_status: "pending",
+    };
+  }).filter(Boolean).slice(0, 6);
+  await safeInsert("project_risks", riskRows);
 
-  await safeInsert("project_impact", (parsed.impact ?? []).filter((i: any) =>
-    i && inEnum(i.metric_type, ENUM.metric_type) && strOrNull(i.source_url) && validDate(i.measured_at)
-  ).slice(0, 6).map((i: any) => ({
-    project_id: projectId, metric_type: i.metric_type,
-    metric_value: numOrNull(i.metric_value), unit: strOrNull(i.unit),
-    baseline_value: numOrNull(i.baseline_value), target_value: numOrNull(i.target_value),
-    measured_at: i.measured_at ?? null, methodology: strOrNull(i.methodology),
-    notes: strOrNull(i.notes), source_url: i.source_url,
-    submitted_by_ai: true, approval_status: "pending",
-  })));
+  const impactRows = (parsed.impact ?? []).map((i: any) => {
+    const src = normSources(i);
+    if (!src.primary) return null;
+    if (!inEnum(i.metric_type, ENUM.metric_type) || !validDate(i.measured_at)) return null;
+    return {
+      project_id: projectId, metric_type: i.metric_type,
+      metric_value: numOrNull(i.metric_value), unit: strOrNull(i.unit),
+      baseline_value: numOrNull(i.baseline_value), target_value: numOrNull(i.target_value),
+      measured_at: i.measured_at ?? null, methodology: strOrNull(i.methodology),
+      notes: strOrNull(i.notes), source_url: src.primary, sources: src.all,
+      submitted_by_ai: true, approval_status: "pending",
+    };
+  }).filter(Boolean).slice(0, 6);
+  await safeInsert("project_impact", impactRows);
 
-  await safeInsert("project_procurement", (parsed.procurement ?? []).filter((p: any) =>
-    p && strOrNull(p.tender_title) && inEnum(p.status, ENUM.proc_status) && strOrNull(p.source_url)
-      && (p.contract_type == null || inEnum(p.contract_type, ENUM.proc_contract_type))
-      && validDate(p.tender_published_at) && validDate(p.bid_open_at) && validDate(p.contract_awarded_at)
-  ).slice(0, 6).map((p: any) => ({
-    project_id: projectId, tender_id_external: strOrNull(p.tender_id_external),
-    tender_title: p.tender_title, tender_url: strOrNull(p.tender_url),
-    tender_published_at: p.tender_published_at ?? null, bid_open_at: p.bid_open_at ?? null,
-    contract_awarded_at: p.contract_awarded_at ?? null,
-    awardee_name: strOrNull(p.awardee_name), awardee_id: strOrNull(p.awardee_id),
-    contract_value_npr: numOrNull(p.contract_value_npr), contract_type: p.contract_type ?? null,
-    procurement_method: strOrNull(p.procurement_method), status: p.status,
-    notes: strOrNull(p.notes), source_url: p.source_url,
-    submitted_by_ai: true, approval_status: "pending",
-  })));
+  const procRows = (parsed.procurement ?? []).map((p: any) => {
+    const src = normSources(p);
+    if (!src.primary) return null;
+    if (!strOrNull(p.tender_title) || !inEnum(p.status, ENUM.proc_status)
+        || (p.contract_type != null && !inEnum(p.contract_type, ENUM.proc_contract_type))
+        || !validDate(p.tender_published_at) || !validDate(p.bid_open_at) || !validDate(p.contract_awarded_at)) return null;
+    return {
+      project_id: projectId, tender_id_external: strOrNull(p.tender_id_external),
+      tender_title: p.tender_title, tender_url: strOrNull(p.tender_url),
+      tender_published_at: p.tender_published_at ?? null, bid_open_at: p.bid_open_at ?? null,
+      contract_awarded_at: p.contract_awarded_at ?? null,
+      awardee_name: strOrNull(p.awardee_name), awardee_id: strOrNull(p.awardee_id),
+      contract_value_npr: numOrNull(p.contract_value_npr), contract_type: p.contract_type ?? null,
+      procurement_method: strOrNull(p.procurement_method), status: p.status,
+      notes: strOrNull(p.notes), source_url: src.primary, sources: src.all,
+      submitted_by_ai: true, approval_status: "pending",
+    };
+  }).filter(Boolean).slice(0, 6);
+  await safeInsert("project_procurement", procRows);
 
-  await safeInsert("project_compliance", (parsed.compliance ?? []).filter((c: any) =>
-    c && inEnum(c.item_type, ENUM.comp_item) && inEnum(c.status, ENUM.comp_status)
-      && strOrNull(c.source_url) && validDate(c.decided_at)
-  ).slice(0, 6).map((c: any) => ({
-    project_id: projectId, item_type: c.item_type, status: c.status,
-    authority: strOrNull(c.authority), decided_at: c.decided_at ?? null,
-    document_url: strOrNull(c.document_url), finding: strOrNull(c.finding),
-    notes: strOrNull(c.notes), source_url: c.source_url,
-    submitted_by_ai: true, approval_status: "pending",
-  })));
+  const complianceRows = (parsed.compliance ?? []).map((c: any) => {
+    const src = normSources(c);
+    if (!src.primary) return null;
+    if (!inEnum(c.item_type, ENUM.comp_item) || !inEnum(c.status, ENUM.comp_status) || !validDate(c.decided_at)) return null;
+    return {
+      project_id: projectId, item_type: c.item_type, status: c.status,
+      authority: strOrNull(c.authority), decided_at: c.decided_at ?? null,
+      document_url: strOrNull(c.document_url), finding: strOrNull(c.finding),
+      notes: strOrNull(c.notes), source_url: src.primary, sources: src.all,
+      submitted_by_ai: true, approval_status: "pending",
+    };
+  }).filter(Boolean).slice(0, 6);
+  await safeInsert("project_compliance", complianceRows);
 
   return { stats, errs };
 }
@@ -381,7 +433,34 @@ serve(async (req) => {
     // 3. Insert
     const { stats, errs } = await insertAll(admin, projectId, parsed);
 
-    // 4. Stamp last_comprehensive_analysis_at
+    // 4. Optionally enrich basic project fields the AI is confident about —
+    //    BUT only fill columns that are currently NULL so we never trample an
+    //    admin's manual edit. Validates each field against the same enum
+    //    constraints the Submit form uses.
+    const ESIA_VALUES = ["not_started","in_progress","iee_approved","eia_approved","rejected","exempt"];
+    const PROJECT_TYPES = ["Road","Bridge","Tunnel","Cable car","Airport","Railway","Hydropower","Solar","Wind","Transmission line","Substation","Drinking water","Sewerage","Treatment plant","Reservoir","Irrigation canal","Hospital","School","Stadium","Market","Office building","Telecom tower","Other"];
+    const enrichRaw = parsed.basic_updates ?? {};
+    const enrich: Record<string, any> = {};
+    if (typeof enrichRaw.procurement_method === "string" && enrichRaw.procurement_method.trim()) enrich.procurement_method = enrichRaw.procurement_method.trim().slice(0, 60);
+    if (typeof enrichRaw.esia_status === "string" && ESIA_VALUES.includes(enrichRaw.esia_status)) enrich.esia_status = enrichRaw.esia_status;
+    if (typeof enrichRaw.funding_committed_npr === "number" && Number.isFinite(enrichRaw.funding_committed_npr) && enrichRaw.funding_committed_npr >= 0) enrich.funding_committed_npr = enrichRaw.funding_committed_npr;
+    if (typeof enrichRaw.estimated_beneficiaries === "number" && Number.isFinite(enrichRaw.estimated_beneficiaries) && enrichRaw.estimated_beneficiaries >= 0) enrich.estimated_beneficiaries = Math.round(enrichRaw.estimated_beneficiaries);
+    if (typeof enrichRaw.project_type === "string" && PROJECT_TYPES.includes(enrichRaw.project_type)) enrich.project_type = enrichRaw.project_type;
+
+    let enrichedFields: string[] = [];
+    if (Object.keys(enrich).length > 0) {
+      // Pull only the columns we'd touch and patch the null ones.
+      const cols = Object.keys(enrich);
+      const { data: cur } = await admin.from("projects").select(["id", ...cols].join(",")).eq("id", projectId).single();
+      const patch: Record<string, any> = {};
+      for (const k of cols) if (cur && (cur as any)[k] == null) patch[k] = enrich[k];
+      if (Object.keys(patch).length > 0) {
+        const { error: upErr } = await admin.from("projects").update(patch).eq("id", projectId);
+        if (!upErr) enrichedFields = Object.keys(patch);
+      }
+    }
+
+    // 5. Stamp last_comprehensive_analysis_at
     await admin.from("projects").update({ last_comprehensive_analysis_at: new Date().toISOString() }).eq("id", projectId);
 
     return json({
@@ -390,6 +469,7 @@ serve(async (req) => {
       hits: hits.length,
       buckets: hits.reduce((acc: any, h) => (acc[h.bucket] = (acc[h.bucket] ?? 0) + 1, acc), {}),
       inserted: stats,
+      enriched_basic_fields: enrichedFields,
       errors: errs,
       warnings,
     });

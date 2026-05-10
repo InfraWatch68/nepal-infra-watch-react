@@ -1,7 +1,10 @@
 import { Link } from 'react-router-dom';
 import { Mountain } from 'lucide-react';
+import { useAuth } from '@/hooks/useAuth';
 
 export function SiteFooter() {
+  const { user } = useAuth();
+  const submitHref = user ? '/dashboard/submit' : '/auth?mode=signup&next=/dashboard/submit';
   return (
     <footer className="border-t border-border bg-primary text-primary-foreground mt-24">
       <div className="container py-12 grid gap-10 md:grid-cols-4">
@@ -28,7 +31,7 @@ export function SiteFooter() {
         <div>
           <h4 className="font-semibold mb-3 text-sm">Participate</h4>
           <ul className="space-y-2 text-sm text-primary-foreground/70">
-            <li><Link to="/auth?mode=signup" className="hover:text-accent">Submit a project</Link></li>
+            <li><Link to={submitHref} className="hover:text-accent">Submit a project</Link></li>
             <li><Link to="/dashboard" className="hover:text-accent">Your dashboard</Link></li>
           </ul>
         </div>

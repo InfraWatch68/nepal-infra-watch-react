@@ -9,8 +9,11 @@ import { ArrowRight, Activity, MapPinned, ShieldCheck, BarChart3, Sparkles, File
 import { FlowButton } from '@/components/ui/flow-button';
 import { useEffect, useState } from 'react';
 import { supabase } from '@/integrations/supabase/client';
+import { useAuth } from '@/hooks/useAuth';
 
 export default function Home() {
+  const { user } = useAuth();
+  const submitHref = user ? '/dashboard/submit' : '/auth?mode=signup&next=/dashboard/submit';
   const [recent, setRecent] = useState<any[]>([]);
   const [stats, setStats] = useState({ total: 0, inProgress: 0, completed: 0, delayed: 0 });
   const [brief, setBrief] = useState<{ headline: string; created_at: string } | null>(null);
@@ -132,7 +135,7 @@ export default function Home() {
             <FileSearch className="h-10 w-10 mx-auto mb-3 opacity-40" />
             No approved projects yet. Be the first to submit one.
             <div className="mt-4">
-              <Button asChild><Link to="/auth?mode=signup">Submit a project</Link></Button>
+              <Button asChild><Link to={submitHref}>Submit a project</Link></Button>
             </div>
           </Card>
         ) : (
@@ -157,7 +160,7 @@ export default function Home() {
               Add it with sources and coordinates. Our reviewers verify within 48 hours and the project becomes part of the public record.
             </p>
             <Button size="lg" className="bg-accent hover:bg-accent/90 text-accent-foreground" asChild>
-              <Link to="/auth?mode=signup">Submit a project</Link>
+              <Link to={submitHref}>Submit a project</Link>
             </Button>
           </div>
           <AdSlot slotKey="home_cta" variant="sidebar" />

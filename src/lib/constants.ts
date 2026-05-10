@@ -1,7 +1,19 @@
+// Thematic sector — broad funding/policy classification. Distinct from
+// `project_type` which describes the physical artifact (Road, Bridge, …).
 export const SECTORS = [
-  'Roads & Highways', 'Bridges', 'Hydropower', 'Airports', 'Railways',
-  'Water Supply', 'Irrigation', 'Healthcare', 'Education', 'Telecom',
-  'Urban Development', 'Tourism', 'Energy Transmission'
+  'Transport', 'Energy', 'Water & Sanitation', 'Agriculture & Irrigation',
+  'Health', 'Education', 'Telecom', 'Urban Development', 'Tourism',
+] as const;
+
+// Physical artifact / project class — used by the Submit form and the AI
+// discovery pipeline. Multiple types map into one sector (e.g. Road / Bridge /
+// Tunnel / Airport / Railway are all Transport).
+export const PROJECT_TYPES = [
+  'Road', 'Bridge', 'Tunnel', 'Cable car', 'Airport', 'Railway',
+  'Hydropower', 'Solar', 'Wind', 'Transmission line', 'Substation',
+  'Drinking water', 'Sewerage', 'Treatment plant', 'Reservoir', 'Irrigation canal',
+  'Hospital', 'School', 'Stadium', 'Market', 'Office building', 'Telecom tower',
+  'Other',
 ] as const;
 
 export const PROVINCES = [

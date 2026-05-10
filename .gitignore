@@ -18,6 +18,9 @@ dist-ssr
 !.env.example
 supabase/.env
 
+# Local working notes (not for upstream)
+.claude/feature_backlog.md
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

@@ -10,6 +10,8 @@ import { Badge } from '@/components/ui/badge';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Plus, FileText, CheckCircle2, Clock, AlertCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { UserBadge } from '@/components/UserBadge';
+import { ReviewHistoryIcon } from '@/components/ReviewHistoryIcon';
 
 const APPROVAL_COLORS: Record<string, string> = {
   pending: 'bg-warning/15 text-warning',
@@ -56,8 +58,9 @@ export default function Dashboard() {
             </Avatar>
             <div className="min-w-0">
               <p className="text-xs uppercase tracking-[0.2em] font-mono text-accent mb-1">Your workspace</p>
-              <h1 className="font-display text-3xl md:text-4xl font-bold truncate">
+              <h1 className="font-display text-3xl md:text-4xl font-bold truncate flex items-center gap-2">
                 {profile?.full_name || user.email?.split('@')[0] || 'Welcome'}
+                <UserBadge userId={user.id} />
               </h1>
               {profile?.organization && (
                 <p className="text-sm text-muted-foreground mt-0.5 truncate">{profile.organization}</p>
@@ -92,14 +95,22 @@ export default function Dashboard() {
               {mine.map(p => (
                 <div key={p.id} className="p-5 flex items-center justify-between gap-4 hover:bg-muted/30">
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 mb-1">
+                    <div className="flex items-center gap-2 mb-1 flex-wrap">
                       <Badge className={cn("text-[10px] uppercase tracking-wider font-mono", APPROVAL_COLORS[p.approval_status])}>{p.approval_status.replace('_', ' ')}</Badge>
                       <span className="text-xs text-muted-foreground">{p.sector} · {new Date(p.created_at).toLocaleDateString()}</span>
+                      <ReviewHistoryIcon targetTable="projects" targetId={p.id} />
                     </div>
                     <div className="font-semibold truncate">{p.title}</div>
                     {p.review_notes && <p className="text-xs text-muted-foreground mt-1">Reviewer note: {p.review_notes}</p>}
                   </div>
-                  <Button variant="outline" size="sm" asChild><Link to={`/projects/${p.slug}`}>View</Link></Button>
+                  <div className="flex gap-2 shrink-0">
+                    {(p.approval_status === 'pending' || p.approval_status === 'changes_requested') && (
+                      <Button variant="outline" size="sm" asChild>
+                        <Link to={`/dashboard/submit?edit=${p.id}`}>Edit</Link>
+                      </Button>
+                    )}
+                    <Button variant="outline" size="sm" asChild><Link to={`/projects/${p.slug}`}>View</Link></Button>
+                  </div>
                 </div>
               ))}
             </div>

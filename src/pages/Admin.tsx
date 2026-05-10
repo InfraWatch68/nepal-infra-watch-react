@@ -22,6 +22,10 @@ import { Shield, Megaphone, Sparkles, Loader2, ExternalLink, Users as UsersIcon 
 import { cn } from '@/lib/utils';
 import { SECTORS, PROVINCES, districtsFor } from '@/lib/constants';
 import { DetailsModerationTab } from '@/components/admin/DetailsModerationTab';
+import { VerifyDialog } from '@/components/admin/VerifyDialog';
+import { SherlockManager } from '@/components/admin/SherlockManager';
+import { AdminRemovalPanel } from '@/components/admin/AdminRemovalPanel';
+import { ReviewHistoryIcon } from '@/components/ReviewHistoryIcon';
 
 const APPROVAL_COLORS: Record<string, string> = {
   pending: 'bg-warning/15 text-warning',
@@ -29,6 +33,18 @@ const APPROVAL_COLORS: Record<string, string> = {
   rejected: 'bg-destructive/15 text-destructive',
   changes_requested: 'bg-info/15 text-info',
 };
+
+// Per-status status-light dot — surfaces queue state at a glance.
+// 🟢 approved · 🔵 changes_requested · 🟠 pending · 🔴 rejected
+const APPROVAL_DOT: Record<string, string> = {
+  approved: 'bg-success',
+  changes_requested: 'bg-info',
+  pending: 'bg-warning',
+  rejected: 'bg-destructive',
+};
+function StatusDot({ status }: { status: string }) {
+  return <span className={cn('inline-block h-2.5 w-2.5 rounded-full shrink-0', APPROVAL_DOT[status] ?? 'bg-muted')} aria-label={status} />;
+}
 
 // supabase.functions.invoke returns a generic "non-2xx status" message and
 // stashes the actual response on error.context. Pull the JSON body so the
@@ -47,9 +63,9 @@ async function extractFnError(error: any): Promise<string> {
   return error.message ?? 'Unknown error';
 }
 
-const AiBadge = () => (
+const AiBadge = ({ tag }: { tag?: string | null }) => (
   <Badge variant="outline" className="text-[10px] uppercase tracking-wider font-mono border-accent text-accent">
-    <Sparkles className="h-3 w-3 mr-1" /> AI
+    <Sparkles className="h-3 w-3 mr-1" /> {tag || 'AI'}
   </Badge>
 );
 
@@ -71,6 +87,7 @@ export default function Admin() {
   const [globalProvince, setGlobalProvince] = useState<string>('');
   const [globalSector, setGlobalSector] = useState<string>('');
   const [busyGlobal, setBusyGlobal] = useState<string | null>(null);
+  const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number; current?: string } | null>(null);
 
   const refresh = async () => {
     const { data } = await supabase.from('projects').select('*').order('created_at', { ascending: false });
@@ -134,6 +151,25 @@ export default function Admin() {
     </div>
   );
 
+  // Reviewers (non-admin/non-coadmin) get a 24-hour publish delay so admins can
+  // override before the row goes public. Admin and coadmin publishes are instant.
+  const isInstantPublisher = isAdmin || isCoadmin;
+  const computePublishedAt = (approval: string): string | null => {
+    if (approval !== 'approved') return null;
+    return isInstantPublisher
+      ? new Date().toISOString()
+      : new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  };
+  const logReview = async (target_table: string, target_id: string, action: string, notes?: string) => {
+    const role = isAdmin ? 'admin' : isCoadmin ? 'coadmin' : 'reviewer';
+    await supabase.from('project_reviews').insert({
+      target_table, target_id: String(target_id),
+      reviewer_id: user.id, reviewer_role: role,
+      action, notes: notes ?? null,
+      was_admin: isInstantPublisher,
+    });
+  };
+
   const review = async (
     id: string,
     approval_status: string,
@@ -145,8 +181,14 @@ export default function Admin() {
     if (review_notes !== undefined) update.review_notes = review_notes;
     if (status) update.status = status;
     if (approval_status === 'approved' && !status) update.status = 'approved';
+    update.published_at = computePublishedAt(approval_status);
     const { error } = await supabase.from('projects').update(update).eq('id', id);
-    if (error) toast.error(error.message); else { toast.success('Updated'); refresh(); }
+    if (error) return toast.error(error.message);
+    await logReview('projects', id, approval_status, review_notes);
+    toast.success(approval_status === 'approved' && !isInstantPublisher
+      ? 'Approved — will publish in 24h (admin can override)'
+      : 'Updated');
+    refresh();
   };
 
   const reviewUpdate = async (
@@ -159,8 +201,12 @@ export default function Admin() {
     if (notes !== undefined) upd.review_notes = notes;
     if (approval === 'approved') upd.published = true;
     if (approval === 'rejected') upd.published = false;
+    upd.published_at = computePublishedAt(approval);
     const { error } = await supabase.from('project_updates').update(upd).eq('id', id);
-    if (error) toast.error(error.message); else { toast.success('Update reviewed'); refresh(); }
+    if (error) return toast.error(error.message);
+    await logReview('project_updates', id, approval, notes);
+    toast.success(approval === 'approved' && !isInstantPublisher ? 'Approved — publish in 24h' : 'Update reviewed');
+    refresh();
   };
 
   const reviewSource = async (
@@ -173,8 +219,23 @@ export default function Admin() {
     if (notes !== undefined) upd.review_notes = notes;
     if (approval === 'approved') upd.verified = true;
     if (approval === 'rejected') upd.verified = false;
+    upd.published_at = computePublishedAt(approval);
     const { error } = await supabase.from('project_sources').update(upd).eq('id', id);
-    if (error) toast.error(error.message); else { toast.success('Source reviewed'); refresh(); }
+    if (error) return toast.error(error.message);
+    await logReview('project_sources', id, approval, notes);
+    toast.success(approval === 'approved' && !isInstantPublisher ? 'Approved — publish in 24h' : 'Source reviewed');
+    refresh();
+  };
+
+  // Admin override: instantly publish a row that was approved by a reviewer
+  // and is still in the 24-hour delay window.
+  const pushNow = async (target_table: string, id: string) => {
+    if (!isInstantPublisher) return toast.error('Only admin or coadmin can push immediately');
+    const { error } = await supabase.from(target_table as any).update({ published_at: new Date().toISOString() }).eq('id', id);
+    if (error) return toast.error(error.message);
+    await logReview(target_table, id, 'edited', 'Push to live (admin override)');
+    toast.success('Pushed to live');
+    refresh();
   };
 
   const runDiscover = async () => {
@@ -249,6 +310,44 @@ export default function Admin() {
     setBusyGlobal(null);
     if (error) return toast.error(await extractFnError(error));
     toast.success(`Global brief published (${data?.scope ?? 'global'})`);
+  };
+
+  const runBulkComprehensive = async () => {
+    // Pick approved projects that have never been analysed, or whose last
+    // analysis is older than 30 days. Cap at 10 to keep one run reasonable.
+    const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: stale, error } = await supabase
+      .from('projects')
+      .select('id, title, last_comprehensive_analysis_at')
+      .eq('approval_status', 'approved')
+      .or(`last_comprehensive_analysis_at.is.null,last_comprehensive_analysis_at.lt.${cutoff}`)
+      .order('last_comprehensive_analysis_at', { ascending: true, nullsFirst: true })
+      .limit(10);
+    if (error) return toast.error(error.message);
+    if (!stale || stale.length === 0) return toast.success('No stale projects — all approved projects are up-to-date.');
+
+    setBulkProgress({ done: 0, total: stale.length });
+    let okCount = 0;
+    const errs: string[] = [];
+    for (let i = 0; i < stale.length; i++) {
+      const p = stale[i];
+      setBulkProgress({ done: i, total: stale.length, current: p.title });
+      try {
+        const { error: fnErr } = await supabase.functions.invoke('ai-comprehensive-analysis', {
+          body: { projectId: Number(p.id) },
+        });
+        if (fnErr) errs.push(`${p.title}: ${await extractFnError(fnErr)}`);
+        else okCount += 1;
+      } catch (e: any) {
+        errs.push(`${p.title}: ${e.message ?? 'unknown'}`);
+      }
+      // Pace between projects to stay under Mistral RPM. ~6s gives ~10 req/min budget.
+      if (i < stale.length - 1) await new Promise(r => setTimeout(r, 6000));
+    }
+    setBulkProgress(null);
+    toast.success(`Comprehensive analysis: ${okCount}/${stale.length} succeeded${errs.length ? `, ${errs.length} errors` : ''}`);
+    if (errs.length) console.warn('Bulk comprehensive errors:', errs);
+    refresh();
   };
 
   const runFetchNewsAll = async () => {
@@ -374,6 +473,24 @@ export default function Admin() {
               </Button>
             </div>
           </div>
+
+          <SherlockManager />
+
+          <div className="space-y-2 pt-3 border-t border-accent/20">
+            <p className="text-xs text-muted-foreground">
+              <span className="font-semibold text-foreground">Bulk comprehensive analysis.</span>{' '}
+              Runs the 5-bucket source extraction on up to 10 approved projects whose last analysis is missing or older than 30 days.
+              Each project takes ~30s. Inserted rows land as pending detail moderation.
+            </p>
+            <div className="flex gap-2 flex-wrap items-center">
+              <Button disabled={!!bulkProgress} onClick={runBulkComprehensive} variant="outline">
+                {bulkProgress ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                {bulkProgress
+                  ? `Analyzing ${bulkProgress.done + 1} / ${bulkProgress.total}${bulkProgress.current ? ` — ${bulkProgress.current.slice(0, 40)}…` : ''}`
+                  : 'Run on stale approved projects'}
+              </Button>
+            </div>
+          </div>
         </Card>
 
         <Tabs defaultValue="queue">
@@ -393,6 +510,8 @@ export default function Admin() {
               onReview={review}
               onFetchNews={fetchNews}
               onGenerateBrief={generateBrief}
+              onPushNow={pushNow}
+              canPushNow={isInstantPublisher}
               busyRow={busyRow}
             />
           </TabsContent>
@@ -402,6 +521,8 @@ export default function Admin() {
               onReview={review}
               onFetchNews={fetchNews}
               onGenerateBrief={generateBrief}
+              onPushNow={pushNow}
+              canPushNow={isInstantPublisher}
               busyRow={busyRow}
             />
           </TabsContent>
@@ -415,7 +536,8 @@ export default function Admin() {
             <DetailsModerationTab />
           </TabsContent>
           {isAdmin && (
-            <TabsContent value="users" className="mt-4">
+            <TabsContent value="users" className="mt-4 space-y-4">
+              <AdminRemovalPanel admins={users.filter((u: any) => (u.roles ?? []).includes('admin')).map((u: any) => ({ id: u.id, full_name: u.full_name, email: u.email }))} />
               <UsersManager users={users} currentUserId={user.id} onSetRole={setUserRole} />
             </TabsContent>
           )}
@@ -431,25 +553,40 @@ export default function Admin() {
   );
 }
 
-function ProjectList({ projects, onReview, onFetchNews, onGenerateBrief, busyRow }: any) {
+function ProjectList({ projects, onReview, onFetchNews, onGenerateBrief, onPushNow, busyRow, canPushNow }: any) {
   if (projects.length === 0) return <Card className="p-12 text-center text-muted-foreground">Queue empty.</Card>;
   return (
     <Card>
       <div className="divide-y">
         {projects.map((p: any) => {
           const isApproved = p.approval_status === 'approved';
+          const scheduled = p.published_at && new Date(p.published_at) > new Date();
           return (
             <div key={p.id} className="p-4 flex items-start justify-between gap-4">
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2 mb-1 flex-wrap">
+                  <StatusDot status={p.approval_status} />
                   <Badge className={cn("text-[10px] uppercase tracking-wider font-mono", APPROVAL_COLORS[p.approval_status])}>{p.approval_status.replace('_', ' ')}</Badge>
-                  {p.submitted_by_ai && <AiBadge />}
+                  {scheduled && (
+                    <Badge variant="outline" className="text-[10px] uppercase tracking-wider font-mono border-info text-info">
+                      Publishes {new Date(p.published_at).toLocaleString()}
+                    </Badge>
+                  )}
+                  {p.submitted_by_ai && <AiBadge tag={p.ai_tag} />}
                   <span className="text-xs text-muted-foreground">{p.sector} · {p.province ?? '—'} · {new Date(p.created_at).toLocaleDateString()}</span>
+                  <ReviewHistoryIcon targetTable="projects" targetId={p.id} />
                 </div>
                 <Link to={`/projects/${p.slug}`} className="font-semibold hover:text-accent">{p.title}</Link>
                 <p className="text-xs text-muted-foreground line-clamp-2 mt-1">{p.description}</p>
               </div>
               <div className="flex gap-2 shrink-0 flex-wrap justify-end">
+                <Button size="sm" variant="outline" asChild>
+                  <Link to={`/projects/${p.slug}`} target="_blank" rel="noreferrer">View</Link>
+                </Button>
+                <VerifyDialog projectId={p.id} projectTitle={p.title} />
+                {scheduled && canPushNow && (
+                  <Button size="sm" variant="default" onClick={() => onPushNow('projects', p.id)}>Push now</Button>
+                )}
                 {isApproved && (
                   <>
                     <Button size="sm" variant="outline" disabled={busyRow === p.id + ':news'} onClick={() => onFetchNews(p.id)}>
@@ -461,7 +598,7 @@ function ProjectList({ projects, onReview, onFetchNews, onGenerateBrief, busyRow
                   </>
                 )}
                 <Dialog>
-                  <DialogTrigger asChild><Button size="sm" variant="outline">Review</Button></DialogTrigger>
+                  <DialogTrigger asChild><Button size="sm">Review</Button></DialogTrigger>
                   <ReviewDialog project={p} onReview={onReview} />
                 </Dialog>
               </div>
@@ -487,6 +624,7 @@ function ReviewDialog({ project, onReview }: any) {
   );
   const [notes, setNotes] = useState(project.review_notes ?? '');
   const [status, setStatus] = useState(project.status);
+  const [isRastraGaurav, setIsRastraGaurav] = useState<boolean>(!!project.is_rastra_gaurav);
 
   const collectEdits = (): Record<string, any> => {
     const edits: Record<string, any> = {
@@ -497,6 +635,7 @@ function ReviewDialog({ project, onReview }: any) {
       district: district.trim() || null,
       contractor: contractor.trim() || null,
       implementing_agency: agency.trim() || null,
+      is_rastra_gaurav: isRastraGaurav,
     };
     if (budget === '') edits.budget_npr = null;
     else edits.budget_npr = Number(budget);
@@ -577,6 +716,13 @@ function ReviewDialog({ project, onReview }: any) {
               </SelectContent>
             </Select>
           </div>
+        </div>
+        <div className="flex items-center justify-between border rounded-md px-3 py-2">
+          <div>
+            <Label className="cursor-pointer">Rastra Gaurav (national-pride) project</Label>
+            <p className="text-xs text-muted-foreground">Pin a flag-bearer project for the Browse filter chip and homepage rotation.</p>
+          </div>
+          <Switch checked={isRastraGaurav} onCheckedChange={setIsRastraGaurav} />
         </div>
         <div>
           <Label>Reviewer notes</Label>

@@ -12,6 +12,7 @@ import { useAuth } from '@/hooks/useAuth';
 export default function Auth() {
   const [params] = useSearchParams();
   const initialMode = params.get('mode') === 'signup' ? 'signup' : 'signin';
+  const next = params.get('next') || '/dashboard';
   const [mode, setMode] = useState<'signin' | 'signup'>(initialMode);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -20,7 +21,7 @@ export default function Auth() {
   const nav = useNavigate();
   const { user } = useAuth();
 
-  useEffect(() => { if (user) nav('/dashboard'); }, [user, nav]);
+  useEffect(() => { if (user) nav(next); }, [user, nav, next]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -40,7 +41,7 @@ export default function Auth() {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
         toast.success('Welcome back.');
-        nav('/dashboard');
+        nav(next);
       }
     } catch (err: any) {
       toast.error(err.message ?? 'Authentication failed');

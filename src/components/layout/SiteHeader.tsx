@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { supabase } from '@/integrations/supabase/client';
+import { UserBadge } from '@/components/UserBadge';
 
 export function SiteHeader() {
   const { user, isReviewer, signOut } = useAuth();
@@ -61,11 +62,12 @@ export function SiteHeader() {
             <TooltipProvider delayDuration={150}>
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <Link to="/dashboard" aria-label={displayName} className="mr-1">
+                  <Link to="/dashboard" aria-label={displayName} className="mr-1 flex items-center gap-1.5">
                     <Avatar className="h-9 w-9 ring-2 ring-border hover:ring-accent transition">
                       {profile?.avatar_url && <AvatarImage src={profile.avatar_url} alt={displayName} />}
                       <AvatarFallback className="bg-accent/15 text-accent text-xs font-semibold">{initials}</AvatarFallback>
                     </Avatar>
+                    <UserBadge userId={user.id} compact />
                   </Link>
                 </TooltipTrigger>
                 <TooltipContent>{displayName}</TooltipContent>

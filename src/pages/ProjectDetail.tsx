@@ -19,6 +19,7 @@ import { formatNPR } from '@/lib/parseCoords';
 import { cn } from '@/lib/utils';
 import { ProjectMap } from '@/components/ProjectMap';
 import { ComprehensiveSections } from '@/components/ComprehensiveSections';
+import { ReviewHistoryIcon } from '@/components/ReviewHistoryIcon';
 import { toast } from 'sonner';
 
 export default function ProjectDetail() {
@@ -31,7 +32,7 @@ export default function ProjectDetail() {
   const [loadingAi, setLoadingAi] = useState(false);
   const [aiError, setAiError] = useState<string>('');
 
-  const loadUpdates = useCallback(async (projectId: string) => {
+  const loadUpdates = useCallback(async (projectId: string | number) => {
     const { data } = await supabase
       .from('project_updates').select('*')
       .eq('project_id', projectId)
@@ -97,6 +98,7 @@ export default function ProjectDetail() {
                 {p.province && <Badge variant="outline" className="border-primary-foreground/30 text-primary-foreground">{p.province}</Badge>}
               </div>
               <h1 className="font-display text-4xl md:text-5xl font-bold leading-tight text-balance">{p.title}</h1>
+              <div className="text-primary-foreground/70"><ReviewHistoryIcon targetTable="projects" targetId={p.id} /></div>
               <p className="text-lg text-primary-foreground/80 leading-relaxed max-w-3xl">{p.description}</p>
             </div>
             <Card className="bg-primary-glow/40 backdrop-blur border-primary-foreground/10 text-primary-foreground p-5 space-y-3">
@@ -223,11 +225,7 @@ export default function ProjectDetail() {
         <aside className="space-y-6">
           <AdSlot slotKey="project_sidebar" variant="sidebar" />
           <PostUpdateForm projectId={p.id} onPosted={() => loadUpdates(p.id)} />
-          <Card className="p-5">
-            <h3 className="font-display text-lg font-semibold mb-2">Spotted an issue?</h3>
-            <p className="text-sm text-muted-foreground mb-3">Submit corrections or additional sources for this project.</p>
-            <Button variant="outline" size="sm" className="w-full" asChild><Link to="/dashboard">Contribute</Link></Button>
-          </Card>
+          <ReportIssueForm projectId={p.id} projectTitle={p.title} />
         </aside>
       </div>
 
@@ -253,7 +251,7 @@ const updateSchema = z.object({
   content: z.string().trim().min(10).max(5000),
 });
 
-function PostUpdateForm({ projectId, onPosted }: { projectId: string; onPosted: () => void }) {
+function PostUpdateForm({ projectId, onPosted }: { projectId: string | number; onPosted: () => void }) {
   const { user } = useAuth();
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
@@ -293,6 +291,65 @@ function PostUpdateForm({ projectId, onPosted }: { projectId: string; onPosted: 
           {busy ? 'Submitting...' : 'Submit for review'}
         </Button>
         <p className="text-xs text-muted-foreground">Updates appear publicly after a reviewer approves them.</p>
+      </form>
+    </Card>
+  );
+}
+
+const issueSchema = z.object({
+  title: z.string().trim().min(4).max(200),
+  content: z.string().trim().min(10).max(5000),
+});
+
+function ReportIssueForm({ projectId, projectTitle }: { projectId: string | number; projectTitle: string }) {
+  const { user } = useAuth();
+  const [title, setTitle] = useState('');
+  const [content, setContent] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  if (!user) {
+    return (
+      <Card className="p-5">
+        <h3 className="font-display text-lg font-semibold mb-2">Spotted an issue?</h3>
+        <p className="text-sm text-muted-foreground mb-3">Sign in to flag a correction or missing source for "{projectTitle}".</p>
+        <Button variant="outline" size="sm" className="w-full" asChild>
+          <Link to={`/auth?mode=signup&next=/projects/${projectTitle}`}>Sign in to report</Link>
+        </Button>
+      </Card>
+    );
+  }
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const parsed = issueSchema.safeParse({ title, content });
+    if (!parsed.success) return toast.error(parsed.error.issues[0].message);
+    setBusy(true);
+    const { error } = await supabase.from('project_updates').insert({
+      project_id: projectId,
+      author_id: user.id,
+      title: parsed.data.title,
+      content: parsed.data.content,
+      update_type: 'issue',
+      published: false,
+      approval_status: 'pending',
+      submitted_by_ai: false,
+    });
+    setBusy(false);
+    if (error) return toast.error(error.message);
+    toast.success('Issue reported — pending review');
+    setTitle(''); setContent('');
+  };
+
+  return (
+    <Card className="p-5 border-warning/40">
+      <h3 className="font-display text-lg font-semibold mb-1">Spotted an issue?</h3>
+      <p className="text-sm text-muted-foreground mb-3">Flag a correction, missing source, or factual error for this project.</p>
+      <form onSubmit={submit} className="space-y-2">
+        <Input placeholder="Issue title" maxLength={200} value={title} onChange={e => setTitle(e.target.value)} />
+        <Textarea rows={4} maxLength={5000} placeholder="Describe the issue. Include a source URL if you have one." value={content} onChange={e => setContent(e.target.value)} />
+        <Button type="submit" disabled={busy} size="sm" variant="outline" className="w-full">
+          {busy ? 'Submitting…' : 'Report issue'}
+        </Button>
       </form>
     </Card>
   );

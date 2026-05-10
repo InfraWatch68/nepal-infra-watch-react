@@ -10,6 +10,14 @@ import { formatNPR } from '@/lib/parseCoords';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 
+// Severity badge oval — colored fill, not just border. Used in Risks tab + admin moderation row summary.
+const SEVERITY_BADGE: Record<string, string> = {
+  low:      'bg-muted/60 text-muted-foreground border-muted',
+  medium:   'bg-warning/20 text-warning border-warning/40',
+  high:     'bg-destructive/15 text-destructive border-destructive/40',
+  critical: 'bg-destructive text-destructive-foreground border-destructive',
+};
+
 type Props = { projectId: number | string; projectTitle?: string };
 
 export function ComprehensiveSections({ projectId, projectTitle }: Props) {
@@ -109,7 +117,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               </div>
               {f.lender_terms && <p className="text-xs mt-2 text-muted-foreground">Terms: {f.lender_terms}</p>}
               {f.notes && <p className="text-sm mt-1">{f.notes}</p>}
-              <SourceLink url={f.source_url} />
+              <SourceLink url={f.source_url} sources={f.sources} />
             </Card>
           ))}
         </TabsContent>
@@ -148,7 +156,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
                 {s.website && <div><a href={s.website} target="_blank" rel="noreferrer" className="hover:text-accent inline-flex items-center gap-1">Website <ExternalLink className="h-3 w-3" /></a></div>}
               </div>
               {s.notes && <p className="text-sm mt-2">{s.notes}</p>}
-              <SourceLink url={s.source_url} />
+              <SourceLink url={s.source_url} sources={s.sources} />
             </Card>
           ))}
         </TabsContent>
@@ -163,7 +171,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               <div className="flex items-start justify-between gap-3 mb-1">
                 <h4 className="font-semibold">{r.title}</h4>
                 <div className="flex gap-1.5 shrink-0">
-                  <Badge variant="outline" className="text-[10px] uppercase font-mono">{r.severity}</Badge>
+                  <Badge className={cn('text-[10px] uppercase font-mono border', SEVERITY_BADGE[r.severity] ?? SEVERITY_BADGE.low)}>{r.severity}</Badge>
                   <Badge variant="outline" className="text-[10px] uppercase font-mono">{r.status}</Badge>
                 </div>
               </div>
@@ -171,7 +179,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
                 {r.category}{r.reported_at && ` · Reported ${r.reported_at}`}{r.resolved_at && ` · Resolved ${r.resolved_at}`}
               </div>
               {r.description && <p className="text-sm mt-1">{r.description}</p>}
-              <SourceLink url={r.source_url} />
+              <SourceLink url={r.source_url} sources={r.sources} />
             </Card>
           ))}
         </TabsContent>
@@ -190,7 +198,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               </div>
               {i.methodology && <p className="text-xs mt-2 text-muted-foreground">Method: {i.methodology}</p>}
               {i.notes && <p className="text-sm mt-1">{i.notes}</p>}
-              <SourceLink url={i.source_url} />
+              <SourceLink url={i.source_url} sources={i.sources} />
             </Card>
           ))}
         </TabsContent>
@@ -216,7 +224,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
                 {p.contract_awarded_at && <span>Awarded: {p.contract_awarded_at}</span>}
               </div>
               {p.notes && <p className="text-sm mt-2">{p.notes}</p>}
-              <SourceLink url={p.source_url} />
+              <SourceLink url={p.source_url} sources={p.sources} />
             </Card>
           ))}
         </TabsContent>
@@ -243,7 +251,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
                   View document <ExternalLink className="h-3 w-3" />
                 </a>
               )}
-              <SourceLink url={c.source_url} />
+              <SourceLink url={c.source_url} sources={c.sources} />
             </Card>
           ))}
         </TabsContent>
@@ -256,11 +264,31 @@ function Empty({ msg }: { msg: string }) {
   return <div className="p-8 text-center text-muted-foreground text-sm border rounded-md">{msg}</div>;
 }
 
-function SourceLink({ url }: { url?: string | null }) {
-  if (!url) return null;
+function SourceLink({ url, sources }: { url?: string | null; sources?: string[] | null }) {
+  // Prefer the merged `sources` array when populated; fall back to single url.
+  const list: string[] = Array.isArray(sources) && sources.length > 0
+    ? sources
+    : (url ? [url] : []);
+  if (list.length === 0) return null;
+  if (list.length === 1) {
+    return (
+      <a href={list[0]} target="_blank" rel="noreferrer" className="text-[10px] text-muted-foreground hover:text-accent inline-flex items-center gap-1 font-mono mt-2">
+        Source <ExternalLink className="h-2.5 w-2.5" />
+      </a>
+    );
+  }
   return (
-    <a href={url} target="_blank" rel="noreferrer" className="text-[10px] text-muted-foreground hover:text-accent inline-flex items-center gap-1 font-mono mt-2">
-      Source <ExternalLink className="h-2.5 w-2.5" />
-    </a>
+    <div className="flex flex-wrap gap-2 mt-2">
+      <span className="text-[10px] text-muted-foreground font-mono">Sources ({list.length}):</span>
+      {list.map((u, i) => {
+        let host = u;
+        try { host = new URL(u).hostname.replace(/^www\./, ''); } catch { /* keep raw */ }
+        return (
+          <a key={u} href={u} target="_blank" rel="noreferrer" className="text-[10px] text-muted-foreground hover:text-accent inline-flex items-center gap-0.5 font-mono">
+            [{i + 1}] {host} <ExternalLink className="h-2 w-2" />
+          </a>
+        );
+      })}
+    </div>
   );
 }

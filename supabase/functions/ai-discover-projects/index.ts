@@ -8,11 +8,18 @@ const corsHeaders = {
 };
 
 const SECTORS = [
-  "Roads & Highways", "Bridges", "Hydropower", "Airports", "Railways",
-  "Water Supply", "Irrigation", "Healthcare", "Education", "Telecom",
-  "Urban Development", "Tourism", "Energy Transmission",
+  "Transport", "Energy", "Water & Sanitation", "Agriculture & Irrigation",
+  "Health", "Education", "Telecom", "Urban Development", "Tourism",
 ];
 const PROVINCES = ["Koshi", "Madhesh", "Bagmati", "Gandaki", "Lumbini", "Karnali", "Sudurpashchim"];
+const PROJECT_TYPES = [
+  "Road","Bridge","Tunnel","Cable car","Airport","Railway",
+  "Hydropower","Solar","Wind","Transmission line","Substation",
+  "Drinking water","Sewerage","Treatment plant","Reservoir","Irrigation canal",
+  "Hospital","School","Stadium","Market","Office building","Telecom tower","Other",
+];
+const STATUS_VALUES = ["proposed","approved","in_progress","delayed","completed","cancelled"];
+const ESIA_VALUES = ["not_started","in_progress","iee_approved","eia_approved","rejected","exempt"];
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), {
@@ -148,6 +155,8 @@ serve(async (req) => {
     const topic: string | undefined = body.topic?.toString().trim() || undefined;
     const region: string | undefined = body.region?.toString().trim() || undefined;
     const maxResults = Math.min(Math.max(Number(body.maxResults) || 5, 1), 10);
+    // Optional tag for autonomous tools (e.g. "Sherlock") — surfaces in admin queue.
+    const aiTag: string | null = body.aiTag?.toString().trim().slice(0, 40) || null;
 
     const query = ["Nepal infrastructure project", topic ?? "", region ?? ""].filter(Boolean).join(" ");
 
@@ -177,22 +186,42 @@ serve(async (req) => {
     // Log which key was used (index only — never log the key value).
     if (tavilyKeys.length > 1) console.log(`Tavily: used key index ${keyIndex} of ${tavilyKeys.length}`);
 
-    const sysPrompt = `You extract a single Nepal infrastructure project record from a news article.
+    const sysPrompt = `You extract a single Nepal infrastructure project record from a news article and write a thorough public-facing entry.
 Return ONLY a JSON object (no prose, no markdown, no code fence) matching this schema:
 {
-  "title": string,
+  "title": string,                                    // <= 200 chars, the project's actual name
   "sector": one of ${JSON.stringify(SECTORS)},
+  "project_type": one of ${JSON.stringify(PROJECT_TYPES)} or null,
   "province": one of ${JSON.stringify(PROVINCES)} or null,
   "district": string or null,
-  "description": string,
+  "municipality": string or null,                     // municipality / metropolitan / RM
+  "ward": number or null,                             // 0-99
+  "location_text": string or null,                    // free-text description (e.g. "Kalanki–Naubise section, 27 km")
+  "description": string,                              // SEE RULES BELOW
   "contractor": string or null,
   "implementing_agency": string or null,
-  "budget_npr": number or null,
+  "budget_npr": number or null,                       // raw number, no commas
+  "funding_committed_npr": number or null,
+  "estimated_beneficiaries": number or null,
+  "procurement_method": string or null,               // e.g. "ICB (international)", "NCB (national)", "Direct"
+  "esia_status": one of ${JSON.stringify(ESIA_VALUES)} or null,
   "start_date": "YYYY-MM-DD" or null,
-  "expected_completion": "YYYY-MM-DD" or null
+  "expected_completion": "YYYY-MM-DD" or null,
+  "status": one of ${JSON.stringify(STATUS_VALUES)}   // best inference from article (proposed if unclear)
 }
 If the article is NOT about a specific infrastructure project in Nepal, return the literal string "null".
-Use only facts from the article. Do NOT invent. Title <= 200 chars, description 1-3 sentences.`;
+
+DESCRIPTION RULES — this is the most important field:
+- Write 3-6 substantive paragraphs (~250-600 words total).
+- Cover: scope/scale, geography, stakeholders, timeline, financing, current status, and any reported issues, delays, beneficiaries, environmental/social context, and political or economic significance.
+- Use ONLY facts the article actually contains. If a detail isn't in the article, omit it — DO NOT invent. The reader will see the source URL alongside.
+- Plain prose. No markdown. No bullet points. Neutral tone. Treat the project name as an opaque label — do NOT pull in outside knowledge about real-world Nepali projects with similar names.
+
+Other rules:
+- Title is the project's actual name, not the article's headline (unless they match).
+- Be conservative on dates: only fill if the article gives a specific date.
+- Treat 1 lakh = 100,000 NPR and 1 crore = 10,000,000 NPR; convert reported figures to raw NPR.
+- If the article mentions multiple projects, pick the most prominent one. The dedupe layer will skip exact title matches.`;
 
     for (let idx = 0; idx < results.length; idx++) {
       const r = results[idx];
@@ -204,7 +233,7 @@ Use only facts from the article. Do NOT invent. Title <= 200 chars, description 
       try {
         const ai = await callChatModel([
           { role: "system", content: sysPrompt },
-          { role: "user", content: `Title: ${r.title}\nURL: ${r.url}\n\nArticle:\n${r.content.slice(0, 1500)}` },
+          { role: "user", content: `Title: ${r.title}\nURL: ${r.url}\n\nArticle:\n${r.content.slice(0, 4000)}` },
         ]);
         if (!ai.ok) {
           errors.push(`AI ${ai.status}: ${ai.error}`);
@@ -249,24 +278,36 @@ Use only facts from the article. Do NOT invent. Title <= 200 chars, description 
         }
 
         const slug = slugify(parsed.title) + "-" + crypto.randomUUID().slice(0, 4);
+        const ward = (typeof parsed.ward === "number" && parsed.ward >= 0 && parsed.ward <= 99) ? parsed.ward : null;
+        const status = STATUS_VALUES.includes(parsed.status) ? parsed.status : "proposed";
+        const esia = ESIA_VALUES.includes(parsed.esia_status) ? parsed.esia_status : null;
         const { data: proj, error: pErr } = await admin
           .from("projects")
           .insert({
             title: String(parsed.title).slice(0, 200),
             slug,
             description: parsed.description ?? null,
-            sector: SECTORS.includes(parsed.sector) ? parsed.sector : "Urban Development",
+            sector: SECTORS.includes(parsed.sector) ? parsed.sector : "Transport",
+            project_type: PROJECT_TYPES.includes(parsed.project_type) ? parsed.project_type : null,
             province: PROVINCES.includes(parsed.province) ? parsed.province : null,
             district: parsed.district ?? null,
+            municipality: parsed.municipality ?? null,
+            ward,
+            location_text: parsed.location_text ?? null,
             contractor: parsed.contractor ?? null,
             implementing_agency: parsed.implementing_agency ?? null,
             budget_npr: typeof parsed.budget_npr === "number" ? parsed.budget_npr : null,
+            funding_committed_npr: typeof parsed.funding_committed_npr === "number" ? parsed.funding_committed_npr : null,
+            estimated_beneficiaries: typeof parsed.estimated_beneficiaries === "number" ? parsed.estimated_beneficiaries : null,
+            procurement_method: parsed.procurement_method ?? null,
+            esia_status: esia,
             start_date: parsed.start_date ?? null,
             expected_completion: parsed.expected_completion ?? null,
-            status: "proposed",
+            status,
             approval_status: "pending",
             submitted_by: null,
             submitted_by_ai: true,
+            ai_tag: aiTag,
           })
           .select("id")
           .single();

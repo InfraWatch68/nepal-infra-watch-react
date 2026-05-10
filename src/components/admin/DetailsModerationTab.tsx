@@ -8,7 +8,15 @@ import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ExternalLink, Sparkles, Loader2, RefreshCw, CheckCircle2, XCircle } from 'lucide-react';
 import { formatNPR } from '@/lib/parseCoords';
+import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
+
+const SEVERITY_BADGE: Record<string, string> = {
+  low:      'bg-muted/60 text-muted-foreground border-muted',
+  medium:   'bg-warning/20 text-warning border-warning/40',
+  high:     'bg-destructive/15 text-destructive border-destructive/40',
+  critical: 'bg-destructive text-destructive-foreground border-destructive',
+};
 
 const TABLES = [
   { key: 'project_funding', label: 'Funding' },
@@ -23,7 +31,8 @@ const TABLES = [
 type Row = any & { projects?: { title: string; slug: string } };
 
 export function DetailsModerationTab() {
-  const { user } = useAuth();
+  const { user, isAdmin, isCoadmin } = useAuth();
+  const isInstantPublisher = isAdmin || isCoadmin;
   const [rows, setRows] = useState<Record<string, Row[]>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -46,13 +55,27 @@ export function DetailsModerationTab() {
 
   const review = async (table: string, id: string, approval: 'approved' | 'rejected') => {
     setBusyId(`${table}:${id}`);
+    const published_at = approval === 'approved'
+      ? (isInstantPublisher ? new Date().toISOString() : new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString())
+      : null;
     const { error } = await supabase.from(table as any).update({
       approval_status: approval,
       reviewed_by: user?.id,
+      published_at,
     }).eq('id', id);
+    if (!error) {
+      const role = isAdmin ? 'admin' : isCoadmin ? 'coadmin' : 'reviewer';
+      await supabase.from('project_reviews').insert({
+        target_table: table, target_id: String(id),
+        reviewer_id: user?.id, reviewer_role: role,
+        action: approval, was_admin: isInstantPublisher,
+      });
+    }
     setBusyId(null);
     if (error) return toast.error(error.message);
-    toast.success(approval === 'approved' ? 'Approved' : 'Rejected');
+    toast.success(approval === 'approved'
+      ? (isInstantPublisher ? 'Approved' : 'Approved — publish in 24h')
+      : 'Rejected');
     refresh();
   };
 
@@ -176,7 +199,7 @@ function RowSummary({ table, row }: { table: string; row: any }) {
         <div>
           <div className="font-semibold flex items-center gap-2">
             {row.title}
-            <Badge variant="outline" className="text-[10px] uppercase font-mono">{row.severity}</Badge>
+            <Badge className={cn('text-[10px] uppercase font-mono border', SEVERITY_BADGE[row.severity] ?? SEVERITY_BADGE.low)}>{row.severity}</Badge>
             <Badge variant="outline" className="text-[10px] uppercase font-mono">{row.category}</Badge>
           </div>
           {row.description && <p className="text-sm mt-1">{row.description}</p>}
