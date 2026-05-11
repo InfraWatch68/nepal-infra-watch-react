@@ -35,6 +35,11 @@ export default function ProjectDetail() {
   const [aiError, setAiError] = useState<string>('');
   const [traceBusy, setTraceBusy] = useState(false);
   const [traceInFlight, setTraceInFlight] = useState(false);
+  // Latest analysis run — feeds the Project Record stats line. Same row that
+  // ComprehensiveSections.tsx queries internally for its own header; we query
+  // it here too rather than threading state across components, since both
+  // sections show the same numbers (one analysis populates both).
+  const [latestAnalysisRun, setLatestAnalysisRun] = useState<any | null>(null);
   // Per-tab bulk selection. Keys are `${table}:${id}` so the same Set can
   // back all three tabs without leaking selections across them visually.
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
@@ -142,13 +147,25 @@ export default function ProjectDetail() {
       const { data } = await supabase.from('analysis_jobs').select('id, status').eq('project_id', p.id).in('status', ['queued', 'running']).limit(1).maybeSingle();
       setTraceInFlight(!!data);
     };
+    const reloadLatestRun = async () => {
+      const { data } = await supabase
+        .from('project_analysis_runs')
+        .select('id, started_at, finished_at, status, bucket_status, inserted_per_table, deduped_per_table, errors, narrative_summary, gaps_and_contradictions')
+        .eq('project_id', p.id)
+        .order('started_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      setLatestAnalysisRun(data ?? null);
+    };
     reloadJob();
+    reloadLatestRun();
     const ch = supabase.channel(`project-detail-${p.id}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'project_milestones', filter }, () => loadTabs(p.id))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'project_updates', filter }, () => loadTabs(p.id))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'project_sources', filter }, () => loadTabs(p.id))
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'projects', filter: `id=eq.${p.id}` }, () => reloadP())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'analysis_jobs', filter }, () => reloadJob())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'analysis_jobs', filter }, () => { reloadJob(); reloadLatestRun(); })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'project_analysis_runs', filter }, () => reloadLatestRun())
       .subscribe();
     return () => { supabase.removeChannel(ch); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -288,20 +305,29 @@ export default function ProjectDetail() {
             )}
           </Card>
 
-          <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
-            <div>
-              <div className="text-sm font-semibold">Project record</div>
-              <div className="text-xs text-muted-foreground">Milestones, updates, citations, and project location.</div>
+          <Card className="p-5">
+            <div className="flex items-start justify-between gap-4 mb-4">
+              <div className="flex items-center gap-2">
+                <div className="h-8 w-8 rounded-md bg-accent/15 text-accent flex items-center justify-center">
+                  <Calendar className="h-4 w-4" />
+                </div>
+                <div>
+                  <div className="font-semibold text-sm">Project Record</div>
+                  <div className="text-xs text-muted-foreground">
+                    Milestones, updates, citations, and project location.
+                    <RunStatsLine run={latestAnalysisRun} inFlight={traceInFlight} />
+                  </div>
+                </div>
+              </div>
+              {isReviewer && (
+                <Button size="sm" onClick={runTraceHistory} disabled={traceBusy || traceInFlight} title="Fetch milestones, updates, citations, and images from the public record. Shares the analysis queue with Run AI Analysis.">
+                  {traceBusy || traceInFlight ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                  {traceInFlight ? 'Tracing…' : 'Trace History'}
+                </Button>
+              )}
             </div>
-            {isReviewer && (
-              <Button size="sm" variant="outline" onClick={runTraceHistory} disabled={traceBusy || traceInFlight} title="Fetch milestones, updates, citations, and images from the public record. Shares the analysis queue with Run AI Analysis.">
-                {traceBusy || traceInFlight ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                {traceInFlight ? 'Tracing…' : 'Trace History'}
-              </Button>
-            )}
-          </div>
 
-          <Tabs defaultValue="milestones">
+            <Tabs defaultValue="milestones">
             <TabsList>
               <TabsTrigger value="milestones">Milestones ({milestones.length})</TabsTrigger>
               <TabsTrigger value="updates">Updates ({updates.length})</TabsTrigger>
@@ -432,7 +458,8 @@ export default function ProjectDetail() {
                 <Card className="p-8 text-center text-muted-foreground text-sm">No coordinates recorded for this project.</Card>
               )}
             </TabsContent>
-          </Tabs>
+            </Tabs>
+          </Card>
 
           <ComprehensiveSections projectId={p.id} projectTitle={p.title} />
         </div>
@@ -570,6 +597,36 @@ function ReportIssueForm({ projectId, projectTitle }: { projectId: string | numb
   );
 }
 
+// Stats line for the Project Record header — mirrors the RunSummaryLine in
+// ComprehensiveSections so both sections show identical "Last run X min ago
+// · N hits · +M new · K deduped" text (they share the same underlying run).
+function RunStatsLine({ run, inFlight }: { run: any | null; inFlight: boolean }) {
+  if (!run && !inFlight) return null;
+  if (inFlight) return <span className="ml-1.5 italic">analysis running…</span>;
+  if (!run) return null;
+  const inserted = Object.values((run.inserted_per_table ?? {}) as Record<string, number>).reduce((a: number, b: number) => a + (b || 0), 0);
+  const deduped = Object.values((run.deduped_per_table ?? {}) as Record<string, number>).reduce((a: number, b: number) => a + (b || 0), 0);
+  const hits = Object.values((run.bucket_status ?? {}) as Record<string, any>).reduce((a: number, b: any) => a + (b?.hits || 0), 0);
+  const iso = run.finished_at ?? run.started_at;
+  const when = ((): string => {
+    if (!iso) return '—';
+    const ms = Date.now() - new Date(iso).getTime();
+    const m = Math.floor(ms / 60000);
+    if (m < 1) return 'just now';
+    if (m < 60) return `${m} min ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h} h ago`;
+    const d = Math.floor(h / 24);
+    return `${d} d ago`;
+  })();
+  return (
+    <span className="ml-1.5">
+      Last run {when} · {hits} hits · +{inserted} new{deduped ? ` · ${deduped} deduped` : ''}
+      {run.status === 'failed' && <span className="text-destructive ml-1">(failed)</span>}
+    </span>
+  );
+}
+
 // Inline bulk-action toolbar for the project-record tabs (milestones,
 // updates, sources). Same shape as ComprehensiveSections' TabBulkBar — kept
 // local here because the tables in this scope have different approval
@@ -609,21 +666,23 @@ function RecordBulkBar({
         />
         <span>{some ? `${selKeys.length} of ${rows.length} selected` : `Select all (${rows.length})`}</span>
       </label>
-      <div className="flex items-center gap-1">
-        {showApprove && (
-          <Button disabled={!some || busy} size="sm" variant="ghost" className="h-7 text-xs text-success hover:bg-success/10" onClick={() => onAction(table, selIds, 'approved')}>
-            <Check className="h-3.5 w-3.5 mr-1" /> Approve
+      {some && (
+        <div className="flex items-center gap-1">
+          {showApprove && (
+            <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-success hover:bg-success/10" onClick={() => onAction(table, selIds, 'approved')}>
+              <Check className="h-3.5 w-3.5 mr-1" /> Approve
+            </Button>
+          )}
+          {showReject && (
+            <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => onAction(table, selIds, 'rejected')}>
+              <X className="h-3.5 w-3.5 mr-1" /> Reject
+            </Button>
+          )}
+          <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => onAction(table, selIds, 'delete')}>
+            <Trash2 className="h-3.5 w-3.5 mr-1" /> Delete
           </Button>
-        )}
-        {showReject && (
-          <Button disabled={!some || busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => onAction(table, selIds, 'rejected')}>
-            <X className="h-3.5 w-3.5 mr-1" /> Reject
-          </Button>
-        )}
-        <Button disabled={!some || busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => onAction(table, selIds, 'delete')}>
-          <Trash2 className="h-3.5 w-3.5 mr-1" /> Delete
-        </Button>
-      </div>
+        </div>
+      )}
     </div>
   );
 }

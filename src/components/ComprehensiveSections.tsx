@@ -715,21 +715,26 @@ function TabBulkBar({
         />
         <span>{some ? `${selKeys.length} of ${rows.length} selected` : `Select all (${rows.length})`}</span>
       </label>
-      <div className="flex items-center gap-1">
-        {showApprove && (
-          <Button disabled={!some || busy} size="sm" variant="ghost" className="h-7 text-xs text-success hover:bg-success/10" onClick={() => onAction(table, selIds, 'approved')}>
-            <Check className="h-3.5 w-3.5 mr-1" /> Approve
+      {/* Action buttons only appear when something is actually selected —
+          avoids a row of greyed-out "Approve / Reject / Delete" buttons
+          shouting for attention when there's nothing to act on. */}
+      {some && (
+        <div className="flex items-center gap-1">
+          {showApprove && (
+            <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-success hover:bg-success/10" onClick={() => onAction(table, selIds, 'approved')}>
+              <Check className="h-3.5 w-3.5 mr-1" /> Approve
+            </Button>
+          )}
+          {showReject && (
+            <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => onAction(table, selIds, 'rejected')}>
+              <X className="h-3.5 w-3.5 mr-1" /> Reject
+            </Button>
+          )}
+          <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => onAction(table, selIds, 'delete')}>
+            <Trash2 className="h-3.5 w-3.5 mr-1" /> Delete
           </Button>
-        )}
-        {showReject && (
-          <Button disabled={!some || busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => onAction(table, selIds, 'rejected')}>
-            <X className="h-3.5 w-3.5 mr-1" /> Reject
-          </Button>
-        )}
-        <Button disabled={!some || busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => onAction(table, selIds, 'delete')}>
-          <Trash2 className="h-3.5 w-3.5 mr-1" /> Delete
-        </Button>
-      </div>
+        </div>
+      )}
     </div>
   );
 }

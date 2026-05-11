@@ -847,20 +847,22 @@ function AdminBulkBar({
         <Checkbox checked={allSelected} onCheckedChange={(v) => onToggleAll(!!v)} aria-label="Select all" />
         <span>{someSelected ? `${selectedIds.length} of ${rowCount} selected` : `Select all (${rowCount})`}</span>
       </label>
-      <div className="flex items-center gap-1">
-        <Button disabled={!someSelected || busy} size="sm" variant="ghost" className="h-7 text-xs text-success hover:bg-success/10" onClick={() => act('approved')}>
-          {busy ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : null}
-          Approve
-        </Button>
-        <Button disabled={!someSelected || busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => act('rejected')}>
-          Reject
-        </Button>
-        {table !== 'projects' && (
-          <Button disabled={!someSelected || busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => act('delete')}>
-            Delete
+      {someSelected && (
+        <div className="flex items-center gap-1">
+          <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-success hover:bg-success/10" onClick={() => act('approved')}>
+            {busy ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : null}
+            Approve
           </Button>
-        )}
-      </div>
+          <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => act('rejected')}>
+            Reject
+          </Button>
+          {table !== 'projects' && (
+            <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => act('delete')}>
+              Delete
+            </Button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

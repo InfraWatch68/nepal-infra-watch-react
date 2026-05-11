@@ -309,9 +309,15 @@ CONFIDENCE RUBRIC — required, 0.00-1.00:
 - Below 0.40: skip — return "null" instead of emitting a low-confidence record.
 If the article is NOT about a specific infrastructure project in Nepal, return the literal string "null".
 
-DESCRIPTION RULES — this is the most important field:
-- Write 3-6 substantive paragraphs (~250-600 words total).
-- Cover: scope/scale, geography, stakeholders, timeline, financing, current status, and any reported issues, delays, beneficiaries, environmental/social context, and political or economic significance.
+DESCRIPTION RULES — this is an identity field, NOT a status report:
+- Write 3-5 paragraphs (~250-500 words total) describing what the project IS, not what's currently happening with it.
+- COVER (stable facts that don't change with a news cycle): project scope and scale (length / capacity / capital cost), geography (provinces/districts traversed, source-to-end if linear), sector + project type, intent (problem it solves, beneficiaries served, why this was sanctioned), stakeholder structure (implementing agency, executing ministry, lender types — e.g. "ADB sovereign loan + GoN co-financing"), procurement model (ICB / NCB / PPP / EPC, in the abstract), and political-economic significance.
+- DO NOT INCLUDE in the description (these belong in updates / current status / risks):
+   * Progress percentages ("67% complete", "halfway done")
+   * Current contractor activity ("a Chinese contractor is doing the upgrade", "the contractor walked off site")
+   * Schedule slippage / delays / extensions
+   * Recent news, ongoing issues, latest tender awards
+   * Anything dated "as of [recent year]" / "currently" / "is reported to be"
 - Use ONLY facts the article actually contains. If a detail isn't in the article, omit it — DO NOT invent. The reader will see the source URL alongside.
 - Plain prose. No markdown. No bullet points. Neutral tone. Treat the project name as an opaque label — do NOT pull in outside knowledge about real-world Nepali projects with similar names.
 
