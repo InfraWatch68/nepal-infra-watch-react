@@ -405,7 +405,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               <RotateCcw className="h-4 w-4" />
               Reset AI rows
             </Button>
-            <Button size="sm" onClick={runAnalysis} disabled={busy || runInFlight}>
+            <Button size="sm" variant="outline" onClick={runAnalysis} disabled={busy || runInFlight}>
               {busy || runInFlight ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
               {runInFlight ? 'Analysis in flight…' : 'Run AI Analysis'}
             </Button>
@@ -705,36 +705,34 @@ function TabBulkBar({
   const selIds = selKeys.map(k => k.split(':').slice(1).join(':'));
   const allSelected = allKeys.length > 0 && selKeys.length === allKeys.length;
   const some = selKeys.length > 0;
+  // Hide the whole bar until at least one row is selected. The per-row
+  // checkboxes are always visible, so users still have a way in.
+  if (!some) return null;
   return (
-    <div className="flex items-center justify-between gap-2 p-2 rounded-md border bg-muted/30 mb-2 flex-wrap">
+    <div className="flex items-center justify-between gap-2 p-2 rounded-md border border-info/40 bg-info/5 mb-2 flex-wrap">
       <label className="flex items-center gap-2 cursor-pointer text-xs">
         <Checkbox
           checked={allSelected}
           onCheckedChange={(checked) => onToggleAll(table, allKeys.map(k => k.split(':').slice(1).join(':')), !!checked)}
           aria-label="Select all in this tab"
         />
-        <span>{some ? `${selKeys.length} of ${rows.length} selected` : `Select all (${rows.length})`}</span>
+        <span>{selKeys.length} of {rows.length} selected</span>
       </label>
-      {/* Action buttons only appear when something is actually selected —
-          avoids a row of greyed-out "Approve / Reject / Delete" buttons
-          shouting for attention when there's nothing to act on. */}
-      {some && (
-        <div className="flex items-center gap-1">
-          {showApprove && (
-            <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-success hover:bg-success/10" onClick={() => onAction(table, selIds, 'approved')}>
-              <Check className="h-3.5 w-3.5 mr-1" /> Approve
-            </Button>
-          )}
-          {showReject && (
-            <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => onAction(table, selIds, 'rejected')}>
-              <X className="h-3.5 w-3.5 mr-1" /> Reject
-            </Button>
-          )}
-          <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => onAction(table, selIds, 'delete')}>
-            <Trash2 className="h-3.5 w-3.5 mr-1" /> Delete
+      <div className="flex items-center gap-1">
+        {showApprove && (
+          <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-success hover:bg-success/10" onClick={() => onAction(table, selIds, 'approved')}>
+            <Check className="h-3.5 w-3.5 mr-1" /> Approve
           </Button>
-        </div>
-      )}
+        )}
+        {showReject && (
+          <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => onAction(table, selIds, 'rejected')}>
+            <X className="h-3.5 w-3.5 mr-1" /> Reject
+          </Button>
+        )}
+        <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => onAction(table, selIds, 'delete')}>
+          <Trash2 className="h-3.5 w-3.5 mr-1" /> Delete
+        </Button>
+      </div>
     </div>
   );
 }

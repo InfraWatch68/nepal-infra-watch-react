@@ -841,28 +841,30 @@ function AdminBulkBar({
     else toast.success(`${selectedIds.length} ${label}${selectedIds.length === 1 ? '' : 's'} ${action === 'delete' ? 'deleted' : action}`);
     afterAction();
   };
+  // Bar hidden until something is selected — the per-row checkboxes are the
+  // entry point. Keeps the moderation page visually clean when there's
+  // nothing pending action.
+  if (!someSelected) return null;
   return (
-    <div className="flex items-center justify-between gap-2 p-2.5 border-b bg-muted/30 flex-wrap">
+    <div className="flex items-center justify-between gap-2 p-2.5 border-b border-info/40 bg-info/5 flex-wrap">
       <label className="flex items-center gap-2 cursor-pointer text-xs">
         <Checkbox checked={allSelected} onCheckedChange={(v) => onToggleAll(!!v)} aria-label="Select all" />
-        <span>{someSelected ? `${selectedIds.length} of ${rowCount} selected` : `Select all (${rowCount})`}</span>
+        <span>{selectedIds.length} of {rowCount} selected</span>
       </label>
-      {someSelected && (
-        <div className="flex items-center gap-1">
-          <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-success hover:bg-success/10" onClick={() => act('approved')}>
-            {busy ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : null}
-            Approve
+      <div className="flex items-center gap-1">
+        <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-success hover:bg-success/10" onClick={() => act('approved')}>
+          {busy ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : null}
+          Approve
+        </Button>
+        <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => act('rejected')}>
+          Reject
+        </Button>
+        {table !== 'projects' && (
+          <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => act('delete')}>
+            Delete
           </Button>
-          <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => act('rejected')}>
-            Reject
-          </Button>
-          {table !== 'projects' && (
-            <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => act('delete')}>
-              Delete
-            </Button>
-          )}
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

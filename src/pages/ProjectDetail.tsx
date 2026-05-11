@@ -264,15 +264,15 @@ export default function ProjectDetail() {
         </div>
       </section>
 
-      {/* Image gallery — Tavily-fetched + manually-added pictures. Hidden when
-          the project has nothing yet so the page doesn't show empty filmstrip
-          space. */}
-      {Array.isArray(p.image_urls) && p.image_urls.length > 0 && (
-        <ProjectImageGallery images={p.image_urls} title={p.title} />
-      )}
-
       <div className="container py-10 grid lg:grid-cols-[1fr_300px] gap-10">
         <div className="space-y-8">
+          {/* Image gallery — sits inside the main column so it aligns with the
+              cards below and lets the sidebar ad slot float to the right at
+              identical width. Hidden when the project has no pictures yet. */}
+          {Array.isArray(p.image_urls) && p.image_urls.length > 0 && (
+            <ProjectImageGallery images={p.image_urls} title={p.title} />
+          )}
+
           {/* AI Insights */}
           <Card className="p-5 border-accent/30 bg-accent/5">
             <div className="flex items-start justify-between gap-4 mb-3">
@@ -656,33 +656,32 @@ function RecordBulkBar({
   const allIds: Array<string | number> = rows.map(r => r.id);
   const allSelected = allKeys.length > 0 && selKeys.length === allKeys.length;
   const some = selKeys.length > 0;
+  if (!some) return null;
   return (
-    <div className="flex items-center justify-between gap-2 p-2 rounded-md border bg-muted/30 mb-1 flex-wrap">
+    <div className="flex items-center justify-between gap-2 p-2 rounded-md border border-info/40 bg-info/5 mb-1 flex-wrap">
       <label className="flex items-center gap-2 cursor-pointer text-xs">
         <Checkbox
           checked={allSelected}
           onCheckedChange={(checked) => onToggleAll(table, allIds, !!checked)}
           aria-label="Select all in this tab"
         />
-        <span>{some ? `${selKeys.length} of ${rows.length} selected` : `Select all (${rows.length})`}</span>
+        <span>{selKeys.length} of {rows.length} selected</span>
       </label>
-      {some && (
-        <div className="flex items-center gap-1">
-          {showApprove && (
-            <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-success hover:bg-success/10" onClick={() => onAction(table, selIds, 'approved')}>
-              <Check className="h-3.5 w-3.5 mr-1" /> Approve
-            </Button>
-          )}
-          {showReject && (
-            <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => onAction(table, selIds, 'rejected')}>
-              <X className="h-3.5 w-3.5 mr-1" /> Reject
-            </Button>
-          )}
-          <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => onAction(table, selIds, 'delete')}>
-            <Trash2 className="h-3.5 w-3.5 mr-1" /> Delete
+      <div className="flex items-center gap-1">
+        {showApprove && (
+          <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-success hover:bg-success/10" onClick={() => onAction(table, selIds, 'approved')}>
+            <Check className="h-3.5 w-3.5 mr-1" /> Approve
           </Button>
-        </div>
-      )}
+        )}
+        {showReject && (
+          <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => onAction(table, selIds, 'rejected')}>
+            <X className="h-3.5 w-3.5 mr-1" /> Reject
+          </Button>
+        )}
+        <Button disabled={busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => onAction(table, selIds, 'delete')}>
+          <Trash2 className="h-3.5 w-3.5 mr-1" /> Delete
+        </Button>
+      </div>
     </div>
   );
 }
@@ -717,8 +716,8 @@ function ProjectImageGallery({ images, title }: { images: string[]; title: strin
     }
   };
   return (
-    <section className="border-b bg-muted/30">
-      <div className="container py-6 max-w-5xl">
+    <Card className="overflow-hidden">
+      <div className="p-4">
         {/* Header line — same uppercase mono treatment used elsewhere on the page. */}
         <div className="flex items-baseline justify-between mb-2.5 px-0.5">
           <p className="text-[10px] uppercase tracking-[0.2em] font-mono text-muted-foreground">Photos</p>
@@ -799,6 +798,6 @@ function ProjectImageGallery({ images, title }: { images: string[]; title: strin
           </div>
         )}
       </div>
-    </section>
+    </Card>
   );
 }
