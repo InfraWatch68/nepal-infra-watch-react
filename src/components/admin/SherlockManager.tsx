@@ -9,7 +9,7 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Loader2, Search, Trash2, Plus, MapPin, ListChecks, Clock, Filter as FilterIcon } from 'lucide-react';
+import { Loader2, Search, Trash2, Plus, MapPin, ListChecks, Clock, Filter as FilterIcon, Play } from 'lucide-react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
 import { PROVINCES, SECTORS, districtsFor, type Province } from '@/lib/constants';
@@ -228,23 +228,29 @@ function GeoDiscoverTab() {
     if (!province) return toast.error('Pick a province');
     if (sectors.length === 0) return toast.error('Pick at least one sector');
     setBusy(true);
-    const params: Record<string, unknown> = {
-      province,
-      sectors,
-      maxResults,
-    };
-    if (district) params.district = district;
-    if (municipality) params.municipality = municipality;
-
-    const { error } = await supabase.from('sherlock_jobs').insert({
-      kind: 'geo',
-      params,
-      priority: 10, // user-initiated; drain before sweep_child
-      enqueued_by: user?.id ?? null,
+    // One row per sector. A bundled all-sectors row blows past the edge function's
+    // wall-time limit (~150s on free tier); per-sector rows are ~30-50s each and
+    // each completes inside the limit.
+    const rows = sectors.map(sec => {
+      const params: Record<string, unknown> = {
+        province,
+        sectors: [sec],
+        maxResults,
+      };
+      if (district) params.district = district;
+      if (municipality) params.municipality = municipality;
+      return {
+        kind: 'geo' as const,
+        params,
+        priority: 10, // user-initiated; drain before sweep_child
+        enqueued_by: user?.id ?? null,
+      };
     });
+
+    const { error } = await supabase.from('sherlock_jobs').insert(rows);
     setBusy(false);
     if (error) return toast.error(error.message);
-    toast.success(`Enqueued geo discovery for ${[municipality, district, province].filter(Boolean).join(' / ')} (${sectors.length} sector${sectors.length === 1 ? '' : 's'})`);
+    toast.success(`Enqueued ${sectors.length} geo job${sectors.length === 1 ? '' : 's'} for ${[municipality, district, province].filter(Boolean).join(' / ')}`);
   };
 
   return (
@@ -316,7 +322,7 @@ function GeoDiscoverTab() {
           Enqueue discovery
         </Button>
         <p className="text-[10px] text-muted-foreground self-center">
-          Will run ~{sectors.length} Tavily search{sectors.length === 1 ? '' : 'es'} ({sectors.length * maxResults} articles max)
+          Enqueues {sectors.length} job{sectors.length === 1 ? '' : 's'} (one per sector, {maxResults} article{maxResults === 1 ? '' : 's'}/job) so each fits the edge-function timeout
         </p>
       </div>
     </div>
@@ -462,6 +468,7 @@ function TopicFiltersTab() {
 function SweepsTab() {
   const { user } = useAuth();
   const [sweeps, setSweeps] = useState<Sweep[]>([]);
+  const [runningId, setRunningId] = useState<string | null>(null);
 
   // Draft form state for "Add sweep"
   const [draftLabel, setDraftLabel] = useState('');
@@ -524,6 +531,24 @@ function SweepsTab() {
     refresh();
   };
 
+  // Fires the sweep ahead of cadence. Bypasses `enabled`, so you can spot-check
+  // a paused config without registering a real pg_cron job for it.
+  const runNow = async (s: Sweep) => {
+    setRunningId(s.id);
+    // `sherlock_run_sweep_now` isn't in the generated Database types yet; cast to bypass.
+    const { data, error } = await (supabase.rpc as any)('sherlock_run_sweep_now', { p_sweep_id: s.id });
+    setRunningId(null);
+    if (error) return toast.error(error.message);
+    const r = data as { enqueued?: number; total_combos?: number; enabled?: boolean; skipped?: boolean; reason?: string } | null;
+    if (r?.skipped) return toast.error(`Skipped: ${r.reason ?? 'unknown'}`);
+    const enq = r?.enqueued ?? 0;
+    const tot = r?.total_combos ?? 0;
+    const cappedNote = enq < tot ? ` (capped from ${tot})` : '';
+    const pausedNote = r?.enabled === false ? ' — sweep is paused but ran anyway' : '';
+    toast.success(`Enqueued ${enq} combo${enq === 1 ? '' : 's'}${cappedNote}${pausedNote}. Watch the Queue tab.`);
+    refresh();
+  };
+
   const toggleProv = (p: string) => setDraftProvinces(prev => prev.includes(p) ? prev.filter(x => x !== p) : [...prev, p]);
   const toggleSec = (s: string) => setDraftSectors(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s]);
 
@@ -557,6 +582,10 @@ function SweepsTab() {
                     </div>
                   )}
                 </div>
+                <Button size="sm" variant="outline" onClick={() => runNow(s)} disabled={runningId === s.id}>
+                  {runningId === s.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                  Run now
+                </Button>
                 <Button size="sm" variant="ghost" onClick={() => deleteSweep(s.id)} className="text-muted-foreground hover:text-destructive">
                   <Trash2 className="h-4 w-4" />
                 </Button>

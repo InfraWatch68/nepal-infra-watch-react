@@ -1,16 +1,47 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/hooks/useAuth';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Sparkles, Loader2, ExternalLink, Wallet, FileText, Users, AlertTriangle, BarChart3, Gavel, ShieldCheck, Plus, Pencil, Trash2 } from 'lucide-react';
+import { Sparkles, Loader2, ExternalLink, Wallet, FileText, Users, AlertTriangle, BarChart3, Gavel, ShieldCheck, Plus, Pencil, Trash2, Check, X, ChevronDown } from 'lucide-react';
 import { formatNPR } from '@/lib/parseCoords';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import { DetailRowDialog, DETAIL_TABLES } from '@/components/admin/DetailRowDialog';
 import type { DetailsState } from '@/components/SubmitDetailsSection';
+
+const DETAIL_TABLE_NAMES = [
+  'project_funding','project_documents','project_stakeholders','project_risks',
+  'project_impact','project_procurement','project_compliance',
+] as const;
+type DetailTable = typeof DETAIL_TABLE_NAMES[number];
+
+type BucketState = { state?: 'queued'|'running'|'succeeded'|'failed'; hits?: number; error?: string };
+
+type AnalysisRun = {
+  id: string;
+  project_id: number;
+  started_at: string;
+  finished_at: string | null;
+  status: 'queued'|'running'|'succeeded'|'failed'|'cancelled';
+  bucket_status: Record<string, BucketState>;
+  inserted_per_table: Record<string, number>;
+  deduped_per_table: Record<string, number>;
+  errors: string[];
+  narrative_summary: string | null;
+  gaps_and_contradictions: string[];
+};
+
+type AnalysisJob = {
+  id: string;
+  project_id: number;
+  run_id: string;
+  status: 'queued'|'running'|'succeeded'|'failed'|'cancelled';
+  enqueued_at: string;
+  last_error: string | null;
+};
 
 // Severity badge oval — colored fill, not just border. Used in Risks tab + admin moderation row summary.
 const SEVERITY_BADGE: Record<string, string> = {
@@ -32,23 +63,66 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
   const [procurement, setProcurement] = useState<any[]>([]);
   const [compliance, setCompliance] = useState<any[]>([]);
   const [busy, setBusy] = useState(false);
-  const [lastRun, setLastRun] = useState<string | null>(null);
+  const [activeJob, setActiveJob] = useState<AnalysisJob | null>(null);
+  const [latestRun, setLatestRun] = useState<AnalysisRun | null>(null);
+  const [recentRuns, setRecentRuns] = useState<AnalysisRun[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
 
-  const loadAll = async () => {
-    const tables = ['project_funding','project_documents','project_stakeholders','project_risks','project_impact','project_procurement','project_compliance'] as const;
-    const setters = [setFunding, setDocuments, setStakeholders, setRisks, setImpact, setProcurement, setCompliance];
-    const results = await Promise.all(tables.map(t =>
-      supabase.from(t).select('*').eq('project_id', projectId).eq('approval_status', 'approved').order('created_at', { ascending: false })
+  // Same setter array as before — used both by loadAll and by Realtime re-fetches.
+  const setters: Array<(rows: any[]) => void> = [setFunding, setDocuments, setStakeholders, setRisks, setImpact, setProcurement, setCompliance];
+
+  const loadAll = useCallback(async () => {
+    // Reviewers see approved + pending rows so they can moderate inline.
+    // Public users see only approved (current behaviour preserved).
+    const statuses = isReviewer ? ['approved', 'pending'] : ['approved'];
+    const results = await Promise.all(DETAIL_TABLE_NAMES.map(t =>
+      supabase.from(t).select('*').eq('project_id', projectId).in('approval_status', statuses).order('created_at', { ascending: false })
     ));
     results.forEach((r, i) => setters[i](r.data ?? []));
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, isReviewer]);
+
+  const loadRunMeta = useCallback(async () => {
+    const { data: runs } = await supabase
+      .from('project_analysis_runs')
+      .select('*')
+      .eq('project_id', projectId)
+      .order('started_at', { ascending: false })
+      .limit(5);
+    const list = (runs ?? []) as AnalysisRun[];
+    setRecentRuns(list);
+    setLatestRun(list[0] ?? null);
+
+    const { data: job } = await supabase
+      .from('analysis_jobs')
+      .select('*')
+      .eq('project_id', projectId)
+      .in('status', ['queued', 'running'])
+      .order('enqueued_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    setActiveJob((job ?? null) as AnalysisJob | null);
+  }, [projectId]);
 
   useEffect(() => {
     loadAll();
-    supabase.from('projects').select('last_comprehensive_analysis_at').eq('id', projectId).maybeSingle()
-      .then(({ data }) => setLastRun((data as any)?.last_comprehensive_analysis_at ?? null));
+    loadRunMeta();
+  }, [loadAll, loadRunMeta]);
+
+  // Realtime: any change to this project's runs/jobs/detail tables re-fetches.
+  // One channel covers everything to keep the wire footprint small.
+  useEffect(() => {
+    const filter = `project_id=eq.${projectId}`;
+    const ch = supabase.channel(`project-${projectId}-analysis`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'analysis_jobs', filter }, () => loadRunMeta())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'project_analysis_runs', filter }, () => loadRunMeta());
+    for (const t of DETAIL_TABLE_NAMES) {
+      ch.on('postgres_changes', { event: '*', schema: 'public', table: t, filter }, () => loadAll());
+    }
+    ch.subscribe();
+    return () => { supabase.removeChannel(ch); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
+  }, [projectId, loadAll, loadRunMeta]);
 
   const deleteRow = async (bucket: keyof DetailsState, id: string) => {
     if (!confirm('Delete this row? This cannot be undone.')) return;
@@ -65,20 +139,114 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
     loadAll();
   };
 
+  // Inline approve/reject for AI-suggested pending rows. Mirrors deleteRow's
+  // review-log pattern so audit-trail consumers see one shape regardless of
+  // whether the action came from this page or the admin queue.
+  const moderateRow = async (bucket: keyof DetailsState, id: string, action: 'approved' | 'rejected') => {
+    const tbl = DETAIL_TABLES[bucket];
+    const { data: u } = await supabase.auth.getUser();
+    const { error } = await supabase.from(tbl as any)
+      .update({ approval_status: action, reviewed_by: u.user?.id ?? null })
+      .eq('id', id);
+    if (error) return toast.error(error.message);
+    await supabase.from('project_reviews').insert({
+      target_table: tbl, target_id: String(id),
+      reviewer_id: u.user?.id ?? null,
+      reviewer_role: 'admin',
+      action,
+      notes: action === 'approved' ? 'Inline approved on project page' : 'Inline rejected on project page',
+      was_admin: true,
+    });
+    toast.success(action === 'approved' ? 'Row approved' : 'Row rejected');
+    // Realtime will re-fire loadAll, but this gives instant feedback.
+    loadAll();
+  };
+
   const runAnalysis = async () => {
     setBusy(true);
     try {
-      const { data, error } = await supabase.functions.invoke('ai-comprehensive-analysis', {
+      const { data, error } = await supabase.functions.invoke('analysis-enqueue', {
         body: { projectId: Number(projectId) },
       });
-      if (error) throw error;
-      const inserted = data?.inserted ? Object.entries(data.inserted).map(([k, v]) => `${k.replace('project_', '')}: ${v}`).join(', ') : 'no rows';
-      toast.success(`Analysis queued — pending review (${inserted})`);
-      if (data?.warnings?.length) toast.warning(data.warnings.join('; '));
-      setLastRun(new Date().toISOString());
+      if (error) {
+        // Supabase functions client unfortunately collapses non-2xx into a generic
+        // FunctionsHttpError; inspect data for our structured error.
+        const code = (data as any)?.code;
+        if (code === 'ALREADY_RUNNING') {
+          toast.message('An analysis is already in flight for this project. Watch the bucket progress above.');
+          return;
+        }
+        throw error;
+      }
+      toast.success('Analysis queued — bucket progress will appear here in a moment.');
+      loadRunMeta();
     } catch (e: any) {
-      toast.error(e.message ?? 'Analysis failed');
-    } finally { setBusy(false); }
+      toast.error(e?.message ?? 'Could not enqueue analysis');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Run-in-flight cue: disable the button while a queued/running job exists.
+  const runInFlight = !!activeJob;
+
+  // Bulk-approve pool: pending AI rows with confidence_score >= 0.85 across all
+  // 7 tables. Counted from already-loaded data so the badge updates instantly
+  // as the reviewer works.
+  const HIGH_CONF_THRESHOLD = 0.85;
+  const bucketsRefByTable: Array<[DetailTable, any[]]> = [
+    ['project_funding', funding],
+    ['project_documents', documents],
+    ['project_stakeholders', stakeholders],
+    ['project_risks', risks],
+    ['project_impact', impact],
+    ['project_procurement', procurement],
+    ['project_compliance', compliance],
+  ];
+  const highConfPending = useMemo(() => {
+    let n = 0;
+    for (const [, rows] of bucketsRefByTable) {
+      for (const r of rows) {
+        if (r.approval_status === 'pending'
+          && typeof r.confidence_score === 'number'
+          && r.confidence_score >= HIGH_CONF_THRESHOLD) n += 1;
+      }
+    }
+    return n;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [funding, documents, stakeholders, risks, impact, procurement, compliance]);
+
+  const bulkApproveHighConfidence = async () => {
+    if (highConfPending === 0) return;
+    if (!confirm(`Approve ${highConfPending} pending row${highConfPending === 1 ? '' : 's'} with AI confidence ≥ ${HIGH_CONF_THRESHOLD}? Lower-confidence rows stay pending for individual review.`)) return;
+    const { data: u } = await supabase.auth.getUser();
+    const userId = u.user?.id ?? null;
+    let approved = 0;
+    const errors: string[] = [];
+    for (const [table, rows] of bucketsRefByTable) {
+      const ids = rows
+        .filter(r => r.approval_status === 'pending'
+          && typeof r.confidence_score === 'number'
+          && r.confidence_score >= HIGH_CONF_THRESHOLD)
+        .map(r => r.id);
+      if (ids.length === 0) continue;
+      const { error: upErr } = await supabase.from(table as any).update({ approval_status: 'approved', reviewed_by: userId }).in('id', ids);
+      if (upErr) { errors.push(`${table}: ${upErr.message}`); continue; }
+      // One project_reviews entry per row so the audit trail matches the
+      // single-row Approve path.
+      const reviewRows = ids.map(id => ({
+        target_table: table, target_id: String(id),
+        reviewer_id: userId, reviewer_role: 'admin',
+        action: 'approved',
+        notes: `Bulk-approved (AI confidence ≥ ${HIGH_CONF_THRESHOLD})`,
+        was_admin: true,
+      }));
+      await supabase.from('project_reviews').insert(reviewRows);
+      approved += ids.length;
+    }
+    if (errors.length > 0) toast.error(`Approved ${approved}, with errors: ${errors.join('; ').slice(0, 200)}`);
+    else toast.success(`Approved ${approved} high-confidence row${approved === 1 ? '' : 's'}`);
+    loadAll();
   };
 
   const counts = {
@@ -97,17 +265,40 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
             <div className="font-semibold text-sm">Comprehensive Project Details</div>
             <div className="text-xs text-muted-foreground">
               Financing, documents, stakeholders, risks, impact, procurement, compliance.
-              {lastRun && <span className="ml-1.5">Last AI run: {new Date(lastRun).toLocaleDateString()}</span>}
+              <RunSummaryLine latestRun={latestRun} runInFlight={runInFlight} />
             </div>
           </div>
         </div>
         {isReviewer && (
-          <Button size="sm" onClick={runAnalysis} disabled={busy}>
-            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-            Run AI Analysis
-          </Button>
+          <div className="flex items-center gap-2 flex-wrap justify-end">
+            {highConfPending > 0 && (
+              <Button size="sm" variant="outline" onClick={bulkApproveHighConfidence} title={`Approve all pending rows with AI confidence ≥ ${HIGH_CONF_THRESHOLD}`}>
+                <Check className="h-4 w-4" />
+                Approve {highConfPending} high-conf
+              </Button>
+            )}
+            <Button size="sm" onClick={runAnalysis} disabled={busy || runInFlight}>
+              {busy || runInFlight ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              {runInFlight ? 'Analysis in flight…' : 'Run AI Analysis'}
+            </Button>
+          </div>
         )}
       </div>
+
+      {/* Live per-bucket progress strip while a run is queued/running. */}
+      {runInFlight && latestRun && (
+        <BucketProgressStrip run={latestRun} />
+      )}
+
+      {/* AI-written 2-3 paragraph synthesis from the most recent successful run. */}
+      {latestRun?.narrative_summary && (
+        <NarrativeSummary text={latestRun.narrative_summary} updatedAt={latestRun.finished_at ?? latestRun.started_at} />
+      )}
+
+      {/* Explicit gaps + contradictions callout. Above the tabs so it's not buried. */}
+      {latestRun && latestRun.gaps_and_contradictions?.length > 0 && (
+        <GapsBanner items={latestRun.gaps_and_contradictions} />
+      )}
 
       <Tabs defaultValue="funding">
         <TabsList className="flex flex-wrap h-auto gap-1">
@@ -123,7 +314,8 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
         <TabsContent value="funding" className="space-y-2 mt-4">
           <ModToolbar bucket="funding" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {funding.length === 0 ? <Empty msg="No funding records yet." /> : funding.map(f => (
-            <Card key={f.id} className="p-4">
+            <Card key={f.id} className={cn("p-4", f.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
+              <RowMetaBar bucket="funding" row={f} isReviewer={isReviewer} onModerate={moderateRow} />
               <div className="flex items-start justify-between gap-3 mb-1">
                 <h4 className="font-semibold">{f.source_name}</h4>
                 <Badge variant="outline" className="text-[10px] uppercase font-mono shrink-0">{f.source_type}</Badge>
@@ -144,7 +336,8 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
         <TabsContent value="documents" className="space-y-2 mt-4">
           <ModToolbar bucket="documents" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {documents.length === 0 ? <Empty msg="No documents linked yet." /> : documents.map(d => (
-            <Card key={d.id} className="p-4">
+            <Card key={d.id} className={cn("p-4", d.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
+              <RowMetaBar bucket="documents" row={d} isReviewer={isReviewer} onModerate={moderateRow} />
               <div className="flex items-start justify-between gap-3 mb-1">
                 <a href={d.url} target="_blank" rel="noreferrer" className="font-semibold hover:text-accent inline-flex items-center gap-1.5">
                   {d.title} <ExternalLink className="h-3.5 w-3.5" />
@@ -165,7 +358,8 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
         <TabsContent value="stakeholders" className="space-y-2 mt-4">
           <ModToolbar bucket="stakeholders" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {stakeholders.length === 0 ? <Empty msg="No stakeholders recorded yet." /> : stakeholders.map(s => (
-            <Card key={s.id} className="p-4">
+            <Card key={s.id} className={cn("p-4", s.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
+              <RowMetaBar bucket="stakeholders" row={s} isReviewer={isReviewer} onModerate={moderateRow} />
               <div className="flex items-start justify-between gap-3 mb-1">
                 <h4 className="font-semibold">{s.org_name}</h4>
                 <Badge variant="outline" className="text-[10px] uppercase font-mono shrink-0">{s.role.replace(/_/g, ' ')}</Badge>
@@ -191,7 +385,9 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               r.severity === 'critical' && 'border-l-destructive',
               r.severity === 'high' && 'border-l-destructive/70',
               r.severity === 'medium' && 'border-l-warning',
-              r.severity === 'low' && 'border-l-muted-foreground/40')}>
+              r.severity === 'low' && 'border-l-muted-foreground/40',
+              r.approval_status === 'pending' && 'bg-warning/5')}>
+              <RowMetaBar bucket="risks" row={r} isReviewer={isReviewer} onModerate={moderateRow} />
               <div className="flex items-start justify-between gap-3 mb-1">
                 <h4 className="font-semibold">{r.title}</h4>
                 <div className="flex gap-1.5 shrink-0">
@@ -212,7 +408,8 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
         <TabsContent value="impact" className="space-y-2 mt-4">
           <ModToolbar bucket="impact" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {impact.length === 0 ? <Empty msg="No impact metrics yet." /> : impact.map(i => (
-            <Card key={i.id} className="p-4">
+            <Card key={i.id} className={cn("p-4", i.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
+              <RowMetaBar bucket="impact" row={i} isReviewer={isReviewer} onModerate={moderateRow} />
               <div className="flex items-start justify-between gap-3 mb-1">
                 <h4 className="font-semibold capitalize">{i.metric_type.replace(/_/g, ' ')}</h4>
                 {i.measured_at && <Badge variant="outline" className="text-[10px] font-mono shrink-0">{i.measured_at}</Badge>}
@@ -233,7 +430,8 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
         <TabsContent value="procurement" className="space-y-2 mt-4">
           <ModToolbar bucket="procurement" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {procurement.length === 0 ? <Empty msg="No procurement records yet." /> : procurement.map(p => (
-            <Card key={p.id} className="p-4">
+            <Card key={p.id} className={cn("p-4", p.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
+              <RowMetaBar bucket="procurement" row={p} isReviewer={isReviewer} onModerate={moderateRow} />
               <div className="flex items-start justify-between gap-3 mb-1">
                 {p.tender_url ? (
                   <a href={p.tender_url} target="_blank" rel="noreferrer" className="font-semibold hover:text-accent inline-flex items-center gap-1.5">
@@ -261,7 +459,8 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
         <TabsContent value="compliance" className="space-y-2 mt-4">
           <ModToolbar bucket="compliance" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {compliance.length === 0 ? <Empty msg="No compliance items yet." /> : compliance.map(c => (
-            <Card key={c.id} className="p-4">
+            <Card key={c.id} className={cn("p-4", c.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
+              <RowMetaBar bucket="compliance" row={c} isReviewer={isReviewer} onModerate={moderateRow} />
               <div className="flex items-start justify-between gap-3 mb-1">
                 <h4 className="font-semibold capitalize">{c.item_type.replace(/_/g, ' ')}</h4>
                 <Badge variant="outline" className={cn("text-[10px] uppercase font-mono shrink-0",
@@ -287,6 +486,10 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
           ))}
         </TabsContent>
       </Tabs>
+
+      {recentRuns.length > 0 && (
+        <RunHistoryExpander runs={recentRuns} open={showHistory} onToggle={() => setShowHistory(v => !v)} />
+      )}
     </Card>
   );
 }
@@ -339,28 +542,235 @@ function ModRowControls({ bucket, row, isReviewer, onSaved, onDelete }: {
   );
 }
 
-function SourceLink({ url, sources }: { url?: string | null; sources?: string[] | null }) {
-  // Prefer the merged `sources` array when populated; fall back to single url.
-  const list: string[] = Array.isArray(sources) && sources.length > 0
-    ? sources
-    : (url ? [url] : []);
+// Per-row metadata bar shown above each card's existing content. Renders
+// nothing for approved manual rows with no confidence score (so existing
+// rows look unchanged); for pending or AI-scored rows it shows a Pending
+// badge + Confidence pill + (for reviewers on pending) Approve/Reject.
+function RowMetaBar({ bucket, row, isReviewer, onModerate }: {
+  bucket: keyof DetailsState;
+  row: any;
+  isReviewer: boolean;
+  onModerate: (b: keyof DetailsState, id: string, action: 'approved' | 'rejected') => void;
+}) {
+  const pending = row?.approval_status === 'pending';
+  const score: number | null = typeof row?.confidence_score === 'number' ? row.confidence_score : null;
+  const isAi = !!row?.submitted_by_ai;
+  if (!pending && score == null) return null;
+  return (
+    <div className="flex items-center justify-between gap-2 mb-2 -mt-1 flex-wrap">
+      <div className="flex items-center gap-1.5 flex-wrap">
+        {pending && (
+          <Badge className="bg-warning/15 text-warning border-warning/40 border text-[10px] uppercase font-mono">
+            {isAi ? 'AI suggestion · pending review' : 'Pending review'}
+          </Badge>
+        )}
+        {score != null && <ConfidenceBadge score={score} />}
+      </div>
+      {pending && isReviewer && (
+        <div className="flex items-center gap-1">
+          <Button size="sm" variant="ghost" className="h-7 text-xs text-success hover:bg-success/10" onClick={() => onModerate(bucket, row.id, 'approved')}>
+            <Check className="h-3.5 w-3.5 mr-1" /> Approve
+          </Button>
+          <Button size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => onModerate(bucket, row.id, 'rejected')}>
+            <X className="h-3.5 w-3.5 mr-1" /> Reject
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ConfidenceBadge({ score }: { score: number }) {
+  const pct = Math.round(score * 100);
+  const level = score >= 0.8 ? 'high' : score >= 0.5 ? 'med' : 'low';
+  const cls =
+    level === 'high' ? 'bg-success/15 text-success border-success/40'
+    : level === 'med'  ? 'bg-info/15 text-info border-info/40'
+    : 'bg-destructive/15 text-destructive border-destructive/40';
+  return (
+    <Badge className={cn('border text-[10px] uppercase font-mono', cls)} title={`AI confidence ${pct}%`}>
+      conf {pct}%
+    </Badge>
+  );
+}
+
+// Inline "last run" summary that lives next to the section title. Compact —
+// "12 hits · +6 new · 4 deduped · 2 min ago" or "running…" or empty.
+function RunSummaryLine({ latestRun, runInFlight }: { latestRun: AnalysisRun | null; runInFlight: boolean }) {
+  if (!latestRun && !runInFlight) return null;
+  if (runInFlight) return <span className="ml-1.5 italic">analysis running…</span>;
+  if (!latestRun) return null;
+  const inserted = Object.values(latestRun.inserted_per_table ?? {}).reduce((a, b) => a + (b || 0), 0);
+  const deduped = Object.values(latestRun.deduped_per_table ?? {}).reduce((a, b) => a + (b || 0), 0);
+  const hits = Object.values(latestRun.bucket_status ?? {}).reduce((a, b: any) => a + (b?.hits || 0), 0);
+  const when = relTime(latestRun.finished_at ?? latestRun.started_at);
+  return (
+    <span className="ml-1.5">
+      Last run {when} · {hits} hits · +{inserted} new{deduped ? ` · ${deduped} deduped` : ''}
+      {latestRun.status === 'failed' && <span className="text-destructive ml-1">(failed)</span>}
+    </span>
+  );
+}
+
+function relTime(iso: string | null): string {
+  if (!iso) return '—';
+  const ms = Date.now() - new Date(iso).getTime();
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} h ago`;
+  const d = Math.floor(h / 24);
+  return `${d} d ago`;
+}
+
+// Live per-bucket progress pills shown above the Tabs while a run is in flight.
+// Renders one pill per bucket with state-based color and hit count when known.
+function BucketProgressStrip({ run }: { run: AnalysisRun }) {
+  const bs = run.bucket_status ?? {};
+  // Buckets are now data-driven (analysis_buckets table). Render whichever
+  // names exist on the run's bucket_status — the drainer seeds all enabled
+  // buckets to {state:'queued'} as its first action, so even at t=0 the
+  // strip shows the full list.
+  const names = Object.keys(bs);
+  if (names.length === 0) {
+    return (
+      <div className="mb-4 p-3 rounded-md border border-info/30 bg-info/5">
+        <div className="text-xs font-semibold text-info flex items-center gap-1.5">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Queueing analysis…
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="mb-4 p-3 rounded-md border border-info/30 bg-info/5">
+      <div className="text-xs font-semibold text-info mb-2 flex items-center gap-1.5">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        Analysing project across {names.length} source bucket{names.length === 1 ? '' : 's'}…
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {names.map(name => {
+          const s = (bs[name] ?? { state: 'queued' }) as BucketState;
+          const state = s.state ?? 'queued';
+          const cls =
+            state === 'succeeded' ? 'bg-success/15 text-success border-success/40'
+            : state === 'failed' ? 'bg-destructive/15 text-destructive border-destructive/40'
+            : state === 'running' ? 'bg-info/15 text-info border-info/40'
+            : 'bg-muted text-muted-foreground border-muted-foreground/30';
+          return (
+            <Badge key={name} className={cn('border text-[10px] uppercase font-mono gap-1', cls)} title={s.error ?? state}>
+              {state === 'running' && <Loader2 className="h-2.5 w-2.5 animate-spin" />}
+              {name.replace(/_/g, ' ')}
+              {typeof s.hits === 'number' && state === 'succeeded' ? ` · ${s.hits}` : ''}
+            </Badge>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// AI-written synthesis displayed at the top of the section. Becomes the new
+// "what is this project, in plain English" entry point — the structured tabs
+// below become evidence rather than the front page.
+function NarrativeSummary({ text, updatedAt }: { text: string; updatedAt: string | null }) {
+  return (
+    <div className="mb-4 p-4 rounded-md border bg-accent/5">
+      <div className="text-xs font-semibold text-accent mb-1.5 flex items-center gap-1.5">
+        <Sparkles className="h-3.5 w-3.5" />
+        AI synthesis · refreshed {relTime(updatedAt)}
+      </div>
+      <p className="text-sm leading-relaxed whitespace-pre-wrap">{text}</p>
+    </div>
+  );
+}
+
+// Explicit gaps + contradictions called out so empty arrays don't read as "all
+// is well." Yellow banner above the Tabs.
+function GapsBanner({ items }: { items: string[] }) {
+  return (
+    <div className="mb-4 p-3 rounded-md border border-warning/40 bg-warning/5">
+      <div className="text-xs font-semibold text-warning mb-1.5 flex items-center gap-1.5">
+        <AlertTriangle className="h-3.5 w-3.5" />
+        Gaps & contradictions in the available evidence
+      </div>
+      <ul className="space-y-1 text-xs list-disc pl-5">
+        {items.map((g, i) => <li key={i} className="leading-snug">{g}</li>)}
+      </ul>
+    </div>
+  );
+}
+
+// Compact 5-most-recent run history. Collapsed by default; expands to show
+// per-run hit/insert/dedupe summaries. Phase 2 will replace with a richer
+// timeline view.
+function RunHistoryExpander({ runs, open, onToggle }: { runs: AnalysisRun[]; open: boolean; onToggle: () => void }) {
+  return (
+    <div className="mt-4 pt-3 border-t border-dashed border-muted">
+      <button onClick={onToggle} className="text-xs text-muted-foreground hover:text-accent inline-flex items-center gap-1 font-mono">
+        <ChevronDown className={cn('h-3 w-3 transition-transform', open && 'rotate-180')} />
+        Run history ({runs.length})
+      </button>
+      {open && (
+        <div className="mt-2 space-y-1.5">
+          {runs.map(r => {
+            const inserted = Object.values(r.inserted_per_table ?? {}).reduce((a, b) => a + (b || 0), 0);
+            const deduped = Object.values(r.deduped_per_table ?? {}).reduce((a, b) => a + (b || 0), 0);
+            const hits = Object.values(r.bucket_status ?? {}).reduce((a, b: any) => a + (b?.hits || 0), 0);
+            return (
+              <div key={r.id} className="text-xs text-muted-foreground font-mono flex items-center gap-2 flex-wrap">
+                <span>{new Date(r.started_at).toLocaleString()}</span>
+                <Badge variant="outline" className="text-[10px] uppercase font-mono">{r.status}</Badge>
+                <span>{hits} hits · +{inserted} new · {deduped} deduped</span>
+                {r.errors?.length > 0 && <span className="text-destructive truncate" title={r.errors.join('\n')}>· {r.errors.length} error{r.errors.length === 1 ? '' : 's'}</span>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Each entry in `sources` is either a legacy string (old rows from before the
+// source-date upgrade) or an object {url, published_at}. Normalise both into a
+// uniform shape and render the publication date next to the host when known.
+type SourceEntry = { url: string; published_at: string | null };
+function normaliseSources(sources: any, fallbackUrl?: string | null): SourceEntry[] {
+  if (!Array.isArray(sources) || sources.length === 0) {
+    return fallbackUrl ? [{ url: fallbackUrl, published_at: null }] : [];
+  }
+  const out: SourceEntry[] = [];
+  for (const s of sources) {
+    if (typeof s === 'string') out.push({ url: s, published_at: null });
+    else if (s && typeof s.url === 'string') out.push({ url: s.url, published_at: typeof s.published_at === 'string' ? s.published_at : null });
+  }
+  return out;
+}
+
+function SourceLink({ url, sources }: { url?: string | null; sources?: any }) {
+  const list = normaliseSources(sources, url);
   if (list.length === 0) return null;
   if (list.length === 1) {
+    const s = list[0];
+    let host = s.url;
+    try { host = new URL(s.url).hostname.replace(/^www\./, ''); } catch { /* keep raw */ }
     return (
-      <a href={list[0]} target="_blank" rel="noreferrer" className="text-[10px] text-muted-foreground hover:text-accent inline-flex items-center gap-1 font-mono mt-2">
-        Source <ExternalLink className="h-2.5 w-2.5" />
+      <a href={s.url} target="_blank" rel="noreferrer" className="text-[10px] text-muted-foreground hover:text-accent inline-flex items-center gap-1 font-mono mt-2">
+        Source · {host}{s.published_at ? ` · ${s.published_at}` : ''} <ExternalLink className="h-2.5 w-2.5" />
       </a>
     );
   }
   return (
     <div className="flex flex-wrap gap-2 mt-2">
       <span className="text-[10px] text-muted-foreground font-mono">Sources ({list.length}):</span>
-      {list.map((u, i) => {
-        let host = u;
-        try { host = new URL(u).hostname.replace(/^www\./, ''); } catch { /* keep raw */ }
+      {list.map((s, i) => {
+        let host = s.url;
+        try { host = new URL(s.url).hostname.replace(/^www\./, ''); } catch { /* keep raw */ }
         return (
-          <a key={u} href={u} target="_blank" rel="noreferrer" className="text-[10px] text-muted-foreground hover:text-accent inline-flex items-center gap-0.5 font-mono">
-            [{i + 1}] {host} <ExternalLink className="h-2 w-2" />
+          <a key={s.url + i} href={s.url} target="_blank" rel="noreferrer" className="text-[10px] text-muted-foreground hover:text-accent inline-flex items-center gap-0.5 font-mono">
+            [{i + 1}] {host}{s.published_at ? ` · ${s.published_at}` : ''} <ExternalLink className="h-2 w-2" />
           </a>
         );
       })}
