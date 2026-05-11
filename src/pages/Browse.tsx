@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Card } from '@/components/ui/card';
 import { Search, Star } from 'lucide-react';
 import { SECTORS, PROVINCES, STATUS_LABELS, districtsFor } from '@/lib/constants';
+import { useMunicipalities } from '@/lib/municipalities';
 import { cn } from '@/lib/utils';
 
 const PAGE_SIZE = 20;
@@ -36,7 +37,7 @@ export default function Browse() {
   const [sector, setSector] = useState<string>('all');
   const [province, setProvince] = useState<string>('all');
   const [district, setDistrict] = useState<string>('all');
-  const [municipality, setMunicipality] = useState<string>('');
+  const [municipality, setMunicipality] = useState<string>('all');
   const [status, setStatus] = useState<string>('all');
   const [sort, setSort] = useState<SortKey>('newest');
   const [page, setPage] = useState(1);
@@ -45,6 +46,15 @@ export default function Browse() {
   const districtOptions = useMemo(
     () => districtsFor(province === 'all' ? null : province),
     [province],
+  );
+
+  // Cascading municipality dropdown — reuses the same hook Sherlock's
+  // "Discover by location" tab uses, so the list is sourced from the
+  // municipalities table (753 official local-level units, kept canonical
+  // server-side). Only loads when both province and district are set.
+  const munQuery = useMunicipalities(
+    province === 'all' ? null : province,
+    district === 'all' ? null : district,
   );
 
   useEffect(() => {
@@ -56,10 +66,18 @@ export default function Browse() {
 
   const filtered = useMemo(() => {
     const list = projects.filter(p => {
-      if (sector !== 'all' && p.sector !== sector) return false;
+      // Multi-sector match: a project surfaces under any of its sectors[]
+      // entries OR its primary `sector` column. So a hydropower project
+      // tagged sectors=[Energy, Agriculture & Irrigation] appears under
+      // both Energy and Agriculture & Irrigation filters.
+      if (sector !== 'all') {
+        const inPrimary = p.sector === sector;
+        const inArray = Array.isArray(p.sectors) && p.sectors.includes(sector);
+        if (!inPrimary && !inArray) return false;
+      }
       if (province !== 'all' && p.province !== province) return false;
       if (district !== 'all' && p.district !== district) return false;
-      if (municipality && !(p.municipality ?? '').toLowerCase().includes(municipality.toLowerCase())) return false;
+      if (municipality !== 'all' && (p.municipality ?? '') !== municipality) return false;
       // The Rastra Gaurav column on `projects` is `national_pride` (see
       // migration 20260513170000_projects_national_pride.sql). Keep
       // `is_rastra_gaurav` as a fallback in case future code lands either.
@@ -94,6 +112,10 @@ export default function Browse() {
 
   // Reset to page 1 whenever the filter set changes.
   useEffect(() => { setPage(1); }, [q, sector, province, district, municipality, status, sort, rastraOnly]);
+
+  // When the province or district changes, clear any previously-selected
+  // municipality — it may no longer be valid in the new geo scope.
+  useEffect(() => { setMunicipality('all'); }, [province, district]);
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -134,11 +156,26 @@ export default function Browse() {
                 {districtOptions.map(d => <SelectItem key={d} value={d}>{d}</SelectItem>)}
               </SelectContent>
             </Select>
-            <Input
-              value={municipality}
-              onChange={e => setMunicipality(e.target.value)}
-              placeholder="Municipality / RM"
-            />
+            <Select value={municipality} onValueChange={setMunicipality} disabled={province === 'all' || district === 'all' || munQuery.isLoading}>
+              <SelectTrigger>
+                <SelectValue placeholder={
+                  province === 'all' ? 'Pick province first'
+                  : district === 'all' ? 'Pick district first'
+                  : munQuery.isLoading ? 'Loading…'
+                  : 'Municipality / RM'
+                } />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">
+                  {province === 'all' || district === 'all' ? 'All municipalities' : `All in ${district}`}
+                </SelectItem>
+                {(munQuery.data ?? []).map(m => (
+                  <SelectItem key={m.id} value={m.name}>
+                    {m.name} <span className="text-[10px] text-muted-foreground ml-1">({m.kind.replace('_', ' ')})</span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <Select value={status} onValueChange={setStatus}>
               <SelectTrigger><SelectValue placeholder="Status" /></SelectTrigger>
               <SelectContent>

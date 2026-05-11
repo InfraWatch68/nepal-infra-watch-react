@@ -280,7 +280,8 @@ serve(async (req) => {
 Return ONLY a JSON object (no prose, no markdown, no code fence) matching this schema:
 {
   "title": string,                                    // <= 200 chars, the project's actual name
-  "sector": one of ${JSON.stringify(SECTORS)},
+  "sector": one of ${JSON.stringify(SECTORS)},        // PRIMARY sector — single value, matches the most dominant theme
+  "sectors": [one of ${JSON.stringify(SECTORS)}, ...], // ALL applicable sectors, in priority order. A hydropower project that also irrigates farmland is ["Energy","Agriculture & Irrigation"]. Always include the primary sector as element 0.
   "project_type": one of ${JSON.stringify(PROJECT_TYPES)} or null,
   "province": one of ${JSON.stringify(PROVINCES)} or null,
   "district": string or null,
@@ -454,13 +455,26 @@ Other rules:
           const esia = ESIA_VALUES.includes(parsed.esia_status) ? parsed.esia_status : null;
           // Sector default: in geo mode, use the sector we searched for; else "Transport" as before.
           const fallbackSector = search.sector && SECTORS.includes(search.sector) ? search.sector : "Transport";
+          // Multi-sector array. Filter to valid SECTORS, dedupe, ensure primary
+          // sits at index 0. Falls back to [primary] when AI didn't emit the array.
+          const primarySector = SECTORS.includes(parsed.sector) ? parsed.sector : fallbackSector;
+          const rawSectors: any[] = Array.isArray(parsed.sectors) ? parsed.sectors : [];
+          const sectorsSeen = new Set<string>([primarySector]);
+          const sectorsArr: string[] = [primarySector];
+          for (const s of rawSectors) {
+            if (typeof s !== "string" || !SECTORS.includes(s)) continue;
+            if (sectorsSeen.has(s)) continue;
+            sectorsSeen.add(s); sectorsArr.push(s);
+            if (sectorsArr.length >= 4) break;
+          }
           const { data: proj, error: pErr } = await admin
             .from("projects")
             .insert({
               title: String(parsed.title).slice(0, 200),
               slug,
               description: parsed.description ?? null,
-              sector: SECTORS.includes(parsed.sector) ? parsed.sector : fallbackSector,
+              sector: primarySector,
+              sectors: sectorsArr,
               project_type: PROJECT_TYPES.includes(parsed.project_type) ? parsed.project_type : null,
               province: PROVINCES.includes(parsed.province) ? parsed.province : null,
               district: parsed.district ?? null,

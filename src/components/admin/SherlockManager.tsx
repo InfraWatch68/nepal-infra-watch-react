@@ -109,6 +109,11 @@ export function SherlockManager() {
 function QueueTab() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [clearing, setClearing] = useState(false);
+  // Bulk selection. Same pattern as the moderation lists elsewhere — the bar
+  // hides itself when nothing's selected, surfaces Cancel + Delete when any
+  // checkbox is ticked.
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     const { data } = await supabase
@@ -155,6 +160,47 @@ function QueueTab() {
     refresh();
   };
 
+  const toggleSel = (id: string) => setSel(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  const toggleSelAll = (v: boolean) => setSel(v ? new Set(jobs.map(j => j.id)) : new Set());
+
+  // Bulk delete — wipes selected rows outright (regardless of status). For
+  // queued / running rows we cancel them first via the same status flip,
+  // so any active edge fn knows to mark this run intent-cancelled. Done /
+  // failed / cancelled rows just delete directly.
+  const bulkDelete = async () => {
+    if (sel.size === 0) return;
+    const selectedJobs = jobs.filter(j => sel.has(j.id));
+    const hasRunning = selectedJobs.some(j => j.status === 'running');
+    const verb = `Delete ${sel.size} job${sel.size === 1 ? '' : 's'}`;
+    const warn = hasRunning ? ' Includes running jobs — their edge functions may still complete and burn tokens.' : '';
+    if (!confirm(verb + '?' + warn)) return;
+    setBulkBusy(true);
+    const { error } = await supabase.from('sherlock_jobs').delete().in('id', [...sel]);
+    setBulkBusy(false);
+    if (error) return toast.error(error.message);
+    toast.success(`Deleted ${sel.size} job${sel.size === 1 ? '' : 's'}`);
+    setSel(new Set());
+    refresh();
+  };
+
+  // Bulk cancel — flips active rows (queued / running) to cancelled status.
+  // Done / failed / cancelled rows are skipped silently.
+  const bulkCancel = async () => {
+    if (sel.size === 0) return;
+    const activeIds = jobs.filter(j => sel.has(j.id) && (j.status === 'queued' || j.status === 'running')).map(j => j.id);
+    if (activeIds.length === 0) return toast.message('Nothing to cancel in the selection — all selected jobs are already finished.');
+    if (!confirm(`Cancel ${activeIds.length} active job${activeIds.length === 1 ? '' : 's'}? Running ones may still finish and consume tokens.`)) return;
+    setBulkBusy(true);
+    const { error } = await supabase.from('sherlock_jobs')
+      .update({ status: 'cancelled', finished_at: new Date().toISOString(), error_text: 'Cancelled by operator (bulk)' })
+      .in('id', activeIds);
+    setBulkBusy(false);
+    if (error) return toast.error(error.message);
+    toast.success(`Cancelled ${activeIds.length} job${activeIds.length === 1 ? '' : 's'}`);
+    setSel(new Set());
+    refresh();
+  };
+
   const summarize = (j: Job) => {
     const p = j.params || {};
     const pieces: string[] = [];
@@ -197,6 +243,30 @@ function QueueTab() {
         </Button>
       </div>
 
+      {/* Bulk select-all bar — appears only when one or more rows are
+          selected. Approve doesn't apply here; the actions are Cancel
+          (flip active rows to cancelled) and Delete (wipe rows outright). */}
+      {sel.size > 0 && (
+        <div className="flex items-center justify-between gap-2 p-2 rounded-md border border-info/40 bg-info/5 flex-wrap">
+          <label className="flex items-center gap-2 cursor-pointer text-xs">
+            <Checkbox
+              checked={sel.size === jobs.length && jobs.length > 0}
+              onCheckedChange={(v) => toggleSelAll(!!v)}
+              aria-label="Select all jobs"
+            />
+            <span>{sel.size} of {jobs.length} selected</span>
+          </label>
+          <div className="flex items-center gap-1">
+            <Button size="sm" variant="ghost" className="h-7 text-xs text-warning hover:bg-warning/10" onClick={bulkCancel} disabled={bulkBusy}>
+              <X className="h-3.5 w-3.5 mr-1" /> Cancel
+            </Button>
+            <Button size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={bulkDelete} disabled={bulkBusy}>
+              <Trash2 className="h-3.5 w-3.5 mr-1" /> Delete
+            </Button>
+          </div>
+        </div>
+      )}
+
       {jobs.length === 0 ? (
         <p className="text-xs text-muted-foreground italic">No jobs yet. Enqueue one from "Discover by location" or "Topic filters".</p>
       ) : (
@@ -204,6 +274,12 @@ function QueueTab() {
           {jobs.map(j => (
             <Card key={j.id} className="p-2.5 text-xs">
               <div className="flex items-center gap-2 flex-wrap">
+                <Checkbox
+                  checked={sel.has(j.id)}
+                  onCheckedChange={() => toggleSel(j.id)}
+                  aria-label="Select job"
+                  className="h-3.5 w-3.5"
+                />
                 {statusBadge(j.status)}
                 <span className="font-mono text-[10px] text-muted-foreground">{j.kind}</span>
                 <span className="font-mono text-[10px] truncate flex-1 min-w-0">{summarize(j)}</span>

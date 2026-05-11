@@ -47,8 +47,15 @@ export function ProjectCard({ p }: { p: any }) {
           )}
         </div>
         <div className="p-4 space-y-2.5">
-          <div className="flex items-center gap-2 text-[11px] uppercase tracking-wider text-muted-foreground font-mono">
+          <div className="flex items-center gap-2 text-[11px] uppercase tracking-wider text-muted-foreground font-mono flex-wrap">
             <span>{p.sector}</span>
+            {/* Secondary sectors from sectors[]: anything beyond the primary
+                shows as a small "+ N" badge so multi-sector projects (e.g.
+                hydropower that also supplies irrigation) signal that
+                breadth in the card. */}
+            {Array.isArray(p.sectors) && p.sectors.filter((s: string) => s && s !== p.sector).slice(0, 2).map((s: string) => (
+              <span key={s} className="text-[10px] normal-case tracking-normal bg-muted/60 text-foreground/70 rounded px-1.5 py-0.5">+ {s}</span>
+            ))}
             {p.province && <><span>·</span><span>{p.province}</span></>}
           </div>
           <h3 className="font-display text-lg font-semibold leading-snug line-clamp-2 group-hover:text-accent transition-colors">{p.title}</h3>
