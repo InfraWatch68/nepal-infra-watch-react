@@ -135,21 +135,41 @@ serve(async (req) => {
       return json({ error: "No AI key configured (set MISTRAL_API_KEY, LOVABLE_API_KEY, or GOOGLE_AI_API_KEY)" }, 500);
     }
 
-    // Auth gate: require admin or reviewer role.
+    // Auth gate: accept either (a) an admin/coadmin/reviewer user JWT, or
+    // (b) a service_role JWT directly. The latter lets pg_cron / GitHub
+    // Actions invoke this function for Sherlock-style autonomous discovery.
+    // We decode the JWT claim rather than string-comparing because the project
+    // has multiple service_role-flavoured keys (legacy JWT + modern sb_secret).
     const authHeader = req.headers.get("Authorization") ?? "";
     const jwt = authHeader.replace(/^Bearer\s+/i, "");
     if (!jwt) return json({ error: "Unauthorized" }, 401);
-    const userClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      global: { headers: { Authorization: `Bearer ${jwt}` } },
-    });
-    const { data: userData, error: userErr } = await userClient.auth.getUser();
-    if (userErr || !userData?.user) return json({ error: "Unauthorized" }, 401);
-    const { data: roles } = await userClient
-      .from("user_roles").select("role").eq("user_id", userData.user.id);
-    const isReviewer = (roles ?? []).some(
-      (r: any) => r.role === "reviewer" || r.role === "coadmin" || r.role === "admin",
-    );
-    if (!isReviewer) return json({ error: "Forbidden" }, 403);
+
+    let isServiceRole = false;
+    try {
+      const parts = jwt.split(".");
+      if (parts.length === 3) {
+        const payload = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
+        if (payload?.role === "service_role") isServiceRole = true;
+      }
+    } catch { /* not a parseable JWT — treat as user token */ }
+
+    // Modern Supabase secret keys (sb_secret_…) aren't JWTs but still grant
+    // service-role access. Accept exact match against the env-provided secret.
+    if (!isServiceRole && jwt === SUPABASE_SERVICE_ROLE_KEY) isServiceRole = true;
+
+    if (!isServiceRole) {
+      const userClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+        global: { headers: { Authorization: `Bearer ${jwt}` } },
+      });
+      const { data: userData, error: userErr } = await userClient.auth.getUser();
+      if (userErr || !userData?.user) return json({ error: "Unauthorized" }, 401);
+      const { data: roles } = await userClient
+        .from("user_roles").select("role").eq("user_id", userData.user.id);
+      const isReviewer = (roles ?? []).some(
+        (r: any) => r.role === "reviewer" || r.role === "coadmin" || r.role === "admin",
+      );
+      if (!isReviewer) return json({ error: "Forbidden" }, 403);
+    }
 
     const body = await req.json().catch(() => ({}));
     const topic: string | undefined = body.topic?.toString().trim() || undefined;

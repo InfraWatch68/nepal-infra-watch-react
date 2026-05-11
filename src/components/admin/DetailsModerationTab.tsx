@@ -6,10 +6,11 @@ import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { ExternalLink, Sparkles, Loader2, RefreshCw, CheckCircle2, XCircle } from 'lucide-react';
+import { ExternalLink, Sparkles, Loader2, RefreshCw, CheckCircle2, XCircle, Pencil } from 'lucide-react';
 import { formatNPR } from '@/lib/parseCoords';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
+import { DetailRowDialog, bucketForTable } from '@/components/admin/DetailRowDialog';
 
 const SEVERITY_BADGE: Record<string, string> = {
   low:      'bg-muted/60 text-muted-foreground border-muted',
@@ -137,6 +138,18 @@ export function DetailsModerationTab() {
                       <Button size="sm" onClick={() => review(t.key, r.id, 'approved')} disabled={busyId === `${t.key}:${r.id}`}>
                         {busyId === `${t.key}:${r.id}` ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />} Approve
                       </Button>
+                      {(() => {
+                        const bucket = bucketForTable(t.key);
+                        if (!bucket) return null;
+                        return (
+                          <DetailRowDialog
+                            mode="edit" kind={bucket} row={r} approveOnSave onSaved={refresh}
+                            trigger={
+                              <Button size="sm" variant="secondary"><Pencil className="h-3.5 w-3.5" /> Edit</Button>
+                            }
+                          />
+                        );
+                      })()}
                       <Button size="sm" variant="outline" onClick={() => review(t.key, r.id, 'rejected')} disabled={busyId === `${t.key}:${r.id}`}>
                         <XCircle className="h-3.5 w-3.5" /> Reject
                       </Button>

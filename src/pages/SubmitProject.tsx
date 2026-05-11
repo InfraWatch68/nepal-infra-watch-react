@@ -15,8 +15,20 @@ import { useMemo } from 'react';
 import { parseCoordinates } from '@/lib/parseCoords';
 import { CoordPickerDialog } from '@/components/CoordPickerDialog';
 import { ImageDropzone } from '@/components/ImageDropzone';
+import { SubmitDetailsSection, emptyDetails, detailsForInsert, type DetailsState } from '@/components/SubmitDetailsSection';
 import { toast } from 'sonner';
 import { z } from 'zod';
+
+// Maps the in-memory bucket key to its real DB table.
+const DETAIL_TABLES: Record<keyof DetailsState, string> = {
+  funding:      'project_funding',
+  documents:    'project_documents',
+  stakeholders: 'project_stakeholders',
+  risks:        'project_risks',
+  impact:       'project_impact',
+  procurement:  'project_procurement',
+  compliance:   'project_compliance',
+};
 
 const ESIA_OPTIONS = ['not_started','in_progress','iee_approved','eia_approved','rejected','exempt'];
 const PROCUREMENT_METHODS = ['ICB (international)','NCB (national)','Limited','Direct','Framework','PPP','Two-stage','Single-source','Other'];
@@ -59,6 +71,7 @@ export default function SubmitProject() {
   const [form, setForm] = useState<any>({ sector: SECTORS[0] });
   const [editLoaded, setEditLoaded] = useState<boolean>(!isEdit);
   const [sources, setSources] = useState<SourceRow[]>([{ url: '', title: '', source_type: 'article' }]);
+  const [details, setDetails] = useState<DetailsState>(emptyDetails());
   const set = (k: string, v: any) => setForm((f: any) => ({ ...f, [k]: v }));
   const setSource = (i: number, patch: Partial<SourceRow>) =>
     setSources(rows => rows.map((r, idx) => idx === i ? { ...r, ...patch } : r));
@@ -86,6 +99,21 @@ export default function SubmitProject() {
       if ((src ?? []).length > 0) {
         setSources((src ?? []).map((s: any) => ({ url: s.url ?? '', title: s.title ?? '', source_type: s.source_type ?? 'article' })));
       }
+
+      // Load this user's editable detail rows (pending or changes_requested).
+      // Approved rows are intentionally left alone — they go through the admin
+      // moderation tab so the contributor doesn't accidentally bounce an
+      // already-cleared row back into the queue.
+      const loaded: DetailsState = emptyDetails();
+      await Promise.all((Object.keys(DETAIL_TABLES) as (keyof DetailsState)[]).map(async (k) => {
+        const tbl = DETAIL_TABLES[k];
+        const { data: rows } = await supabase.from(tbl as any).select('*')
+          .eq('project_id', editId)
+          .eq('submitted_by', user.id)
+          .in('approval_status', ['pending', 'changes_requested']);
+        loaded[k] = (rows ?? []) as any[];
+      }));
+      setDetails(loaded);
       setEditLoaded(true);
     })();
     return () => { cancelled = true; };
@@ -169,8 +197,42 @@ export default function SubmitProject() {
       if (sErr) console.warn('Source insert failed:', sErr.message);
     }
 
+    // Comprehensive detail rows. In edit mode, drop this user's pending /
+    // changes_requested rows first so the form is the source of truth — but
+    // never touch approved rows (those belong to the moderation queue).
+    const detailInserts = detailsForInsert(details);
+    let detailRowCount = 0;
+    for (const [bucket, tbl] of Object.entries(DETAIL_TABLES) as [keyof DetailsState, string][]) {
+      const rows = detailInserts[bucket];
+      if (isEdit) {
+        await supabase.from(tbl as any)
+          .delete()
+          .eq('project_id', projectId)
+          .eq('submitted_by', user.id)
+          .in('approval_status', ['pending', 'changes_requested']);
+      }
+      if (rows.length === 0) continue;
+      const payload = rows.map(r => ({
+        ...r,
+        project_id: projectId,
+        submitted_by: user.id,
+        submitted_by_ai: false,
+        approval_status: 'pending',
+      }));
+      const { error: dErr } = await supabase.from(tbl as any).insert(payload);
+      if (dErr) {
+        console.warn(`${tbl} insert failed:`, dErr.message);
+        toast.warning(`${bucket}: ${dErr.message}`);
+      } else {
+        detailRowCount += rows.length;
+      }
+    }
+
     setLoading(false);
-    toast.success(isEdit ? 'Updated — back in the review queue.' : 'Submitted! Reviewers will look at it shortly.');
+    const detailMsg = detailRowCount > 0 ? ` (${detailRowCount} detail row${detailRowCount === 1 ? '' : 's'})` : '';
+    toast.success(isEdit
+      ? `Updated — back in the review queue.${detailMsg}`
+      : `Submitted! Reviewers will look at it shortly.${detailMsg}`);
     nav('/dashboard');
   };
 
@@ -282,6 +344,8 @@ export default function SubmitProject() {
                 </div>
               ))}
             </div>
+
+            <SubmitDetailsSection value={details} onChange={setDetails} />
 
             <div className="flex gap-3 pt-2">
               <Button type="submit" disabled={loading} className="bg-accent hover:bg-accent/90 text-accent-foreground">

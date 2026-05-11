@@ -5,10 +5,12 @@ import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Sparkles, Loader2, ExternalLink, Wallet, FileText, Users, AlertTriangle, BarChart3, Gavel, ShieldCheck } from 'lucide-react';
+import { Sparkles, Loader2, ExternalLink, Wallet, FileText, Users, AlertTriangle, BarChart3, Gavel, ShieldCheck, Plus, Pencil, Trash2 } from 'lucide-react';
 import { formatNPR } from '@/lib/parseCoords';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
+import { DetailRowDialog, DETAIL_TABLES } from '@/components/admin/DetailRowDialog';
+import type { DetailsState } from '@/components/SubmitDetailsSection';
 
 // Severity badge oval — colored fill, not just border. Used in Risks tab + admin moderation row summary.
 const SEVERITY_BADGE: Record<string, string> = {
@@ -47,6 +49,21 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
       .then(({ data }) => setLastRun((data as any)?.last_comprehensive_analysis_at ?? null));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
+
+  const deleteRow = async (bucket: keyof DetailsState, id: string) => {
+    if (!confirm('Delete this row? This cannot be undone.')) return;
+    const tbl = DETAIL_TABLES[bucket];
+    const { error } = await supabase.from(tbl as any).delete().eq('id', id);
+    if (error) return toast.error(error.message);
+    await supabase.from('project_reviews').insert({
+      target_table: tbl, target_id: String(id),
+      reviewer_id: (await supabase.auth.getUser()).data.user?.id ?? null,
+      reviewer_role: 'admin', action: 'rejected', notes: 'Moderator deleted row',
+      was_admin: true,
+    });
+    toast.success('Row deleted');
+    loadAll();
+  };
 
   const runAnalysis = async () => {
     setBusy(true);
@@ -104,6 +121,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
         </TabsList>
 
         <TabsContent value="funding" className="space-y-2 mt-4">
+          <ModToolbar bucket="funding" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {funding.length === 0 ? <Empty msg="No funding records yet." /> : funding.map(f => (
             <Card key={f.id} className="p-4">
               <div className="flex items-start justify-between gap-3 mb-1">
@@ -118,11 +136,13 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               {f.lender_terms && <p className="text-xs mt-2 text-muted-foreground">Terms: {f.lender_terms}</p>}
               {f.notes && <p className="text-sm mt-1">{f.notes}</p>}
               <SourceLink url={f.source_url} sources={f.sources} />
+              <ModRowControls bucket="funding" row={f} isReviewer={isReviewer} onSaved={loadAll} onDelete={() => deleteRow('funding', f.id)} />
             </Card>
           ))}
         </TabsContent>
 
         <TabsContent value="documents" className="space-y-2 mt-4">
+          <ModToolbar bucket="documents" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {documents.length === 0 ? <Empty msg="No documents linked yet." /> : documents.map(d => (
             <Card key={d.id} className="p-4">
               <div className="flex items-start justify-between gap-3 mb-1">
@@ -137,11 +157,13 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
                 {d.language && <> · Lang: {d.language}</>}
               </div>
               {d.notes && <p className="text-sm mt-2">{d.notes}</p>}
+              <ModRowControls bucket="documents" row={d} isReviewer={isReviewer} onSaved={loadAll} onDelete={() => deleteRow('documents', d.id)} />
             </Card>
           ))}
         </TabsContent>
 
         <TabsContent value="stakeholders" className="space-y-2 mt-4">
+          <ModToolbar bucket="stakeholders" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {stakeholders.length === 0 ? <Empty msg="No stakeholders recorded yet." /> : stakeholders.map(s => (
             <Card key={s.id} className="p-4">
               <div className="flex items-start justify-between gap-3 mb-1">
@@ -157,11 +179,13 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               </div>
               {s.notes && <p className="text-sm mt-2">{s.notes}</p>}
               <SourceLink url={s.source_url} sources={s.sources} />
+              <ModRowControls bucket="stakeholders" row={s} isReviewer={isReviewer} onSaved={loadAll} onDelete={() => deleteRow('stakeholders', s.id)} />
             </Card>
           ))}
         </TabsContent>
 
         <TabsContent value="risks" className="space-y-2 mt-4">
+          <ModToolbar bucket="risks" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {risks.length === 0 ? <Empty msg="No risks logged yet." /> : risks.map(r => (
             <Card key={r.id} className={cn("p-4 border-l-4",
               r.severity === 'critical' && 'border-l-destructive',
@@ -180,11 +204,13 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               </div>
               {r.description && <p className="text-sm mt-1">{r.description}</p>}
               <SourceLink url={r.source_url} sources={r.sources} />
+              <ModRowControls bucket="risks" row={r} isReviewer={isReviewer} onSaved={loadAll} onDelete={() => deleteRow('risks', r.id)} />
             </Card>
           ))}
         </TabsContent>
 
         <TabsContent value="impact" className="space-y-2 mt-4">
+          <ModToolbar bucket="impact" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {impact.length === 0 ? <Empty msg="No impact metrics yet." /> : impact.map(i => (
             <Card key={i.id} className="p-4">
               <div className="flex items-start justify-between gap-3 mb-1">
@@ -199,11 +225,13 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               {i.methodology && <p className="text-xs mt-2 text-muted-foreground">Method: {i.methodology}</p>}
               {i.notes && <p className="text-sm mt-1">{i.notes}</p>}
               <SourceLink url={i.source_url} sources={i.sources} />
+              <ModRowControls bucket="impact" row={i} isReviewer={isReviewer} onSaved={loadAll} onDelete={() => deleteRow('impact', i.id)} />
             </Card>
           ))}
         </TabsContent>
 
         <TabsContent value="procurement" className="space-y-2 mt-4">
+          <ModToolbar bucket="procurement" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {procurement.length === 0 ? <Empty msg="No procurement records yet." /> : procurement.map(p => (
             <Card key={p.id} className="p-4">
               <div className="flex items-start justify-between gap-3 mb-1">
@@ -225,11 +253,13 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               </div>
               {p.notes && <p className="text-sm mt-2">{p.notes}</p>}
               <SourceLink url={p.source_url} sources={p.sources} />
+              <ModRowControls bucket="procurement" row={p} isReviewer={isReviewer} onSaved={loadAll} onDelete={() => deleteRow('procurement', p.id)} />
             </Card>
           ))}
         </TabsContent>
 
         <TabsContent value="compliance" className="space-y-2 mt-4">
+          <ModToolbar bucket="compliance" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {compliance.length === 0 ? <Empty msg="No compliance items yet." /> : compliance.map(c => (
             <Card key={c.id} className="p-4">
               <div className="flex items-start justify-between gap-3 mb-1">
@@ -252,6 +282,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
                 </a>
               )}
               <SourceLink url={c.source_url} sources={c.sources} />
+              <ModRowControls bucket="compliance" row={c} isReviewer={isReviewer} onSaved={loadAll} onDelete={() => deleteRow('compliance', c.id)} />
             </Card>
           ))}
         </TabsContent>
@@ -262,6 +293,50 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
 
 function Empty({ msg }: { msg: string }) {
   return <div className="p-8 text-center text-muted-foreground text-sm border rounded-md">{msg}</div>;
+}
+
+// Moderator-only toolbar above each tab's row list. Surfaces the
+// "+ Add row" action that opens a DetailRowDialog in add mode.
+function ModToolbar({ bucket, projectId, isReviewer, onSaved }: {
+  bucket: keyof DetailsState; projectId: number | string; isReviewer: boolean; onSaved: () => void;
+}) {
+  if (!isReviewer) return null;
+  return (
+    <div className="flex justify-end">
+      <DetailRowDialog
+        mode="add" kind={bucket} projectId={projectId} onSaved={onSaved}
+        trigger={
+          <Button size="sm" variant="outline" className="text-xs">
+            <Plus className="h-3.5 w-3.5 mr-1" /> Add row
+          </Button>
+        }
+      />
+    </div>
+  );
+}
+
+// Moderator-only per-card controls — Edit (opens DetailRowDialog in edit mode)
+// and Delete (with confirm). Hidden for contributors so the public detail view
+// stays uncluttered.
+function ModRowControls({ bucket, row, isReviewer, onSaved, onDelete }: {
+  bucket: keyof DetailsState; row: any; isReviewer: boolean; onSaved: () => void; onDelete: () => void;
+}) {
+  if (!isReviewer) return null;
+  return (
+    <div className="flex items-center justify-end gap-1 mt-3 pt-2 border-t border-dashed border-muted">
+      <DetailRowDialog
+        mode="edit" kind={bucket} row={row} onSaved={onSaved}
+        trigger={
+          <Button size="sm" variant="ghost" className="h-7 text-xs text-muted-foreground hover:text-accent">
+            <Pencil className="h-3 w-3 mr-1" /> Edit
+          </Button>
+        }
+      />
+      <Button size="sm" variant="ghost" className="h-7 text-xs text-muted-foreground hover:text-destructive" onClick={onDelete}>
+        <Trash2 className="h-3 w-3 mr-1" /> Delete
+      </Button>
+    </div>
+  );
 }
 
 function SourceLink({ url, sources }: { url?: string | null; sources?: string[] | null }) {
