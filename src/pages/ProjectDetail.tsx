@@ -318,21 +318,16 @@ export default function ProjectDetail() {
               <p className="text-sm text-muted-foreground italic">Generating brief…</p>
             ) : aiSummary ? (
               <div className="space-y-4">
-                {/* 1. The combined brief paragraphs from ai-project-insights. */}
+                {/* One continuous body. The brief produced by ai-project-insights
+                    already weaves in the latest analysis synthesis (narrative_summary)
+                    + gaps + project record + comprehensive details, so we render it
+                    as a single block here rather than repeating the synthesis as a
+                    separate subsection. */}
                 <p className="text-sm leading-relaxed whitespace-pre-wrap">{aiSummary}</p>
 
-                {/* 2. AI synthesis from the latest analysis run, when available. */}
-                {latestAnalysisRun?.narrative_summary && (
-                  <div className="pt-4 border-t border-accent/20">
-                    <p className="text-[10px] uppercase tracking-[0.2em] font-mono text-accent mb-1.5 flex items-center gap-1.5">
-                      <Sparkles className="h-3 w-3" />
-                      AI synthesis · refreshed {relTimeShort(latestAnalysisRun.finished_at ?? latestAnalysisRun.started_at)}
-                    </p>
-                    <p className="text-sm leading-relaxed whitespace-pre-wrap">{latestAnalysisRun.narrative_summary}</p>
-                  </div>
-                )}
-
-                {/* 3. Gaps & contradictions banner. */}
+                {/* Gaps & contradictions stay at the bottom as their own banner —
+                    they're easier to act on as a bulleted callout than buried in
+                    the body prose. */}
                 {latestAnalysisRun?.gaps_and_contradictions && latestAnalysisRun.gaps_and_contradictions.length > 0 && (
                   <div className="p-3 rounded-md border border-warning/40 bg-warning/10">
                     <p className="text-xs font-semibold text-warning mb-1.5 flex items-center gap-1.5">
@@ -664,19 +659,6 @@ function ReportIssueForm({ projectId, projectTitle }: { projectId: string | numb
       </form>
     </Card>
   );
-}
-
-// Compact relative-time label used by the Brief and RunStatsLine.
-function relTimeShort(iso: string | null | undefined): string {
-  if (!iso) return '—';
-  const ms = Date.now() - new Date(iso).getTime();
-  const m = Math.floor(ms / 60000);
-  if (m < 1) return 'just now';
-  if (m < 60) return `${m} min ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h} h ago`;
-  const d = Math.floor(h / 24);
-  return `${d} d ago`;
 }
 
 // Stats line for the Project Record header — mirrors the RunSummaryLine in

@@ -155,11 +155,12 @@ export function exportProjectReport(
     },
   ];
   if (project.description) sections.push({ heading: 'Description', body: project.description });
+  // The "AI brief" already weaves in the analysis narrative_summary, so we
+  // emit only one synthesis block in the PDF (matching what's on screen).
+  // narrativeSummary is intentionally not emitted as its own section to
+  // avoid duplicating the brief's body. It stays in the function signature
+  // for compatibility / future use.
   if (aiSummary) sections.push({ heading: 'AI brief', body: aiSummary });
-  // Narrative + gaps come from the latest project_analysis_runs row; they
-  // belong in the same exported document as the brief so a downloaded PDF
-  // captures the full AI-generated picture the user saw on screen.
-  if (narrativeSummary) sections.push({ heading: 'AI synthesis', body: narrativeSummary });
   if (gapsAndContradictions.length > 0) {
     sections.push({
       heading: 'Gaps & contradictions',
