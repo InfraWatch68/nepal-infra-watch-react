@@ -21,6 +21,9 @@ const SORT_OPTIONS = [
   { v: 'budget_desc', label: 'Budget (high–low)' },
   { v: 'budget_asc', label: 'Budget (low–high)' },
   { v: 'remaining', label: 'Most work remaining' },
+  { v: 'progress_desc', label: 'Most progress' },
+  { v: 'pride_first', label: 'National Pride first' },
+  { v: 'recently_updated', label: 'Recently analysed' },
 ] as const;
 type SortKey = typeof SORT_OPTIONS[number]['v'];
 
@@ -57,20 +60,30 @@ export default function Browse() {
       if (province !== 'all' && p.province !== province) return false;
       if (district !== 'all' && p.district !== district) return false;
       if (municipality && !(p.municipality ?? '').toLowerCase().includes(municipality.toLowerCase())) return false;
-      if (rastraOnly && !p.is_rastra_gaurav) return false;
+      // The Rastra Gaurav column on `projects` is `national_pride` (see
+      // migration 20260513170000_projects_national_pride.sql). Keep
+      // `is_rastra_gaurav` as a fallback in case future code lands either.
+      if (rastraOnly && !(p.national_pride ?? p.is_rastra_gaurav)) return false;
       if (status !== 'all' && p.status !== status) return false;
       if (q && !`${p.title} ${p.description ?? ''} ${p.contractor ?? ''} ${p.implementing_agency ?? ''}`.toLowerCase().includes(q.toLowerCase())) return false;
       return true;
     });
     const sorted = [...list];
+    const np = (p: any) => !!(p?.national_pride ?? p?.is_rastra_gaurav);
+    const ts = (s: string | null | undefined) => s ? new Date(s).getTime() : 0;
     switch (sort) {
-      case 'oldest':       sorted.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()); break;
+      case 'oldest':       sorted.sort((a, b) => ts(a.created_at) - ts(b.created_at)); break;
       case 'name':         sorted.sort((a, b) => (a.title ?? '').localeCompare(b.title ?? '')); break;
       case 'budget_desc':  sorted.sort((a, b) => (b.budget_npr ?? 0) - (a.budget_npr ?? 0)); break;
       case 'budget_asc':   sorted.sort((a, b) => (a.budget_npr ?? 0) - (b.budget_npr ?? 0)); break;
       case 'remaining':    sorted.sort((a, b) => (a.progress_percent ?? 0) - (b.progress_percent ?? 0)); break;
+      case 'progress_desc':sorted.sort((a, b) => (b.progress_percent ?? 0) - (a.progress_percent ?? 0)); break;
+      case 'pride_first':  sorted.sort((a, b) => (Number(np(b)) - Number(np(a))) || (ts(b.created_at) - ts(a.created_at))); break;
+      case 'recently_analysed':
+      case 'recently_updated':
+                           sorted.sort((a, b) => ts(b.last_comprehensive_analysis_at) - ts(a.last_comprehensive_analysis_at) || ts(b.created_at) - ts(a.created_at)); break;
       case 'newest':
-      default:             sorted.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()); break;
+      default:             sorted.sort((a, b) => ts(b.created_at) - ts(a.created_at)); break;
     }
     return sorted;
   }, [projects, q, sector, province, district, municipality, status, sort, rastraOnly]);

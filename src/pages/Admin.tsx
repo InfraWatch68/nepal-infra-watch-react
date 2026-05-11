@@ -474,6 +474,8 @@ export default function Admin() {
             </div>
           </div>
 
+          <AutoApproveSettingsCard />
+
           <SherlockManager />
 
           <div className="space-y-2 pt-3 border-t border-accent/20">
@@ -995,5 +997,85 @@ function AdsManager({ ads, onChange }: any) {
         <p className="text-xs text-muted-foreground">Slot keys used: home_hero, home_mid, home_cta, browse_sidebar, project_sidebar, analytics_bottom</p>
       </Card>
     </div>
+  );
+}
+
+// Site-wide auto-approval controller. Lives on the admin page so a moderator
+// can dial the trust level for AI-submitted projects without touching SQL.
+// Writes to public.site_settings (singleton row id=1). When enabled, the
+// BEFORE INSERT trigger on projects auto-approves any AI submission with
+// confidence_score >= threshold, which cascades through the analysis +
+// child-row triggers (so a "trusted" Sherlock hit ends up with a fully
+// populated detail page within minutes).
+function AutoApproveSettingsCard() {
+  const [enabled, setEnabled] = useState(false);
+  const [threshold, setThreshold] = useState(0.85);
+  const [updatedAt, setUpdatedAt] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.from('site_settings').select('*').eq('id', 1).maybeSingle();
+      if (data) {
+        setEnabled(!!(data as any).auto_approve_enabled);
+        setThreshold(Number((data as any).auto_approve_threshold ?? 0.85));
+        setUpdatedAt((data as any).updated_at ?? null);
+      }
+      setLoaded(true);
+    })();
+  }, []);
+
+  const save = async (nextEnabled: boolean, nextThreshold: number) => {
+    setBusy(true);
+    const { data: u } = await supabase.auth.getUser();
+    const { error } = await supabase.from('site_settings').update({
+      auto_approve_enabled: nextEnabled,
+      auto_approve_threshold: Number(nextThreshold.toFixed(2)),
+      updated_at: new Date().toISOString(),
+      updated_by: u.user?.id ?? null,
+    }).eq('id', 1);
+    setBusy(false);
+    if (error) return toast.error(error.message);
+    setEnabled(nextEnabled);
+    setThreshold(nextThreshold);
+    setUpdatedAt(new Date().toISOString());
+    toast.success(nextEnabled ? `Auto-approve ON — AI rows ≥ ${Math.round(nextThreshold * 100)}% will publish automatically.` : 'Auto-approve OFF — all AI rows stay pending.');
+  };
+
+  if (!loaded) return null;
+  return (
+    <Card className={cn("p-4 border-2", enabled ? "border-success/40 bg-success/5" : "border-muted")}>
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-3 min-w-0 flex-1">
+          <Switch checked={enabled} onCheckedChange={(v) => save(v, threshold)} disabled={busy} />
+          <div className="min-w-0">
+            <div className="text-sm font-semibold">
+              Auto-approve high-confidence AI submissions
+              <span className={cn("ml-2 text-xs font-mono", enabled ? "text-success" : "text-muted-foreground")}>
+                {enabled ? '· ON' : '· off'}
+              </span>
+            </div>
+            <div className="text-xs text-muted-foreground">
+              When ON, any Sherlock-discovered project with AI confidence ≥ <strong>{Math.round(threshold * 100)}%</strong> publishes immediately. Lower-confidence rows + manual submissions stay in the moderation queue.
+            </div>
+            {updatedAt && (
+              <div className="text-[10px] text-muted-foreground font-mono mt-0.5">last changed {new Date(updatedAt).toLocaleString()}</div>
+            )}
+          </div>
+        </div>
+        <div className="flex items-end gap-2">
+          <div>
+            <Label className="text-[10px] text-muted-foreground">Threshold</Label>
+            <Select value={String(Math.round(threshold * 100))} onValueChange={(v) => save(enabled, Number(v) / 100)}>
+              <SelectTrigger className="w-[110px] h-8 text-xs"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {[70, 75, 80, 85, 90, 95, 100].map(n => <SelectItem key={n} value={String(n)}>{n}%</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+      </div>
+    </Card>
   );
 }
