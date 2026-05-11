@@ -621,7 +621,12 @@ export default function ProjectDetail() {
           <ComprehensiveSections projectId={p.id} projectTitle={p.title} />
         </div>
 
-        <aside className="space-y-6">
+        {/* lg:self-start stops the sidebar from stretching to match the main
+            column's height (which now runs long with Brief + Project Record +
+            Comprehensive cards). lg:sticky keeps it visible while scrolling
+            through the main column, so the ad slot + Post Update + Report
+            Issue forms stay within reach without ghost whitespace below. */}
+        <aside className="space-y-6 lg:self-start lg:sticky lg:top-6">
           <AdSlot slotKey="project_sidebar" variant="sidebar" />
           <PostUpdateForm projectId={p.id} onPosted={() => loadUpdates(p.id)} />
           <ReportIssueForm projectId={p.id} projectTitle={p.title} />
