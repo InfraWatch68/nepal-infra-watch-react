@@ -41,6 +41,18 @@ export default function ProjectDetail() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   // (defined below `useState` block to keep state declarations together.)
 
+  // Aggregates pulled from the comprehensive detail tables so the hero KV
+  // card can fall back when projects.* fields are null. Public-facing →
+  // only approved rows. Loaded once per project; refreshed via Realtime
+  // when those tables change.
+  const [aggregates, setAggregates] = useState<{
+    fundingTotalNpr: number | null;
+    implementingAgency: string | null;
+    contractor: string | null;
+    earliestDate: string | null;
+    latestDate: string | null;
+  }>({ fundingTotalNpr: null, implementingAgency: null, contractor: null, earliestDate: null, latestDate: null });
+
   // Latest analysis run — feeds the Project Record stats line. Same row that
   // ComprehensiveSections.tsx queries internally for its own header; we query
   // it here too rather than threading state across components, since both
@@ -158,6 +170,37 @@ export default function ProjectDetail() {
       const { data } = await supabase.from('analysis_jobs').select('id, status').eq('project_id', p.id).in('status', ['queued', 'running']).limit(1).maybeSingle();
       setTraceInFlight(!!data);
     };
+    const reloadAggregates = async () => {
+      // All four lookups in parallel. project_funding stays a sum across all
+      // approved funding rows (matches how budgets actually accrete from
+      // multiple loans/grants). For agency / contractor we take the first
+      // approved row with that role; for timeline we take the earliest and
+      // latest milestone_date / due_date / completed_date.
+      const [funding, stakeholders, procurement, milestones] = await Promise.all([
+        supabase.from('project_funding').select('amount_npr, approval_status').eq('project_id', p.id).eq('approval_status', 'approved'),
+        supabase.from('project_stakeholders').select('org_name, role').eq('project_id', p.id).eq('approval_status', 'approved').in('role', ['implementing_agency', 'executing_ministry', 'contractor', 'sub_contractor']),
+        supabase.from('project_procurement').select('awardee_name, contract_awarded_at').eq('project_id', p.id).eq('approval_status', 'approved').not('awardee_name', 'is', null).order('contract_awarded_at', { ascending: false }).limit(1),
+        supabase.from('project_milestones').select('milestone_date, due_date, completed_date').eq('project_id', p.id),
+      ]);
+      const fundingTotalNpr = (funding.data ?? []).reduce((sum: number, r: any) => sum + (Number(r.amount_npr) || 0), 0) || null;
+      const stakeholdersData = (stakeholders.data ?? []) as any[];
+      const implementingAgency = (stakeholdersData.find((s: any) => s.role === 'implementing_agency')?.org_name)
+        ?? (stakeholdersData.find((s: any) => s.role === 'executing_ministry')?.org_name)
+        ?? null;
+      const contractor = (stakeholdersData.find((s: any) => s.role === 'contractor')?.org_name)
+        ?? (stakeholdersData.find((s: any) => s.role === 'sub_contractor')?.org_name)
+        ?? (procurement.data?.[0]?.awardee_name)
+        ?? null;
+      // Pull every date column from milestones and take min/max across them.
+      const dates: string[] = [];
+      for (const m of (milestones.data ?? [])) {
+        for (const d of [m.milestone_date, m.due_date, m.completed_date]) if (d) dates.push(d);
+      }
+      dates.sort();
+      const earliestDate = dates[0] ?? null;
+      const latestDate = dates[dates.length - 1] ?? null;
+      setAggregates({ fundingTotalNpr, implementingAgency, contractor, earliestDate, latestDate });
+    };
     const reloadLatestRun = async () => {
       const { data } = await supabase
         .from('project_analysis_runs')
@@ -170,10 +213,14 @@ export default function ProjectDetail() {
     };
     reloadJob();
     reloadLatestRun();
+    reloadAggregates();
     const ch = supabase.channel(`project-detail-${p.id}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'project_milestones', filter }, () => loadTabs(p.id))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'project_milestones', filter }, () => { loadTabs(p.id); reloadAggregates(); })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'project_updates', filter }, () => loadTabs(p.id))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'project_sources', filter }, () => loadTabs(p.id))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'project_funding', filter }, () => reloadAggregates())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'project_stakeholders', filter }, () => reloadAggregates())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'project_procurement', filter }, () => reloadAggregates())
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'projects', filter: `id=eq.${p.id}` }, () => reloadP())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'analysis_jobs', filter }, () => { reloadJob(); reloadLatestRun(); })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'project_analysis_runs', filter }, () => reloadLatestRun())
@@ -259,11 +306,17 @@ export default function ProjectDetail() {
               <p className="text-lg text-primary-foreground/80 leading-relaxed max-w-3xl">{p.description}</p>
             </div>
             <Card className="bg-primary-glow/40 backdrop-blur border-primary-foreground/10 text-primary-foreground p-5 space-y-3">
-              <KV icon={Wallet} label="Budget" value={formatNPR(p.budget_npr)} />
+              {/* Each KV row prefers the project's own column when set, else
+                  falls back to the aggregated value computed from approved
+                  comprehensive-detail rows. Lets the hero card show real
+                  numbers as soon as the AI has gathered them, instead of
+                  staying at "—" until a moderator manually edits the
+                  projects table. */}
+              <KV icon={Wallet} label="Budget" value={formatNPR(p.budget_npr ?? aggregates.fundingTotalNpr)} />
               <KV icon={MapPin} label="Location" value={`${p.district ?? '—'}${p.province ? `, ${p.province}` : ''}`} />
-              <KV icon={Building2} label="Implementing agency" value={p.implementing_agency ?? '—'} />
-              <KV icon={HardHat} label="Contractor" value={p.contractor ?? '—'} />
-              <KV icon={Calendar} label="Timeline" value={`${p.start_date ?? 'TBD'} → ${p.expected_completion ?? 'TBD'}`} />
+              <KV icon={Building2} label="Implementing agency" value={p.implementing_agency ?? aggregates.implementingAgency ?? '—'} />
+              <KV icon={HardHat} label="Contractor" value={p.contractor ?? aggregates.contractor ?? '—'} />
+              <KV icon={Calendar} label="Timeline" value={`${p.start_date ?? aggregates.earliestDate ?? 'TBD'} → ${p.expected_completion ?? aggregates.latestDate ?? 'TBD'}`} />
               <div className="pt-3 border-t border-primary-foreground/10">
                 <div className="flex justify-between text-xs mb-1.5"><span className="text-primary-foreground/70">Progress</span><span className="font-mono font-semibold">{p.progress_percent ?? 0}%</span></div>
                 <div className="h-2 bg-primary-foreground/10 rounded-full overflow-hidden">
