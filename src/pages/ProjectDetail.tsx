@@ -334,13 +334,16 @@ export default function ProjectDetail() {
               <KV icon={Calendar} label="Timeline" value={`${p.start_date ?? aggregates.earliestDate ?? 'TBD'} → ${p.expected_completion ?? aggregates.latestDate ?? 'TBD'}`} />
               {(() => {
                 // Effective progress fallback chain:
-                //   1. projects.progress_percent  (manual or AI-set)
+                //   1. projects.progress_percent  (only when > 0 — the column
+                //      defaults to 0 NOT NULL across the seed data, so 0 is
+                //      indistinguishable from "never set" and almost always
+                //      wrong. A genuinely 0% project still ends up showing
+                //      0% via the status-fallback path, just tagged as such.)
                 //   2. milestone-derived score    (sum of completed=1, in_progress=0.5, ÷ total)
                 //   3. status-based default       (completed=100, cancelled=0,
                 //                                  in_progress/delayed=30,
                 //                                  approved=5, proposed/null=0)
-                // The tag tells the reader which source the number came from.
-                const fromProject = typeof p.progress_percent === 'number' ? p.progress_percent : null;
+                const fromProject = typeof p.progress_percent === 'number' && p.progress_percent > 0 ? p.progress_percent : null;
                 const fromMilestones = aggregates.progressFromMilestones;
                 const fromStatus = p.status === 'completed' ? 100
                   : p.status === 'cancelled' ? 0
