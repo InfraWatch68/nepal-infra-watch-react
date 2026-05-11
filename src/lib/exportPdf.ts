@@ -130,7 +130,14 @@ export function generatePdfReport({ title, subtitle, sections, filename }: Repor
   doc.save(filename);
 }
 
-export function exportProjectReport(project: any, aiSummary: string, milestones: any[] = [], updates: any[] = []) {
+export function exportProjectReport(
+  project: any,
+  aiSummary: string,
+  milestones: any[] = [],
+  updates: any[] = [],
+  narrativeSummary: string | null = null,
+  gapsAndContradictions: string[] = [],
+) {
   const sections: ReportSection[] = [
     {
       heading: 'Project overview',
@@ -149,6 +156,16 @@ export function exportProjectReport(project: any, aiSummary: string, milestones:
   ];
   if (project.description) sections.push({ heading: 'Description', body: project.description });
   if (aiSummary) sections.push({ heading: 'AI brief', body: aiSummary });
+  // Narrative + gaps come from the latest project_analysis_runs row; they
+  // belong in the same exported document as the brief so a downloaded PDF
+  // captures the full AI-generated picture the user saw on screen.
+  if (narrativeSummary) sections.push({ heading: 'AI synthesis', body: narrativeSummary });
+  if (gapsAndContradictions.length > 0) {
+    sections.push({
+      heading: 'Gaps & contradictions',
+      body: gapsAndContradictions.map(g => `• ${g}`).join('\n'),
+    });
+  }
   if (milestones.length) {
     sections.push({
       heading: 'Milestones',

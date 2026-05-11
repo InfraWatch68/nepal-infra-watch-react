@@ -12,7 +12,7 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { AdSlot } from '@/components/AdSlot';
-import { MapPin, Wallet, Calendar, Building2, HardHat, ExternalLink, ShieldCheck, ShieldAlert, Sparkles, Loader2, Download, ChevronLeft, ChevronRight, Check, X, Trash2 } from 'lucide-react';
+import { MapPin, Wallet, Calendar, Building2, HardHat, ExternalLink, ShieldCheck, ShieldAlert, Sparkles, Loader2, Download, ChevronLeft, ChevronRight, Check, X, Trash2, AlertTriangle } from 'lucide-react';
 import { Checkbox } from '@/components/ui/checkbox';
 import { exportProjectReport } from '@/lib/exportPdf';
 import { STATUS_COLORS, STATUS_LABELS } from '@/lib/constants';
@@ -273,7 +273,13 @@ export default function ProjectDetail() {
             <ProjectImageGallery images={p.image_urls} title={p.title} />
           )}
 
-          {/* AI Insights */}
+          {/* AI Project Brief — single home for the full AI-generated story
+              about the project. Generate composes:
+                1) The combined brief paragraphs (weaves identity, comprehensive
+                   details, project record, and the latest analysis synthesis)
+                2) The most recent AI synthesis paragraph (from project_analysis_runs)
+                3) Gaps & contradictions (from project_analysis_runs)
+              Export PDF emits all three sections. */}
           <Card className="p-5 border-accent/30 bg-accent/5">
             <div className="flex items-start justify-between gap-4 mb-3">
               <div className="flex items-center gap-2">
@@ -282,26 +288,58 @@ export default function ProjectDetail() {
                 </div>
                 <div>
                   <div className="font-semibold text-sm">AI Project Brief</div>
-                  <div className="text-xs text-muted-foreground">Generated summary of public data</div>
+                  <div className="text-xs text-muted-foreground">Combined summary using identity + comprehensive details + project record.</div>
                 </div>
               </div>
               <div className="flex gap-2 shrink-0">
                 <Button size="sm" onClick={generateSummary} disabled={loadingAi}>
                   {loadingAi ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Generate'}
                 </Button>
-                <Button size="sm" variant="outline" onClick={() => exportProjectReport(p, aiSummary, milestones, updates)}>
+                <Button size="sm" variant="outline" onClick={() => exportProjectReport(p, aiSummary, milestones, updates, latestAnalysisRun?.narrative_summary ?? null, latestAnalysisRun?.gaps_and_contradictions ?? [])}>
                   <Download className="h-4 w-4" /> Export PDF
                 </Button>
               </div>
             </div>
-            {aiSummary ? (
-              <p className="text-sm leading-relaxed whitespace-pre-wrap">{aiSummary}</p>
-            ) : aiError ? (
+
+            {aiError ? (
               <p className="text-sm text-destructive">{aiError}</p>
             ) : loadingAi ? (
-              <p className="text-sm text-muted-foreground italic">Generating summary…</p>
+              <p className="text-sm text-muted-foreground italic">Generating brief…</p>
+            ) : aiSummary ? (
+              <div className="space-y-4">
+                {/* 1. The combined brief paragraphs from ai-project-insights. */}
+                <p className="text-sm leading-relaxed whitespace-pre-wrap">{aiSummary}</p>
+
+                {/* 2. AI synthesis from the latest analysis run, when available. */}
+                {latestAnalysisRun?.narrative_summary && (
+                  <div className="pt-4 border-t border-accent/20">
+                    <p className="text-[10px] uppercase tracking-[0.2em] font-mono text-accent mb-1.5 flex items-center gap-1.5">
+                      <Sparkles className="h-3 w-3" />
+                      AI synthesis · refreshed {relTimeShort(latestAnalysisRun.finished_at ?? latestAnalysisRun.started_at)}
+                    </p>
+                    <p className="text-sm leading-relaxed whitespace-pre-wrap">{latestAnalysisRun.narrative_summary}</p>
+                  </div>
+                )}
+
+                {/* 3. Gaps & contradictions banner. */}
+                {latestAnalysisRun?.gaps_and_contradictions && latestAnalysisRun.gaps_and_contradictions.length > 0 && (
+                  <div className="p-3 rounded-md border border-warning/40 bg-warning/10">
+                    <p className="text-xs font-semibold text-warning mb-1.5 flex items-center gap-1.5">
+                      <AlertTriangle className="h-3.5 w-3.5" />
+                      Gaps & contradictions in the available evidence
+                    </p>
+                    <ul className="space-y-1 text-xs list-disc pl-5">
+                      {latestAnalysisRun.gaps_and_contradictions.map((g: string, i: number) => (
+                        <li key={i} className="leading-snug">{g}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
             ) : (
-              <p className="text-sm text-muted-foreground italic">Click Generate to produce an AI summary using project data, milestones, and updates.</p>
+              <p className="text-sm text-muted-foreground italic">
+                Click Generate to compose a brief from project identity, comprehensive details, and project record. Export PDF bundles the brief, AI synthesis, and any flagged gaps together.
+              </p>
             )}
           </Card>
 
@@ -595,6 +633,19 @@ function ReportIssueForm({ projectId, projectTitle }: { projectId: string | numb
       </form>
     </Card>
   );
+}
+
+// Compact relative-time label used by the Brief and RunStatsLine.
+function relTimeShort(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const ms = Date.now() - new Date(iso).getTime();
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} h ago`;
+  const d = Math.floor(h / 24);
+  return `${d} d ago`;
 }
 
 // Stats line for the Project Record header — mirrors the RunSummaryLine in

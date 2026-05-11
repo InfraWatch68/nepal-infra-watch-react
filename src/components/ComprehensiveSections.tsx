@@ -424,15 +424,9 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
         <BucketProgressStrip run={latestRun} />
       )}
 
-      {/* AI-written 2-3 paragraph synthesis from the most recent successful run. */}
-      {latestRun?.narrative_summary && (
-        <NarrativeSummary text={latestRun.narrative_summary} updatedAt={latestRun.finished_at ?? latestRun.started_at} />
-      )}
-
-      {/* Explicit gaps + contradictions callout. Above the tabs so it's not buried. */}
-      {latestRun && latestRun.gaps_and_contradictions?.length > 0 && (
-        <GapsBanner items={latestRun.gaps_and_contradictions} />
-      )}
+      {/* AI synthesis + Gaps banner used to live here; both moved into the
+          AI Project Brief card in ProjectDetail so a single Generate click
+          produces brief + synthesis + gaps in one exportable composition. */}
 
       <Tabs defaultValue="funding">
         <TabsList className="flex flex-wrap h-auto gap-1">
