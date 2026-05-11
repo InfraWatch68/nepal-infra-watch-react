@@ -12,7 +12,8 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { AdSlot } from '@/components/AdSlot';
-import { MapPin, Wallet, Calendar, Building2, HardHat, ExternalLink, ShieldCheck, ShieldAlert, Sparkles, Loader2, Download, ChevronLeft, ChevronRight } from 'lucide-react';
+import { MapPin, Wallet, Calendar, Building2, HardHat, ExternalLink, ShieldCheck, ShieldAlert, Sparkles, Loader2, Download, ChevronLeft, ChevronRight, Check, X, Trash2 } from 'lucide-react';
+import { Checkbox } from '@/components/ui/checkbox';
 import { exportProjectReport } from '@/lib/exportPdf';
 import { STATUS_COLORS, STATUS_LABELS } from '@/lib/constants';
 import { formatNPR } from '@/lib/parseCoords';
@@ -34,6 +35,63 @@ export default function ProjectDetail() {
   const [aiError, setAiError] = useState<string>('');
   const [traceBusy, setTraceBusy] = useState(false);
   const [traceInFlight, setTraceInFlight] = useState(false);
+  // Per-tab bulk selection. Keys are `${table}:${id}` so the same Set can
+  // back all three tabs without leaking selections across them visually.
+  const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const toggleRowSelected = (table: string, id: string | number) => {
+    const k = `${table}:${id}`;
+    setSelectedRows(prev => { const next = new Set(prev); if (next.has(k)) next.delete(k); else next.add(k); return next; });
+  };
+  const toggleAllRowsInTable = (table: string, ids: Array<string | number>, select: boolean) => {
+    setSelectedRows(prev => {
+      const next = new Set(prev);
+      for (const id of ids) { const k = `${table}:${id}`; if (select) next.add(k); else next.delete(k); }
+      return next;
+    });
+  };
+  // Approve / reject / delete a list of row ids inside one table.
+  // Milestones don't carry approval_status so they only support delete; the
+  // bar's showApprove/showReject flags handle that on the UI side.
+  const performTabBulk = async (table: string, ids: Array<string | number>, action: 'approved' | 'rejected' | 'delete') => {
+    if (!ids.length) return;
+    const verb = action === 'delete' ? 'Delete' : action === 'approved' ? 'Approve' : 'Reject';
+    const label = table.replace('project_', '');
+    if (!confirm(`${verb} ${ids.length} ${label} row${ids.length === 1 ? '' : 's'}?`)) return;
+    setBulkBusy(true);
+    const { data: u } = await supabase.auth.getUser();
+    const userId = u.user?.id ?? null;
+    let err: string | null = null;
+    if (action === 'delete') {
+      const { error } = await supabase.from(table as any).delete().in('id', ids);
+      if (error) err = error.message;
+      else await supabase.from('project_reviews').insert(ids.map(id => ({
+        target_table: table, target_id: String(id),
+        reviewer_id: userId, reviewer_role: 'admin',
+        action: 'rejected', notes: 'Bulk-deleted', was_admin: true,
+      })));
+    } else {
+      // Skip the approval_status update if the table doesn't have one.
+      if (table === 'project_milestones') {
+        err = 'Milestones do not support approve/reject — use delete instead.';
+      } else {
+        const { error } = await supabase.from(table as any)
+          .update({ approval_status: action, reviewed_by: userId })
+          .in('id', ids);
+        if (error) err = error.message;
+        else await supabase.from('project_reviews').insert(ids.map(id => ({
+          target_table: table, target_id: String(id),
+          reviewer_id: userId, reviewer_role: 'admin',
+          action, notes: `Bulk ${action}`, was_admin: true,
+        })));
+      }
+    }
+    setSelectedRows(prev => { const next = new Set(prev); for (const id of ids) next.delete(`${table}:${id}`); return next; });
+    setBulkBusy(false);
+    if (err) toast.error(`${table}: ${err}`);
+    else toast.success(`${ids.length} ${label} row${ids.length === 1 ? '' : 's'} ${action === 'delete' ? 'deleted' : action}`);
+    if (p?.id) await loadTabs(p.id);
+  };
 
   // Reviewers see pending rows on the tabs too so they can moderate inline
   // (matches the ComprehensiveSections pattern). Public users see approved-only.
@@ -252,9 +310,29 @@ export default function ProjectDetail() {
             </TabsList>
 
             <TabsContent value="milestones" className="space-y-3 mt-4">
+              {isReviewer && (
+                <RecordBulkBar
+                  table="project_milestones"
+                  rows={milestones}
+                  selected={selectedRows}
+                  onToggleAll={toggleAllRowsInTable}
+                  onAction={performTabBulk}
+                  busy={bulkBusy}
+                  showApprove={false}
+                  showReject={false}
+                />
+              )}
               {milestones.length === 0 ? <Card className="p-8 text-center text-muted-foreground text-sm">No milestones recorded yet.</Card> :
                 milestones.map(m => (
                   <Card key={m.id} className="p-4 flex gap-4">
+                    {isReviewer && (
+                      <Checkbox
+                        checked={selectedRows.has(`project_milestones:${m.id}`)}
+                        onCheckedChange={() => toggleRowSelected('project_milestones', m.id)}
+                        aria-label="Select milestone"
+                        className="mt-1.5"
+                      />
+                    )}
                     <div className={cn("h-2 w-2 rounded-full mt-2 shrink-0",
                       m.status === 'completed' && 'bg-success',
                       m.status === 'in_progress' && 'bg-warning',
@@ -269,6 +347,7 @@ export default function ProjectDetail() {
                       {m.description && <p className="text-sm text-muted-foreground mt-1">{m.description}</p>}
                       <div className="text-xs font-mono text-muted-foreground mt-2">
                         Due: {m.due_date ?? '—'}{m.completed_date && ` · Done: ${m.completed_date}`}
+                        {m.milestone_date && ` · Event: ${m.milestone_date}`}
                       </div>
                     </div>
                   </Card>
@@ -276,26 +355,71 @@ export default function ProjectDetail() {
             </TabsContent>
 
             <TabsContent value="updates" className="space-y-3 mt-4">
+              {isReviewer && (
+                <RecordBulkBar
+                  table="project_updates"
+                  rows={updates}
+                  selected={selectedRows}
+                  onToggleAll={toggleAllRowsInTable}
+                  onAction={performTabBulk}
+                  busy={bulkBusy}
+                />
+              )}
               {updates.length === 0 ? <Card className="p-8 text-center text-muted-foreground text-sm">No updates posted.</Card> :
                 updates.map(u => (
-                  <Card key={u.id} className="p-4">
-                    <div className="text-xs font-mono uppercase tracking-wider text-accent mb-1">{u.update_type} · {new Date(u.created_at).toLocaleDateString()}</div>
-                    <h4 className="font-semibold mb-1">{u.title}</h4>
-                    <p className="text-sm text-muted-foreground whitespace-pre-wrap">{u.content}</p>
+                  <Card key={u.id} className={cn('p-4', u.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
+                    <div className="flex items-start gap-3">
+                      {isReviewer && (
+                        <Checkbox
+                          checked={selectedRows.has(`project_updates:${u.id}`)}
+                          onCheckedChange={() => toggleRowSelected('project_updates', u.id)}
+                          aria-label="Select update"
+                          className="mt-1"
+                        />
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs font-mono uppercase tracking-wider text-accent mb-1">
+                          {u.update_type ?? 'news'} · {new Date(u.created_at).toLocaleDateString()}
+                          {u.approval_status === 'pending' && <span className="ml-2 text-warning">· pending review</span>}
+                        </div>
+                        <h4 className="font-semibold mb-1">{u.title}</h4>
+                        <p className="text-sm text-muted-foreground whitespace-pre-wrap">{u.content}</p>
+                      </div>
+                    </div>
                   </Card>
                 ))}
             </TabsContent>
 
             <TabsContent value="sources" className="space-y-2 mt-4">
+              {isReviewer && (
+                <RecordBulkBar
+                  table="project_sources"
+                  rows={sources}
+                  selected={selectedRows}
+                  onToggleAll={toggleAllRowsInTable}
+                  onAction={performTabBulk}
+                  busy={bulkBusy}
+                />
+              )}
               {sources.length === 0 ? <Card className="p-8 text-center text-muted-foreground text-sm">No sources cited yet.</Card> :
                 sources.map(s => (
-                  <Card key={s.id} className="p-4 flex items-center gap-3">
+                  <Card key={s.id} className={cn('p-4 flex items-center gap-3', s.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
+                    {isReviewer && (
+                      <Checkbox
+                        checked={selectedRows.has(`project_sources:${s.id}`)}
+                        onCheckedChange={() => toggleRowSelected('project_sources', s.id)}
+                        aria-label="Select source"
+                      />
+                    )}
                     {s.verified ? <ShieldCheck className="h-5 w-5 text-success shrink-0" /> : <ShieldAlert className="h-5 w-5 text-muted-foreground shrink-0" />}
                     <div className="flex-1 min-w-0">
                       <a href={s.url} target="_blank" rel="noreferrer" className="font-medium hover:text-accent inline-flex items-center gap-1.5 truncate">
                         {s.title} <ExternalLink className="h-3 w-3" />
                       </a>
-                      <div className="text-xs text-muted-foreground font-mono uppercase tracking-wider mt-0.5">{s.source_type}{s.verified && ' · Verified'}</div>
+                      <div className="text-xs text-muted-foreground font-mono uppercase tracking-wider mt-0.5">
+                        {s.source_type}{s.verified && ' · Verified'}
+                        {s.approval_status === 'pending' && <span className="text-warning"> · pending review</span>}
+                      </div>
                     </div>
                   </Card>
                 ))}
@@ -446,9 +570,68 @@ function ReportIssueForm({ projectId, projectTitle }: { projectId: string | numb
   );
 }
 
-// Image carousel for project_images_urls. One hero image at a time with prev/
-// next arrows + a thumbnail strip. Handles failed loads quietly by hiding
-// broken images (Tavily sometimes returns hotlink-protected URLs).
+// Inline bulk-action toolbar for the project-record tabs (milestones,
+// updates, sources). Same shape as ComprehensiveSections' TabBulkBar — kept
+// local here because the tables in this scope have different approval
+// shapes (milestones have no approval_status at all, so we accept
+// showApprove/showReject flags to hide the buttons that don't apply).
+function RecordBulkBar({
+  table, rows, selected, onToggleAll, onAction, busy,
+  showApprove = true, showReject = true,
+}: {
+  table: string;
+  rows: any[];
+  selected: Set<string>;
+  onToggleAll: (table: string, ids: Array<string | number>, select: boolean) => void;
+  onAction: (table: string, ids: Array<string | number>, action: 'approved' | 'rejected' | 'delete') => void;
+  busy: boolean;
+  showApprove?: boolean;
+  showReject?: boolean;
+}) {
+  if (rows.length === 0) return null;
+  const allKeys = rows.map(r => `${table}:${r.id}`);
+  const selKeys = allKeys.filter(k => selected.has(k));
+  const selIds: Array<string | number> = selKeys.map(k => {
+    const v = k.split(':').slice(1).join(':');
+    const n = Number(v);
+    return Number.isFinite(n) && String(n) === v ? n : v;
+  });
+  const allIds: Array<string | number> = rows.map(r => r.id);
+  const allSelected = allKeys.length > 0 && selKeys.length === allKeys.length;
+  const some = selKeys.length > 0;
+  return (
+    <div className="flex items-center justify-between gap-2 p-2 rounded-md border bg-muted/30 mb-1 flex-wrap">
+      <label className="flex items-center gap-2 cursor-pointer text-xs">
+        <Checkbox
+          checked={allSelected}
+          onCheckedChange={(checked) => onToggleAll(table, allIds, !!checked)}
+          aria-label="Select all in this tab"
+        />
+        <span>{some ? `${selKeys.length} of ${rows.length} selected` : `Select all (${rows.length})`}</span>
+      </label>
+      <div className="flex items-center gap-1">
+        {showApprove && (
+          <Button disabled={!some || busy} size="sm" variant="ghost" className="h-7 text-xs text-success hover:bg-success/10" onClick={() => onAction(table, selIds, 'approved')}>
+            <Check className="h-3.5 w-3.5 mr-1" /> Approve
+          </Button>
+        )}
+        {showReject && (
+          <Button disabled={!some || busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => onAction(table, selIds, 'rejected')}>
+            <X className="h-3.5 w-3.5 mr-1" /> Reject
+          </Button>
+        )}
+        <Button disabled={!some || busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => onAction(table, selIds, 'delete')}>
+          <Trash2 className="h-3.5 w-3.5 mr-1" /> Delete
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// Project photo gallery. Contained width, 16:9 hero, header label + counter
+// (no overlay), thumbnail strip with active highlight. Auto-skips images
+// that fail to load (Tavily occasionally returns hotlink-protected URLs).
+// Click main image to open in a new tab for full-size view.
 function ProjectImageGallery({ images, title }: { images: string[]; title: string }) {
   const [active, setActive] = useState(0);
   const [broken, setBroken] = useState<Set<number>>(new Set());
@@ -457,45 +640,101 @@ function ProjectImageGallery({ images, title }: { images: string[]; title: strin
     if (!broken.has(active)) return;
     for (let i = 0; i < images.length; i++) if (!broken.has(i)) { setActive(i); return; }
   }, [active, broken, images.length]);
-  const usable = images.filter((_, i) => !broken.has(i));
-  if (usable.length === 0) return null;
   const total = images.length;
-  const next = () => { let i = active + 1; while (i < total && broken.has(i)) i++; if (i >= total) i = 0; while (broken.has(i)) i++; setActive(i); };
-  const prev = () => { let i = active - 1; while (i >= 0 && broken.has(i)) i--; if (i < 0) i = total - 1; while (broken.has(i) && i >= 0) i--; setActive(Math.max(0, i)); };
+  const usableCount = total - broken.size;
+  if (usableCount === 0) return null;
+  // Active index among usable images (for the "3 of 11" counter).
+  const usablePosition = images.slice(0, active + 1).filter((_, i) => !broken.has(i)).length;
+  const next = () => {
+    for (let step = 1; step <= total; step++) {
+      const i = (active + step) % total;
+      if (!broken.has(i)) { setActive(i); return; }
+    }
+  };
+  const prev = () => {
+    for (let step = 1; step <= total; step++) {
+      const i = (active - step + total) % total;
+      if (!broken.has(i)) { setActive(i); return; }
+    }
+  };
   return (
-    <section className="border-b">
-      <div className="container py-6">
-        <div className="relative aspect-[16/7] bg-muted rounded-lg overflow-hidden group">
+    <section className="border-b bg-muted/30">
+      <div className="container py-6 max-w-5xl">
+        {/* Header line — same uppercase mono treatment used elsewhere on the page. */}
+        <div className="flex items-baseline justify-between mb-2.5 px-0.5">
+          <p className="text-[10px] uppercase tracking-[0.2em] font-mono text-muted-foreground">Photos</p>
+          {usableCount > 1 && (
+            <p className="text-[10px] font-mono text-muted-foreground">
+              {usablePosition} <span className="opacity-50">/</span> {usableCount}
+            </p>
+          )}
+        </div>
+
+        {/* Hero image. aspect 16:9 is gentler than the old 16:7 banner. */}
+        <a
+          href={images[active]}
+          target="_blank"
+          rel="noreferrer"
+          className="block relative aspect-[16/9] bg-card rounded-lg overflow-hidden ring-1 ring-border group"
+          aria-label="Open image full size in new tab"
+        >
           <img
             key={images[active]}
             src={images[active]}
-            alt={`${title} — image ${active + 1}`}
-            className="w-full h-full object-cover"
+            alt={`${title} — photo ${active + 1}`}
+            className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.01]"
             referrerPolicy="no-referrer"
             onError={() => setBroken(prev => new Set(prev).add(active))}
+            loading="lazy"
           />
-          {total > 1 && (
+          {/* Subtle bottom gradient — keeps any text overlays legible. */}
+          <div className="absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-black/30 to-transparent pointer-events-none" />
+          {usableCount > 1 && (
             <>
-              <button onClick={prev} aria-label="Previous image"
-                className="absolute left-2 top-1/2 -translate-y-1/2 h-9 w-9 rounded-full bg-background/80 hover:bg-background flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+              <button
+                type="button"
+                onClick={(e) => { e.preventDefault(); prev(); }}
+                aria-label="Previous photo"
+                className="absolute left-3 top-1/2 -translate-y-1/2 h-10 w-10 rounded-full bg-background/85 hover:bg-background backdrop-blur-sm flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm"
+              >
                 <ChevronLeft className="h-5 w-5" />
               </button>
-              <button onClick={next} aria-label="Next image"
-                className="absolute right-2 top-1/2 -translate-y-1/2 h-9 w-9 rounded-full bg-background/80 hover:bg-background flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+              <button
+                type="button"
+                onClick={(e) => { e.preventDefault(); next(); }}
+                aria-label="Next photo"
+                className="absolute right-3 top-1/2 -translate-y-1/2 h-10 w-10 rounded-full bg-background/85 hover:bg-background backdrop-blur-sm flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm"
+              >
                 <ChevronRight className="h-5 w-5" />
               </button>
-              <div className="absolute bottom-2 right-2 text-[10px] font-mono bg-background/80 text-foreground rounded px-1.5 py-0.5">
-                {active + 1} / {total}
-              </div>
             </>
           )}
-        </div>
-        {total > 1 && (
-          <div className="flex gap-1.5 mt-3 overflow-x-auto pb-1">
+        </a>
+
+        {/* Thumbnail strip. Active state via border + slight scale; broken hidden. */}
+        {usableCount > 1 && (
+          <div className="flex gap-2 mt-3 overflow-x-auto pb-1 -mx-0.5 px-0.5 scrollbar-thin">
             {images.map((u, i) => broken.has(i) ? null : (
-              <button key={u + i} onClick={() => setActive(i)} aria-label={`Show image ${i + 1}`}
-                className={cn('shrink-0 h-14 w-20 rounded overflow-hidden border-2', i === active ? 'border-accent' : 'border-transparent opacity-70 hover:opacity-100')}>
-                <img src={u} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer" onError={() => setBroken(prev => new Set(prev).add(i))} />
+              <button
+                key={u + i}
+                type="button"
+                onClick={() => setActive(i)}
+                aria-label={`Show photo ${i + 1}`}
+                className={cn(
+                  'shrink-0 h-12 w-16 rounded overflow-hidden ring-1 transition-all',
+                  i === active
+                    ? 'ring-accent ring-2 opacity-100 scale-[1.04]'
+                    : 'ring-border opacity-60 hover:opacity-100 hover:ring-foreground/30'
+                )}
+              >
+                <img
+                  src={u}
+                  alt=""
+                  className="w-full h-full object-cover"
+                  referrerPolicy="no-referrer"
+                  onError={() => setBroken(prev => new Set(prev).add(i))}
+                  loading="lazy"
+                />
               </button>
             ))}
           </div>

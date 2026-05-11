@@ -17,6 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
+import { Checkbox } from '@/components/ui/checkbox';
 import { toast } from 'sonner';
 import { Shield, Megaphone, Sparkles, Loader2, ExternalLink, Users as UsersIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -434,6 +435,7 @@ export default function Admin() {
               onPushNow={pushNow}
               canPushNow={isInstantPublisher}
               busyRow={busyRow}
+              refresh={refresh}
             />
           </TabsContent>
           <TabsContent value="all" className="mt-4">
@@ -445,13 +447,14 @@ export default function Admin() {
               onPushNow={pushNow}
               canPushNow={isInstantPublisher}
               busyRow={busyRow}
+              refresh={refresh}
             />
           </TabsContent>
           <TabsContent value="updates" className="mt-4">
-            <PendingUpdatesList items={pendingUpdates} onReview={reviewUpdate} />
+            <PendingUpdatesList items={pendingUpdates} onReview={reviewUpdate} refresh={refresh} />
           </TabsContent>
           <TabsContent value="sources" className="mt-4">
-            <PendingSourcesList items={pendingSources} onReview={reviewSource} />
+            <PendingSourcesList items={pendingSources} onReview={reviewSource} refresh={refresh} />
           </TabsContent>
           <TabsContent value="details" className="mt-4">
             <DetailsModerationTab />
@@ -474,31 +477,56 @@ export default function Admin() {
   );
 }
 
-function ProjectList({ projects, onReview, onFetchNews, onGenerateBrief, onPushNow, busyRow, canPushNow }: any) {
+function ProjectList({ projects, onReview, onFetchNews, onGenerateBrief, onPushNow, busyRow, canPushNow, refresh }: any) {
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  // Only allow bulk action on rows still pending — approved projects already
+  // moved on, and they shouldn't be bulk-reversed without an explicit edit.
+  const actionableIds = projects.filter((p: any) => p.approval_status === 'pending' || p.approval_status === 'changes_requested').map((p: any) => String(p.id));
+  const some = actionableIds.some((id: string) => sel.has(id));
+  const all = actionableIds.length > 0 && actionableIds.every((id: string) => sel.has(id));
+  const toggle = (id: string) => setSel(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  const toggleAll = (v: boolean) => setSel(v ? new Set(actionableIds) : new Set());
   if (projects.length === 0) return <Card className="p-12 text-center text-muted-foreground">Queue empty.</Card>;
   return (
     <Card>
+      {actionableIds.length > 0 && (
+        <AdminBulkBar
+          table="projects"
+          selectedIds={[...sel]}
+          rowCount={actionableIds.length}
+          allSelected={all}
+          someSelected={some}
+          onToggleAll={toggleAll}
+          afterAction={() => { setSel(new Set()); refresh && refresh(); }}
+        />
+      )}
       <div className="divide-y">
         {projects.map((p: any) => {
           const isApproved = p.approval_status === 'approved';
           const scheduled = p.published_at && new Date(p.published_at) > new Date();
+          const selectable = !isApproved;
           return (
             <div key={p.id} className="p-4 flex items-start justify-between gap-4">
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2 mb-1 flex-wrap">
-                  <StatusDot status={p.approval_status} />
-                  <Badge className={cn("text-[10px] uppercase tracking-wider font-mono", APPROVAL_COLORS[p.approval_status])}>{p.approval_status.replace('_', ' ')}</Badge>
-                  {scheduled && (
-                    <Badge variant="outline" className="text-[10px] uppercase tracking-wider font-mono border-info text-info">
-                      Publishes {new Date(p.published_at).toLocaleString()}
-                    </Badge>
-                  )}
-                  {p.submitted_by_ai && <AiBadge tag={p.ai_tag} />}
-                  <span className="text-xs text-muted-foreground">{p.sector} · {p.province ?? '—'} · {new Date(p.created_at).toLocaleDateString()}</span>
-                  <ReviewHistoryIcon targetTable="projects" targetId={p.id} />
+              <div className="flex items-start gap-3 min-w-0 flex-1">
+                {selectable ? (
+                  <Checkbox checked={sel.has(String(p.id))} onCheckedChange={() => toggle(String(p.id))} className="mt-1" aria-label="Select project" />
+                ) : <div className="w-4" /* spacer */ />}
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 mb-1 flex-wrap">
+                    <StatusDot status={p.approval_status} />
+                    <Badge className={cn("text-[10px] uppercase tracking-wider font-mono", APPROVAL_COLORS[p.approval_status])}>{p.approval_status.replace('_', ' ')}</Badge>
+                    {scheduled && (
+                      <Badge variant="outline" className="text-[10px] uppercase tracking-wider font-mono border-info text-info">
+                        Publishes {new Date(p.published_at).toLocaleString()}
+                      </Badge>
+                    )}
+                    {p.submitted_by_ai && <AiBadge tag={p.ai_tag} />}
+                    <span className="text-xs text-muted-foreground">{p.sector} · {p.province ?? '—'} · {new Date(p.created_at).toLocaleDateString()}</span>
+                    <ReviewHistoryIcon targetTable="projects" targetId={p.id} />
+                  </div>
+                  <Link to={`/projects/${p.slug}`} className="font-semibold hover:text-accent">{p.title}</Link>
+                  <p className="text-xs text-muted-foreground line-clamp-2 mt-1">{p.description}</p>
                 </div>
-                <Link to={`/projects/${p.slug}`} className="font-semibold hover:text-accent">{p.title}</Link>
-                <p className="text-xs text-muted-foreground line-clamp-2 mt-1">{p.description}</p>
               </div>
               <div className="flex gap-2 shrink-0 flex-wrap justify-end">
                 <Button size="sm" variant="outline" asChild>
@@ -659,25 +687,43 @@ function ReviewDialog({ project, onReview }: any) {
   );
 }
 
-function PendingUpdatesList({ items, onReview }: any) {
+function PendingUpdatesList({ items, onReview, refresh }: any) {
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  const ids = items.map((u: any) => String(u.id));
+  const some = ids.some((id: string) => sel.has(id));
+  const all = ids.length > 0 && ids.every((id: string) => sel.has(id));
+  const toggle = (id: string) => setSel(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  const toggleAll = (v: boolean) => setSel(v ? new Set(ids) : new Set());
   if (items.length === 0) return <Card className="p-12 text-center text-muted-foreground">No pending updates.</Card>;
   return (
     <Card>
+      <AdminBulkBar
+        table="project_updates"
+        selectedIds={[...sel]}
+        rowCount={items.length}
+        allSelected={all}
+        someSelected={some}
+        onToggleAll={toggleAll}
+        afterAction={() => { setSel(new Set()); refresh && refresh(); }}
+      />
       <div className="divide-y">
         {items.map((u: any) => (
           <div key={u.id} className="p-4 flex items-start justify-between gap-4">
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2 mb-1 flex-wrap">
-                <Badge className={cn("text-[10px] uppercase tracking-wider font-mono", APPROVAL_COLORS[u.approval_status])}>{u.approval_status.replace('_', ' ')}</Badge>
-                {u.submitted_by_ai && <AiBadge />}
-                <span className="text-xs text-muted-foreground font-mono uppercase tracking-wider">{u.update_type}</span>
-                <span className="text-xs text-muted-foreground">· {new Date(u.created_at).toLocaleDateString()}</span>
+            <div className="flex items-start gap-3 min-w-0 flex-1">
+              <Checkbox checked={sel.has(String(u.id))} onCheckedChange={() => toggle(String(u.id))} className="mt-1" aria-label="Select update" />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 mb-1 flex-wrap">
+                  <Badge className={cn("text-[10px] uppercase tracking-wider font-mono", APPROVAL_COLORS[u.approval_status])}>{u.approval_status.replace('_', ' ')}</Badge>
+                  {u.submitted_by_ai && <AiBadge />}
+                  <span className="text-xs text-muted-foreground font-mono uppercase tracking-wider">{u.update_type}</span>
+                  <span className="text-xs text-muted-foreground">· {new Date(u.created_at).toLocaleDateString()}</span>
+                </div>
+                {u.projects?.slug
+                  ? <Link to={`/projects/${u.projects.slug}`} className="text-xs text-accent hover:underline">{u.projects?.title ?? '—'}</Link>
+                  : <span className="text-xs text-muted-foreground">{u.projects?.title ?? '—'}</span>}
+                <h4 className="font-semibold mt-1">{u.title}</h4>
+                <p className="text-xs text-muted-foreground line-clamp-3 mt-1 whitespace-pre-wrap">{u.content}</p>
               </div>
-              {u.projects?.slug
-                ? <Link to={`/projects/${u.projects.slug}`} className="text-xs text-accent hover:underline">{u.projects?.title ?? '—'}</Link>
-                : <span className="text-xs text-muted-foreground">{u.projects?.title ?? '—'}</span>}
-              <h4 className="font-semibold mt-1">{u.title}</h4>
-              <p className="text-xs text-muted-foreground line-clamp-3 mt-1 whitespace-pre-wrap">{u.content}</p>
             </div>
             <div className="flex gap-2 shrink-0">
               <Dialog>
@@ -692,27 +738,45 @@ function PendingUpdatesList({ items, onReview }: any) {
   );
 }
 
-function PendingSourcesList({ items, onReview }: any) {
+function PendingSourcesList({ items, onReview, refresh }: any) {
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  const ids = items.map((s: any) => String(s.id));
+  const some = ids.some((id: string) => sel.has(id));
+  const all = ids.length > 0 && ids.every((id: string) => sel.has(id));
+  const toggle = (id: string) => setSel(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  const toggleAll = (v: boolean) => setSel(v ? new Set(ids) : new Set());
   if (items.length === 0) return <Card className="p-12 text-center text-muted-foreground">No pending sources.</Card>;
   return (
     <Card>
+      <AdminBulkBar
+        table="project_sources"
+        selectedIds={[...sel]}
+        rowCount={items.length}
+        allSelected={all}
+        someSelected={some}
+        onToggleAll={toggleAll}
+        afterAction={() => { setSel(new Set()); refresh && refresh(); }}
+      />
       <div className="divide-y">
         {items.map((s: any) => (
           <div key={s.id} className="p-4 flex items-start justify-between gap-4">
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2 mb-1 flex-wrap">
-                <Badge className={cn("text-[10px] uppercase tracking-wider font-mono", APPROVAL_COLORS[s.approval_status])}>{s.approval_status.replace('_', ' ')}</Badge>
-                {s.submitted_by_ai && <AiBadge />}
-                <span className="text-xs text-muted-foreground font-mono uppercase tracking-wider">{s.source_type}</span>
-                <span className="text-xs text-muted-foreground">· {new Date(s.created_at).toLocaleDateString()}</span>
+            <div className="flex items-start gap-3 min-w-0 flex-1">
+              <Checkbox checked={sel.has(String(s.id))} onCheckedChange={() => toggle(String(s.id))} className="mt-1" aria-label="Select source" />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 mb-1 flex-wrap">
+                  <Badge className={cn("text-[10px] uppercase tracking-wider font-mono", APPROVAL_COLORS[s.approval_status])}>{s.approval_status.replace('_', ' ')}</Badge>
+                  {s.submitted_by_ai && <AiBadge />}
+                  <span className="text-xs text-muted-foreground font-mono uppercase tracking-wider">{s.source_type}</span>
+                  <span className="text-xs text-muted-foreground">· {new Date(s.created_at).toLocaleDateString()}</span>
+                </div>
+                {s.projects?.slug
+                  ? <Link to={`/projects/${s.projects.slug}`} className="text-xs text-accent hover:underline">{s.projects?.title ?? '—'}</Link>
+                  : <span className="text-xs text-muted-foreground">{s.projects?.title ?? '—'}</span>}
+                <div className="font-semibold mt-1 truncate">{s.title}</div>
+                <a href={s.url} target="_blank" rel="noreferrer" className="text-xs text-accent hover:underline inline-flex items-center gap-1 mt-1 truncate max-w-full">
+                  {s.url} <ExternalLink className="h-3 w-3" />
+                </a>
               </div>
-              {s.projects?.slug
-                ? <Link to={`/projects/${s.projects.slug}`} className="text-xs text-accent hover:underline">{s.projects?.title ?? '—'}</Link>
-                : <span className="text-xs text-muted-foreground">{s.projects?.title ?? '—'}</span>}
-              <div className="font-semibold mt-1 truncate">{s.title}</div>
-              <a href={s.url} target="_blank" rel="noreferrer" className="text-xs text-accent hover:underline inline-flex items-center gap-1 mt-1 truncate max-w-full">
-                {s.url} <ExternalLink className="h-3 w-3" />
-              </a>
             </div>
             <div className="flex gap-2 shrink-0">
               <Dialog>
@@ -724,6 +788,80 @@ function PendingSourcesList({ items, onReview }: any) {
         ))}
       </div>
     </Card>
+  );
+}
+
+// Shared admin bulk-action bar. Selection lives in the parent list. Actions
+// hit the DB directly here (we already have service-role-equivalent access
+// for moderators via RLS). Triggers afterAction so the parent can refresh
+// + clear selection.
+function AdminBulkBar({
+  table, selectedIds, rowCount, allSelected, someSelected, onToggleAll, afterAction,
+}: {
+  table: 'project_updates' | 'project_sources' | 'projects';
+  selectedIds: string[];
+  rowCount: number;
+  allSelected: boolean;
+  someSelected: boolean;
+  onToggleAll: (v: boolean) => void;
+  afterAction: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const labelMap: Record<typeof table, string> = { project_updates: 'update', project_sources: 'source', projects: 'project' };
+  const label = labelMap[table];
+  const act = async (action: 'approved' | 'rejected' | 'delete') => {
+    if (!selectedIds.length) return;
+    const verb = action === 'delete' ? 'Delete' : action === 'approved' ? 'Approve' : 'Reject';
+    if (!confirm(`${verb} ${selectedIds.length} ${label}${selectedIds.length === 1 ? '' : 's'}?`)) return;
+    setBusy(true);
+    const { data: u } = await supabase.auth.getUser();
+    const userId = u.user?.id ?? null;
+    // Convert numeric-shaped strings back to numbers (Supabase quirk on bigint).
+    const ids: any[] = selectedIds.map(s => { const n = Number(s); return Number.isFinite(n) && String(n) === s ? n : s; });
+    let err: string | null = null;
+    if (action === 'delete') {
+      const { error } = await supabase.from(table as any).delete().in('id', ids);
+      if (error) err = error.message;
+      else await supabase.from('project_reviews').insert(ids.map(id => ({
+        target_table: table, target_id: String(id),
+        reviewer_id: userId, reviewer_role: 'admin', action: 'rejected', notes: 'Bulk-deleted', was_admin: true,
+      })));
+    } else {
+      const patch: any = { approval_status: action, reviewed_by: userId };
+      if (table === 'projects' && action === 'approved') patch.status = 'approved';
+      const { error } = await supabase.from(table as any).update(patch).in('id', ids);
+      if (error) err = error.message;
+      else await supabase.from('project_reviews').insert(ids.map(id => ({
+        target_table: table, target_id: String(id),
+        reviewer_id: userId, reviewer_role: 'admin', action, notes: `Bulk ${action}`, was_admin: true,
+      })));
+    }
+    setBusy(false);
+    if (err) toast.error(`${table}: ${err}`);
+    else toast.success(`${selectedIds.length} ${label}${selectedIds.length === 1 ? '' : 's'} ${action === 'delete' ? 'deleted' : action}`);
+    afterAction();
+  };
+  return (
+    <div className="flex items-center justify-between gap-2 p-2.5 border-b bg-muted/30 flex-wrap">
+      <label className="flex items-center gap-2 cursor-pointer text-xs">
+        <Checkbox checked={allSelected} onCheckedChange={(v) => onToggleAll(!!v)} aria-label="Select all" />
+        <span>{someSelected ? `${selectedIds.length} of ${rowCount} selected` : `Select all (${rowCount})`}</span>
+      </label>
+      <div className="flex items-center gap-1">
+        <Button disabled={!someSelected || busy} size="sm" variant="ghost" className="h-7 text-xs text-success hover:bg-success/10" onClick={() => act('approved')}>
+          {busy ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : null}
+          Approve
+        </Button>
+        <Button disabled={!someSelected || busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => act('rejected')}>
+          Reject
+        </Button>
+        {table !== 'projects' && (
+          <Button disabled={!someSelected || busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => act('delete')}>
+            Delete
+          </Button>
+        )}
+      </div>
+    </div>
   );
 }
 

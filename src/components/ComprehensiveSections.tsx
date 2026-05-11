@@ -5,7 +5,7 @@ import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Sparkles, Loader2, ExternalLink, Wallet, FileText, Users, AlertTriangle, BarChart3, Gavel, ShieldCheck, Plus, Pencil, Trash2, Check, X, ChevronDown, RotateCcw, CheckSquare } from 'lucide-react';
+import { Sparkles, Loader2, ExternalLink, Wallet, FileText, Users, AlertTriangle, BarChart3, Gavel, ShieldCheck, Plus, Pencil, Trash2, Check, X, ChevronDown, RotateCcw } from 'lucide-react';
 import { Checkbox } from '@/components/ui/checkbox';
 import { formatNPR } from '@/lib/parseCoords';
 import { cn } from '@/lib/utils';
@@ -212,54 +212,66 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
   };
   const clearSelection = () => setSelected(new Set());
 
-  // Group selection by table for batched UPDATE/DELETE calls.
-  const selectionByTable = useMemo(() => {
-    const m: Record<string, string[]> = {};
-    for (const k of selected) {
-      const [t, id] = k.split(':');
-      if (!t || !id) continue;
-      (m[t] ??= []).push(id);
-    }
-    return m;
-  }, [selected]);
-  const selectionCount = selected.size;
+  // Bulk select/deselect every row in a given table. Driven by the TabBulkBar's
+  // master checkbox; we receive the raw row ids and prefix them ourselves.
+  const toggleAllInTable = (table: DetailTable | string, ids: string[], select: boolean) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      for (const id of ids) {
+        const k = `${table}:${id}`;
+        if (select) next.add(k); else next.delete(k);
+      }
+      return next;
+    });
+  };
 
-  // Apply approve/reject/delete to every selected row, batched per table.
-  const bulkAction = async (action: 'approved' | 'rejected' | 'delete') => {
-    if (selectionCount === 0) return;
-    const label = action === 'delete' ? 'delete' : action;
-    if (!confirm(`${label.charAt(0).toUpperCase() + label.slice(1)} ${selectionCount} selected row${selectionCount === 1 ? '' : 's'}?`)) return;
+  // Adapter so TabBulkBar can call our table-scoped performBulk.
+  const handleTabAction = (table: DetailTable | string, ids: string[], action: 'approved' | 'rejected' | 'delete') => {
+    void performBulk(table as DetailTable, ids, action);
+  };
+
+  // Per-table bulk action. Each tab's TabBulkBar passes its own list of row
+  // IDs (scoped to one detail table) so the confirm copy + result toast
+  // describe a single bucket. After completion we trim only the keys we
+  // touched out of the global selection set, so a user can keep moderating
+  // other tabs without losing their picks.
+  const performBulk = async (table: DetailTable, ids: string[], action: 'approved' | 'rejected' | 'delete') => {
+    if (ids.length === 0) return;
+    const verb = action === 'delete' ? 'Delete' : action === 'approved' ? 'Approve' : 'Reject';
+    const label = table.replace('project_', '');
+    if (!confirm(`${verb} ${ids.length} ${label} row${ids.length === 1 ? '' : 's'}?`)) return;
     setBulkBusy(true);
     const { data: u } = await supabase.auth.getUser();
     const userId = u.user?.id ?? null;
-    const errors: string[] = [];
-    let done = 0;
-    for (const [table, ids] of Object.entries(selectionByTable)) {
-      if (action === 'delete') {
-        const { error } = await supabase.from(table as any).delete().in('id', ids);
-        if (error) { errors.push(`${table}: ${error.message}`); continue; }
-        await supabase.from('project_reviews').insert(ids.map(id => ({
-          target_table: table, target_id: String(id),
-          reviewer_id: userId, reviewer_role: 'admin',
-          action: 'rejected', notes: 'Bulk-deleted', was_admin: true,
-        })));
-      } else {
-        const { error } = await supabase.from(table as any)
-          .update({ approval_status: action, reviewed_by: userId })
-          .in('id', ids);
-        if (error) { errors.push(`${table}: ${error.message}`); continue; }
-        await supabase.from('project_reviews').insert(ids.map(id => ({
-          target_table: table, target_id: String(id),
-          reviewer_id: userId, reviewer_role: 'admin',
-          action, notes: `Bulk ${action}`, was_admin: true,
-        })));
-      }
-      done += ids.length;
+    let err: string | null = null;
+    if (action === 'delete') {
+      const { error } = await supabase.from(table as any).delete().in('id', ids);
+      if (error) err = error.message;
+      else await supabase.from('project_reviews').insert(ids.map(id => ({
+        target_table: table, target_id: String(id),
+        reviewer_id: userId, reviewer_role: 'admin',
+        action: 'rejected', notes: 'Bulk-deleted', was_admin: true,
+      })));
+    } else {
+      const { error } = await supabase.from(table as any)
+        .update({ approval_status: action, reviewed_by: userId })
+        .in('id', ids);
+      if (error) err = error.message;
+      else await supabase.from('project_reviews').insert(ids.map(id => ({
+        target_table: table, target_id: String(id),
+        reviewer_id: userId, reviewer_role: 'admin',
+        action, notes: `Bulk ${action}`, was_admin: true,
+      })));
     }
+    // Trim only the keys we acted on out of the selection set.
+    setSelected(prev => {
+      const next = new Set(prev);
+      for (const id of ids) next.delete(`${table}:${id}`);
+      return next;
+    });
     setBulkBusy(false);
-    clearSelection();
-    if (errors.length > 0) toast.error(`${done} processed, errors: ${errors.join('; ').slice(0, 200)}`);
-    else toast.success(`${done} row${done === 1 ? '' : 's'} ${action === 'delete' ? 'deleted' : action}`);
+    if (err) toast.error(`${table}: ${err}`);
+    else toast.success(`${ids.length} ${label} row${ids.length === 1 ? '' : 's'} ${action === 'delete' ? 'deleted' : action}`);
     loadAll();
   };
 
@@ -406,30 +418,6 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
         )}
       </div>
 
-      {/* Sticky-ish bulk-action bar — appears whenever any row is selected. */}
-      {isReviewer && selectionCount > 0 && (
-        <div className="mb-3 p-2.5 rounded-md border border-info/40 bg-info/10 flex items-center gap-2 flex-wrap">
-          <CheckSquare className="h-4 w-4 text-info" />
-          <span className="text-xs font-semibold">{selectionCount} selected</span>
-          <span className="text-[10px] text-muted-foreground font-mono truncate">
-            {Object.entries(selectionByTable).map(([t, ids]) => `${t.replace('project_', '')}:${ids.length}`).join(' · ')}
-          </span>
-          <div className="ml-auto flex items-center gap-1.5">
-            <Button size="sm" variant="ghost" className="h-7 text-xs text-success hover:bg-success/10" onClick={() => bulkAction('approved')} disabled={bulkBusy}>
-              <Check className="h-3.5 w-3.5 mr-1" /> Approve
-            </Button>
-            <Button size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => bulkAction('rejected')} disabled={bulkBusy}>
-              <X className="h-3.5 w-3.5 mr-1" /> Reject
-            </Button>
-            <Button size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => bulkAction('delete')} disabled={bulkBusy}>
-              <Trash2 className="h-3.5 w-3.5 mr-1" /> Delete
-            </Button>
-            <Button size="sm" variant="ghost" className="h-7 text-xs text-muted-foreground" onClick={clearSelection} disabled={bulkBusy}>
-              Clear
-            </Button>
-          </div>
-        </div>
-      )}
 
       {/* Live per-bucket progress strip while a run is queued/running. */}
       {runInFlight && latestRun && (
@@ -458,6 +446,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
         </TabsList>
 
         <TabsContent value="funding" className="space-y-2 mt-4">
+          {isReviewer && <TabBulkBar table="project_funding" rows={funding} selected={selected} onToggleAll={toggleAllInTable} onAction={handleTabAction} busy={bulkBusy} />}
           <ModToolbar bucket="funding" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {funding.length === 0 ? <Empty msg="No funding records yet." /> : funding.map(f => (
             <Card key={f.id} className={cn("p-4", f.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
@@ -480,6 +469,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
         </TabsContent>
 
         <TabsContent value="documents" className="space-y-2 mt-4">
+          {isReviewer && <TabBulkBar table="project_documents" rows={documents} selected={selected} onToggleAll={toggleAllInTable} onAction={handleTabAction} busy={bulkBusy} />}
           <ModToolbar bucket="documents" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {documents.length === 0 ? <Empty msg="No documents linked yet." /> : documents.map(d => (
             <Card key={d.id} className={cn("p-4", d.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
@@ -502,6 +492,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
         </TabsContent>
 
         <TabsContent value="stakeholders" className="space-y-2 mt-4">
+          {isReviewer && <TabBulkBar table="project_stakeholders" rows={stakeholders} selected={selected} onToggleAll={toggleAllInTable} onAction={handleTabAction} busy={bulkBusy} />}
           <ModToolbar bucket="stakeholders" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {stakeholders.length === 0 ? <Empty msg="No stakeholders recorded yet." /> : stakeholders.map(s => (
             <Card key={s.id} className={cn("p-4", s.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
@@ -525,6 +516,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
         </TabsContent>
 
         <TabsContent value="risks" className="space-y-2 mt-4">
+          {isReviewer && <TabBulkBar table="project_risks" rows={risks} selected={selected} onToggleAll={toggleAllInTable} onAction={handleTabAction} busy={bulkBusy} />}
           <ModToolbar bucket="risks" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {risks.length === 0 ? <Empty msg="No risks logged yet." /> : risks.map(r => (
             <Card key={r.id} className={cn("p-4 border-l-4",
@@ -552,6 +544,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
         </TabsContent>
 
         <TabsContent value="impact" className="space-y-2 mt-4">
+          {isReviewer && <TabBulkBar table="project_impact" rows={impact} selected={selected} onToggleAll={toggleAllInTable} onAction={handleTabAction} busy={bulkBusy} />}
           <ModToolbar bucket="impact" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {impact.length === 0 ? <Empty msg="No impact metrics yet." /> : impact.map(i => (
             <Card key={i.id} className={cn("p-4", i.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
@@ -574,6 +567,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
         </TabsContent>
 
         <TabsContent value="procurement" className="space-y-2 mt-4">
+          {isReviewer && <TabBulkBar table="project_procurement" rows={procurement} selected={selected} onToggleAll={toggleAllInTable} onAction={handleTabAction} busy={bulkBusy} />}
           <ModToolbar bucket="procurement" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {procurement.length === 0 ? <Empty msg="No procurement records yet." /> : procurement.map(p => (
             <Card key={p.id} className={cn("p-4", p.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
@@ -603,6 +597,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
         </TabsContent>
 
         <TabsContent value="compliance" className="space-y-2 mt-4">
+          {isReviewer && <TabBulkBar table="project_compliance" rows={compliance} selected={selected} onToggleAll={toggleAllInTable} onAction={handleTabAction} busy={bulkBusy} />}
           <ModToolbar bucket="compliance" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {compliance.length === 0 ? <Empty msg="No compliance items yet." /> : compliance.map(c => (
             <Card key={c.id} className={cn("p-4", c.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
@@ -684,6 +679,57 @@ function ModRowControls({ bucket, row, isReviewer, onSaved, onDelete }: {
       <Button size="sm" variant="ghost" className="h-7 text-xs text-muted-foreground hover:text-destructive" onClick={onDelete}>
         <Trash2 className="h-3 w-3 mr-1" /> Delete
       </Button>
+    </div>
+  );
+}
+
+// Inline bulk-action toolbar at the top of each detail tab. Select-all checkbox
+// + Approve / Reject / Delete buttons. Hidden when there are no rows. Used
+// inside ComprehensiveSections (the 7 detail tables); a slightly different
+// shape lives in ProjectDetail for milestones/updates/sources.
+function TabBulkBar({
+  table, rows, selected, onToggleAll, onAction, busy, showApprove = true, showReject = true,
+}: {
+  table: DetailTable | string;
+  rows: any[];
+  selected: Set<string>;
+  onToggleAll: (table: DetailTable | string, ids: string[], select: boolean) => void;
+  onAction: (table: DetailTable | string, ids: string[], action: 'approved' | 'rejected' | 'delete') => void;
+  busy: boolean;
+  showApprove?: boolean;
+  showReject?: boolean;
+}) {
+  if (rows.length === 0) return null;
+  const allKeys = rows.map(r => `${table}:${r.id}`);
+  const selKeys = allKeys.filter(k => selected.has(k));
+  const selIds = selKeys.map(k => k.split(':').slice(1).join(':'));
+  const allSelected = allKeys.length > 0 && selKeys.length === allKeys.length;
+  const some = selKeys.length > 0;
+  return (
+    <div className="flex items-center justify-between gap-2 p-2 rounded-md border bg-muted/30 mb-2 flex-wrap">
+      <label className="flex items-center gap-2 cursor-pointer text-xs">
+        <Checkbox
+          checked={allSelected}
+          onCheckedChange={(checked) => onToggleAll(table, allKeys.map(k => k.split(':').slice(1).join(':')), !!checked)}
+          aria-label="Select all in this tab"
+        />
+        <span>{some ? `${selKeys.length} of ${rows.length} selected` : `Select all (${rows.length})`}</span>
+      </label>
+      <div className="flex items-center gap-1">
+        {showApprove && (
+          <Button disabled={!some || busy} size="sm" variant="ghost" className="h-7 text-xs text-success hover:bg-success/10" onClick={() => onAction(table, selIds, 'approved')}>
+            <Check className="h-3.5 w-3.5 mr-1" /> Approve
+          </Button>
+        )}
+        {showReject && (
+          <Button disabled={!some || busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => onAction(table, selIds, 'rejected')}>
+            <X className="h-3.5 w-3.5 mr-1" /> Reject
+          </Button>
+        )}
+        <Button disabled={!some || busy} size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => onAction(table, selIds, 'delete')}>
+          <Trash2 className="h-3.5 w-3.5 mr-1" /> Delete
+        </Button>
+      </div>
     </div>
   );
 }
