@@ -597,6 +597,24 @@ async function dedupeCandidate(admin: any, table: string, projectId: number, row
 // ─── Insert helpers ──────────────────────────────────────────────────────────
 type InsertStats = { inserted: Record<string, number>; deduped: Record<string, number>; errors: string[] };
 
+// Build the {url, published_at}[] shape used by the SourceLink UI from an
+// AI-emitted `sources: string[]` field. Skips invalid URLs and dedupes.
+function buildSourcesArray(item: any, hitDateMap: Map<string, string | null>): Array<{ url: string; published_at: string | null }> {
+  const raw: any[] = Array.isArray(item?.sources) ? item.sources : [];
+  const seen = new Set<string>();
+  const out: Array<{ url: string; published_at: string | null }> = [];
+  for (const u of raw) {
+    if (typeof u !== "string") continue;
+    const t = u.trim();
+    if (!t || seen.has(t)) continue;
+    try { new URL(t); } catch { continue; }
+    seen.add(t);
+    out.push({ url: t, published_at: hitDateMap.get(t) ?? null });
+    if (out.length >= 6) break;
+  }
+  return out;
+}
+
 async function insertAll(admin: any, projectId: number, parsed: any, hitDateMap: Map<string, string | null>): Promise<InsertStats> {
   const inserted: Record<string, number> = {};
   const deduped: Record<string, number> = {};
@@ -784,6 +802,7 @@ async function insertAll(admin: any, projectId: number, parsed: any, hitDateMap:
         stage: typeof m.stage === "string" && STAGES.includes(m.stage) ? m.stage : null,
         status: typeof m.status === "string" && MS_STATUSES.includes(m.status) ? m.status : "pending",
         order_index: idx++,
+        sources: buildSourcesArray(m, hitDateMap),
       });
     }
     inserted["project_milestones"] = 0;
@@ -824,6 +843,7 @@ async function insertAll(admin: any, projectId: number, parsed: any, hitDateMap:
         update_type: typeof u.update_type === "string" && TYPES.includes(u.update_type) ? u.update_type : "news",
         submitted_by_ai: true,
         approval_status: "pending",
+        sources: buildSourcesArray(u, hitDateMap),
       });
       if (error) { errs.push(`project_updates: ${error.message}`); continue; }
       inserted["project_updates"] += 1;

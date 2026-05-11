@@ -5,7 +5,7 @@ import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Sparkles, Loader2, ExternalLink, Wallet, FileText, Users, AlertTriangle, BarChart3, Gavel, ShieldCheck, Plus, Pencil, Trash2, Check, X, ChevronDown } from 'lucide-react';
+import { Sparkles, Loader2, ExternalLink, Wallet, FileText, Users, AlertTriangle, BarChart3, Gavel, ShieldCheck, Plus, Pencil, Trash2, Check, X, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
 import { Checkbox } from '@/components/ui/checkbox';
 import { formatNPR } from '@/lib/parseCoords';
 import { cn } from '@/lib/utils';
@@ -18,6 +18,37 @@ const DETAIL_TABLE_NAMES = [
   'project_impact','project_procurement','project_compliance',
 ] as const;
 type DetailTable = typeof DETAIL_TABLE_NAMES[number];
+
+// Each tab shows 5 rows at a time. Below the rows we render a small
+// "Showing 1-5 of 23 · ◀ 1 / 5 ▶" pager. Bulk selection still operates on
+// the full row list (the per-tab toolbar receives `rows`, not the page
+// slice) so a "Select all" on tab N selects every row across all pages.
+const PAGE_SIZE = 5;
+
+function useTabPager<T>(rows: T[]) {
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  // If the row list shrinks (deletes, dedupe re-renders) and the cursor
+  // would land past the end, slide back to the last page automatically.
+  useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
+  const start = (page - 1) * PAGE_SIZE;
+  const paged = rows.slice(start, start + PAGE_SIZE);
+  const pagerEl = rows.length <= PAGE_SIZE ? null : (
+    <div className="flex items-center justify-between gap-2 pt-2 text-[11px] text-muted-foreground font-mono">
+      <span>Showing {start + 1}–{Math.min(start + PAGE_SIZE, rows.length)} of {rows.length}</span>
+      <div className="flex items-center gap-1.5">
+        <Button size="sm" variant="ghost" className="h-7 px-2" onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1} aria-label="Previous page">
+          <ChevronLeft className="h-3.5 w-3.5" />
+        </Button>
+        <span>page {page} / {totalPages}</span>
+        <Button size="sm" variant="ghost" className="h-7 px-2" onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages} aria-label="Next page">
+          <ChevronRight className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+    </div>
+  );
+  return { paged, pagerEl };
+}
 
 type BucketState = { state?: 'queued'|'running'|'succeeded'|'failed'; hits?: number; error?: string };
 
@@ -200,6 +231,15 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
 
   // Run-in-flight cue: disable the button while a queued/running job exists.
   const runInFlight = !!activeJob;
+
+  // Pagers per tab — 5 rows visible, prev/next slide through the rest.
+  const fundingPager = useTabPager(funding);
+  const documentsPager = useTabPager(documents);
+  const stakeholdersPager = useTabPager(stakeholders);
+  const risksPager = useTabPager(risks);
+  const impactPager = useTabPager(impact);
+  const procurementPager = useTabPager(procurement);
+  const compliancePager = useTabPager(compliance);
 
   // ─── Bulk selection helpers ────────────────────────────────────────────────
   const toggleSelected = (table: DetailTable, id: string) => {
@@ -418,7 +458,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
         <TabsContent value="funding" className="space-y-2 mt-4">
           {isReviewer && <TabBulkBar table="project_funding" rows={funding} selected={selected} onToggleAll={toggleAllInTable} onAction={handleTabAction} busy={bulkBusy} />}
           <ModToolbar bucket="funding" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
-          {funding.length === 0 ? <Empty msg="No funding records yet." /> : funding.map(f => (
+          {funding.length === 0 ? <Empty msg="No funding records yet." /> : fundingPager.paged.map(f => (
             <Card key={f.id} className={cn("p-4", f.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
               <RowMetaBar bucket="funding" row={f} isReviewer={isReviewer} onModerate={moderateRow} table="project_funding" selected={selected.has(`project_funding:${f.id}`)} onToggleSelect={toggleSelected} />
               <div className="flex items-start justify-between gap-3 mb-1">
@@ -436,12 +476,13 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               <ModRowControls bucket="funding" row={f} isReviewer={isReviewer} onSaved={loadAll} onDelete={() => deleteRow('funding', f.id)} />
             </Card>
           ))}
+          {fundingPager.pagerEl}
         </TabsContent>
 
         <TabsContent value="documents" className="space-y-2 mt-4">
           {isReviewer && <TabBulkBar table="project_documents" rows={documents} selected={selected} onToggleAll={toggleAllInTable} onAction={handleTabAction} busy={bulkBusy} />}
           <ModToolbar bucket="documents" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
-          {documents.length === 0 ? <Empty msg="No documents linked yet." /> : documents.map(d => (
+          {documents.length === 0 ? <Empty msg="No documents linked yet." /> : documentsPager.paged.map(d => (
             <Card key={d.id} className={cn("p-4", d.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
               <RowMetaBar bucket="documents" row={d} isReviewer={isReviewer} onModerate={moderateRow} table="project_documents" selected={selected.has(`project_documents:${d.id}`)} onToggleSelect={toggleSelected} />
               <div className="flex items-start justify-between gap-3 mb-1">
@@ -459,12 +500,13 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               <ModRowControls bucket="documents" row={d} isReviewer={isReviewer} onSaved={loadAll} onDelete={() => deleteRow('documents', d.id)} />
             </Card>
           ))}
+          {documentsPager.pagerEl}
         </TabsContent>
 
         <TabsContent value="stakeholders" className="space-y-2 mt-4">
           {isReviewer && <TabBulkBar table="project_stakeholders" rows={stakeholders} selected={selected} onToggleAll={toggleAllInTable} onAction={handleTabAction} busy={bulkBusy} />}
           <ModToolbar bucket="stakeholders" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
-          {stakeholders.length === 0 ? <Empty msg="No stakeholders recorded yet." /> : stakeholders.map(s => (
+          {stakeholders.length === 0 ? <Empty msg="No stakeholders recorded yet." /> : stakeholdersPager.paged.map(s => (
             <Card key={s.id} className={cn("p-4", s.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
               <RowMetaBar bucket="stakeholders" row={s} isReviewer={isReviewer} onModerate={moderateRow} table="project_stakeholders" selected={selected.has(`project_stakeholders:${s.id}`)} onToggleSelect={toggleSelected} />
               <div className="flex items-start justify-between gap-3 mb-1">
@@ -483,12 +525,13 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               <ModRowControls bucket="stakeholders" row={s} isReviewer={isReviewer} onSaved={loadAll} onDelete={() => deleteRow('stakeholders', s.id)} />
             </Card>
           ))}
+          {stakeholdersPager.pagerEl}
         </TabsContent>
 
         <TabsContent value="risks" className="space-y-2 mt-4">
           {isReviewer && <TabBulkBar table="project_risks" rows={risks} selected={selected} onToggleAll={toggleAllInTable} onAction={handleTabAction} busy={bulkBusy} />}
           <ModToolbar bucket="risks" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
-          {risks.length === 0 ? <Empty msg="No risks logged yet." /> : risks.map(r => (
+          {risks.length === 0 ? <Empty msg="No risks logged yet." /> : risksPager.paged.map(r => (
             <Card key={r.id} className={cn("p-4 border-l-4",
               r.severity === 'critical' && 'border-l-destructive',
               r.severity === 'high' && 'border-l-destructive/70',
@@ -511,12 +554,13 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               <ModRowControls bucket="risks" row={r} isReviewer={isReviewer} onSaved={loadAll} onDelete={() => deleteRow('risks', r.id)} />
             </Card>
           ))}
+          {risksPager.pagerEl}
         </TabsContent>
 
         <TabsContent value="impact" className="space-y-2 mt-4">
           {isReviewer && <TabBulkBar table="project_impact" rows={impact} selected={selected} onToggleAll={toggleAllInTable} onAction={handleTabAction} busy={bulkBusy} />}
           <ModToolbar bucket="impact" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
-          {impact.length === 0 ? <Empty msg="No impact metrics yet." /> : impact.map(i => (
+          {impact.length === 0 ? <Empty msg="No impact metrics yet." /> : impactPager.paged.map(i => (
             <Card key={i.id} className={cn("p-4", i.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
               <RowMetaBar bucket="impact" row={i} isReviewer={isReviewer} onModerate={moderateRow} table="project_impact" selected={selected.has(`project_impact:${i.id}`)} onToggleSelect={toggleSelected} />
               <div className="flex items-start justify-between gap-3 mb-1">
@@ -534,12 +578,13 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               <ModRowControls bucket="impact" row={i} isReviewer={isReviewer} onSaved={loadAll} onDelete={() => deleteRow('impact', i.id)} />
             </Card>
           ))}
+          {impactPager.pagerEl}
         </TabsContent>
 
         <TabsContent value="procurement" className="space-y-2 mt-4">
           {isReviewer && <TabBulkBar table="project_procurement" rows={procurement} selected={selected} onToggleAll={toggleAllInTable} onAction={handleTabAction} busy={bulkBusy} />}
           <ModToolbar bucket="procurement" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
-          {procurement.length === 0 ? <Empty msg="No procurement records yet." /> : procurement.map(p => (
+          {procurement.length === 0 ? <Empty msg="No procurement records yet." /> : procurementPager.paged.map(p => (
             <Card key={p.id} className={cn("p-4", p.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
               <RowMetaBar bucket="procurement" row={p} isReviewer={isReviewer} onModerate={moderateRow} table="project_procurement" selected={selected.has(`project_procurement:${p.id}`)} onToggleSelect={toggleSelected} />
               <div className="flex items-start justify-between gap-3 mb-1">
@@ -564,12 +609,13 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               <ModRowControls bucket="procurement" row={p} isReviewer={isReviewer} onSaved={loadAll} onDelete={() => deleteRow('procurement', p.id)} />
             </Card>
           ))}
+          {procurementPager.pagerEl}
         </TabsContent>
 
         <TabsContent value="compliance" className="space-y-2 mt-4">
           {isReviewer && <TabBulkBar table="project_compliance" rows={compliance} selected={selected} onToggleAll={toggleAllInTable} onAction={handleTabAction} busy={bulkBusy} />}
           <ModToolbar bucket="compliance" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
-          {compliance.length === 0 ? <Empty msg="No compliance items yet." /> : compliance.map(c => (
+          {compliance.length === 0 ? <Empty msg="No compliance items yet." /> : compliancePager.paged.map(c => (
             <Card key={c.id} className={cn("p-4", c.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
               <RowMetaBar bucket="compliance" row={c} isReviewer={isReviewer} onModerate={moderateRow} table="project_compliance" selected={selected.has(`project_compliance:${c.id}`)} onToggleSelect={toggleSelected} />
               <div className="flex items-start justify-between gap-3 mb-1">
@@ -595,6 +641,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               <ModRowControls bucket="compliance" row={c} isReviewer={isReviewer} onSaved={loadAll} onDelete={() => deleteRow('compliance', c.id)} />
             </Card>
           ))}
+          {compliancePager.pagerEl}
         </TabsContent>
       </Tabs>
 
@@ -928,7 +975,7 @@ function normaliseSources(sources: any, fallbackUrl?: string | null): SourceEntr
   return out;
 }
 
-function SourceLink({ url, sources }: { url?: string | null; sources?: any }) {
+export function SourceLink({ url, sources }: { url?: string | null; sources?: any }) {
   const list = normaliseSources(sources, url);
   if (list.length === 0) return null;
   if (list.length === 1) {
