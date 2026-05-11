@@ -942,6 +942,11 @@ function LiveDiscoveryCard({ userId }: { userId: string | null }) {
             <span className="font-semibold">National Pride mode</span>
             <span className="text-[10px] text-muted-foreground">— iterates the 24 Rastra Gaurab projects on each tick</span>
           </label>
+          {!draftDistricts && !draftNationalPride && (
+            <div className="text-[11px] text-warning bg-warning/10 border border-warning/30 rounded px-2 py-1.5">
+              ⚠ Baseline mode (both toggles off). Queries are generic ("Nepal infrastructure {'{'}sector{'}'} {'{'}province{'}'}") and yield is low — most ticks return 0 new projects. Consider flipping <strong>District-comprehensive</strong> for deeper local coverage, or <strong>National Pride mode</strong> for higher per-token yield on the 24 flagship projects.
+            </div>
+          )}
         </div>
       )}
     </Card>
