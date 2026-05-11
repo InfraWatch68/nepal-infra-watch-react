@@ -22,7 +22,6 @@ import { toast } from 'sonner';
 import { Shield, Megaphone, Sparkles, Loader2, ExternalLink, Users as UsersIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { SECTORS, PROVINCES, districtsFor } from '@/lib/constants';
-import { DetailsModerationTab } from '@/components/admin/DetailsModerationTab';
 import { VerifyDialog } from '@/components/admin/VerifyDialog';
 import { SherlockManager } from '@/components/admin/SherlockManager';
 import { AdminRemovalPanel } from '@/components/admin/AdminRemovalPanel';
@@ -421,7 +420,6 @@ export default function Admin() {
             <TabsTrigger value="all">All projects</TabsTrigger>
             <TabsTrigger value="updates">Pending updates ({pendingUpdates.length})</TabsTrigger>
             <TabsTrigger value="sources">Pending sources ({pendingSources.length})</TabsTrigger>
-            <TabsTrigger value="details">Project details</TabsTrigger>
             {isAdmin && <TabsTrigger value="users"><UsersIcon className="h-4 w-4 mr-1" /> Users ({users.length})</TabsTrigger>}
             {(isAdmin || isCoadmin) && <TabsTrigger value="ads"><Megaphone className="h-4 w-4 mr-1" /> Ad slots</TabsTrigger>}
           </TabsList>
@@ -456,9 +454,6 @@ export default function Admin() {
           <TabsContent value="sources" className="mt-4">
             <PendingSourcesList items={pendingSources} onReview={reviewSource} refresh={refresh} />
           </TabsContent>
-          <TabsContent value="details" className="mt-4">
-            <DetailsModerationTab />
-          </TabsContent>
           {isAdmin && (
             <TabsContent value="users" className="mt-4 space-y-4">
               <AdminRemovalPanel admins={users.filter((u: any) => (u.roles ?? []).includes('admin')).map((u: any) => ({ id: u.id, full_name: u.full_name, email: u.email }))} />
@@ -479,32 +474,33 @@ export default function Admin() {
 
 function ProjectList({ projects, onReview, onFetchNews, onGenerateBrief, onPushNow, busyRow, canPushNow, refresh }: any) {
   const [sel, setSel] = useState<Set<string>>(new Set());
-  // Only allow bulk action on rows still pending — approved projects already
-  // moved on, and they shouldn't be bulk-reversed without an explicit edit.
-  const actionableIds = projects.filter((p: any) => p.approval_status === 'pending' || p.approval_status === 'changes_requested').map((p: any) => String(p.id));
-  const some = actionableIds.some((id: string) => sel.has(id));
-  const all = actionableIds.length > 0 && actionableIds.every((id: string) => sel.has(id));
+  // Every project is selectable now, regardless of approval_status. The
+  // "All projects" tab needs bulk-actions on approved rows too (e.g. mass
+  // reject a batch that turned out to be junk after publication). The bulk
+  // confirm dialog is explicit about the count so destructive moves stay
+  // intentional.
+  const allIds = projects.map((p: any) => String(p.id));
+  const some = allIds.some((id: string) => sel.has(id));
+  const all = allIds.length > 0 && allIds.every((id: string) => sel.has(id));
   const toggle = (id: string) => setSel(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
-  const toggleAll = (v: boolean) => setSel(v ? new Set(actionableIds) : new Set());
+  const toggleAll = (v: boolean) => setSel(v ? new Set(allIds) : new Set());
   if (projects.length === 0) return <Card className="p-12 text-center text-muted-foreground">Queue empty.</Card>;
   return (
     <Card>
-      {actionableIds.length > 0 && (
-        <AdminBulkBar
-          table="projects"
-          selectedIds={[...sel]}
-          rowCount={actionableIds.length}
-          allSelected={all}
-          someSelected={some}
-          onToggleAll={toggleAll}
-          afterAction={() => { setSel(new Set()); refresh && refresh(); }}
-        />
-      )}
+      <AdminBulkBar
+        table="projects"
+        selectedIds={[...sel]}
+        rowCount={projects.length}
+        allSelected={all}
+        someSelected={some}
+        onToggleAll={toggleAll}
+        afterAction={() => { setSel(new Set()); refresh && refresh(); }}
+      />
       <div className="divide-y">
         {projects.map((p: any) => {
           const isApproved = p.approval_status === 'approved';
           const scheduled = p.published_at && new Date(p.published_at) > new Date();
-          const selectable = !isApproved;
+          const selectable = true;
           return (
             <div key={p.id} className="p-4 flex items-start justify-between gap-4">
               <div className="flex items-start gap-3 min-w-0 flex-1">
