@@ -5,7 +5,7 @@ import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Sparkles, Loader2, ExternalLink, Wallet, FileText, Users, AlertTriangle, BarChart3, Gavel, ShieldCheck, Plus, Pencil, Trash2, Check, X, ChevronDown, RotateCcw } from 'lucide-react';
+import { Sparkles, Loader2, ExternalLink, Wallet, FileText, Users, AlertTriangle, BarChart3, Gavel, ShieldCheck, Plus, Pencil, Trash2, Check, X, ChevronDown } from 'lucide-react';
 import { Checkbox } from '@/components/ui/checkbox';
 import { formatNPR } from '@/lib/parseCoords';
 import { cn } from '@/lib/utils';
@@ -293,26 +293,6 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
     loadRunMeta();
   };
 
-  // Hard reset — wipe every AI-submitted row across the 7 detail tables for
-  // THIS project. Lets the operator start clean before re-running.
-  const resetAllAiRows = async () => {
-    const ok = confirm('Delete ALL AI-submitted rows for this project across funding / documents / stakeholders / risks / impact / procurement / compliance? Approved rows are deleted too. Manual entries (submitted_by_ai=false) stay intact. This cannot be undone.');
-    if (!ok) return;
-    setBulkBusy(true);
-    const errors: string[] = [];
-    let total = 0;
-    for (const t of DETAIL_TABLE_NAMES) {
-      const { error, count } = await supabase.from(t).delete({ count: 'exact' })
-        .eq('project_id', projectId).eq('submitted_by_ai', true);
-      if (error) errors.push(`${t}: ${error.message}`);
-      else total += (count ?? 0);
-    }
-    setBulkBusy(false);
-    if (errors.length > 0) toast.error(`Wiped ${total}, errors: ${errors.join('; ').slice(0, 200)}`);
-    else toast.success(`Wiped ${total} AI-submitted row${total === 1 ? '' : 's'} for this project. Ready for a fresh run.`);
-    clearSelection();
-    loadAll();
-  };
 
   // Bulk-approve pool: pending AI rows with confidence_score >= 0.85 across all
   // 7 tables. Counted from already-loaded data so the badge updates instantly
@@ -401,10 +381,6 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
                 Approve {highConfPending} high-conf
               </Button>
             )}
-            <Button size="sm" variant="outline" onClick={resetAllAiRows} disabled={bulkBusy} title="Delete every AI-submitted row for this project (approved + pending). Manual entries stay.">
-              <RotateCcw className="h-4 w-4" />
-              Reset AI rows
-            </Button>
             <Button size="sm" variant="outline" onClick={runAnalysis} disabled={busy || runInFlight}>
               {busy || runInFlight ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
               {runInFlight ? 'Analysis in flight…' : 'Run AI Analysis'}

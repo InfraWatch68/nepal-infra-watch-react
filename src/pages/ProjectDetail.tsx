@@ -358,7 +358,7 @@ export default function ProjectDetail() {
                 </div>
               </div>
               {isReviewer && (
-                <Button size="sm" onClick={runTraceHistory} disabled={traceBusy || traceInFlight} title="Fetch milestones, updates, citations, and images from the public record. Shares the analysis queue with Run AI Analysis.">
+                <Button size="sm" variant="outline" onClick={runTraceHistory} disabled={traceBusy || traceInFlight} title="Fetch milestones, updates, citations, and images from the public record. Shares the analysis queue with Run AI Analysis.">
                   {traceBusy || traceInFlight ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
                   {traceInFlight ? 'Tracing…' : 'Trace History'}
                 </Button>
