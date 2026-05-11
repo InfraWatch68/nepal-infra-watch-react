@@ -283,9 +283,12 @@ Return ONLY a JSON object (no prose, no markdown, no code fence) matching this s
   "sector": one of ${JSON.stringify(SECTORS)},        // PRIMARY sector — single value, matches the most dominant theme
   "sectors": [one of ${JSON.stringify(SECTORS)}, ...], // ALL applicable sectors, in priority order. A hydropower project that also irrigates farmland is ["Energy","Agriculture & Irrigation"]. Always include the primary sector as element 0.
   "project_type": one of ${JSON.stringify(PROJECT_TYPES)} or null,
-  "province": one of ${JSON.stringify(PROVINCES)} or null,
-  "district": string or null,
-  "municipality": string or null,                     // municipality / metropolitan / RM
+  "province": one of ${JSON.stringify(PROVINCES)} or null,     // primary / administrative-owner province
+  "provinces": [one of ${JSON.stringify(PROVINCES)}, ...],     // ALL provinces the project physically traverses, in geographic order. East-West Highway = ["Koshi","Madhesh","Bagmati","Gandaki","Lumbini","Sudurpashchim"]. Always include the primary as element 0. Single-province projects = [primary].
+  "district": string or null,                                 // primary district
+  "districts": [string, ...],                                 // ALL districts the project traverses, max 10 entries
+  "municipality": string or null,                             // primary municipality / metropolitan / RM
+  "municipalities": [string, ...],                            // ALL municipalities the project traverses, max 15 entries
   "ward": number or null,                             // 0-99
   "location_text": string or null,                    // free-text description (e.g. "Kalanki–Naubise section, 27 km")
   "description": string,                              // SEE RULES BELOW
@@ -479,6 +482,46 @@ Other rules:
               province: PROVINCES.includes(parsed.province) ? parsed.province : null,
               district: parsed.district ?? null,
               municipality: parsed.municipality ?? null,
+              // Multi-geo arrays — for projects that span multiple
+              // provinces / districts / municipalities. Dedupes, filters
+              // provinces against the canonical list, caps at sensible
+              // sizes. Always includes the primary as element 0.
+              provinces: (() => {
+                const primary = PROVINCES.includes(parsed.province) ? parsed.province : null;
+                const seen = new Set<string>();
+                const out: string[] = [];
+                if (primary) { seen.add(primary); out.push(primary); }
+                for (const p of (Array.isArray(parsed.provinces) ? parsed.provinces : [])) {
+                  if (typeof p !== "string" || !PROVINCES.includes(p) || seen.has(p)) continue;
+                  seen.add(p); out.push(p);
+                  if (out.length >= 7) break;
+                }
+                return out;
+              })(),
+              districts: (() => {
+                const primary = parsed.district ?? null;
+                const seen = new Set<string>();
+                const out: string[] = [];
+                if (primary) { seen.add(primary); out.push(primary); }
+                for (const d of (Array.isArray(parsed.districts) ? parsed.districts : [])) {
+                  if (typeof d !== "string" || !d.trim() || seen.has(d)) continue;
+                  seen.add(d); out.push(d);
+                  if (out.length >= 10) break;
+                }
+                return out;
+              })(),
+              municipalities: (() => {
+                const primary = parsed.municipality ?? null;
+                const seen = new Set<string>();
+                const out: string[] = [];
+                if (primary) { seen.add(primary); out.push(primary); }
+                for (const m of (Array.isArray(parsed.municipalities) ? parsed.municipalities : [])) {
+                  if (typeof m !== "string" || !m.trim() || seen.has(m)) continue;
+                  seen.add(m); out.push(m);
+                  if (out.length >= 15) break;
+                }
+                return out;
+              })(),
               ward,
               location_text: parsed.location_text ?? null,
               contractor: parsed.contractor ?? null,

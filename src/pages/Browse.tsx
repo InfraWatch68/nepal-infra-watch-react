@@ -75,9 +75,24 @@ export default function Browse() {
         const inArray = Array.isArray(p.sectors) && p.sectors.includes(sector);
         if (!inPrimary && !inArray) return false;
       }
-      if (province !== 'all' && p.province !== province) return false;
-      if (district !== 'all' && p.district !== district) return false;
-      if (municipality !== 'all' && (p.municipality ?? '') !== municipality) return false;
+      // Multi-geo match: project shows under any province / district /
+      // municipality it physically traverses (per the *s arrays), not just
+      // its administrative-owner location.
+      if (province !== 'all') {
+        const inPrimary = p.province === province;
+        const inArray = Array.isArray(p.provinces) && p.provinces.includes(province);
+        if (!inPrimary && !inArray) return false;
+      }
+      if (district !== 'all') {
+        const inPrimary = p.district === district;
+        const inArray = Array.isArray(p.districts) && p.districts.includes(district);
+        if (!inPrimary && !inArray) return false;
+      }
+      if (municipality !== 'all') {
+        const inPrimary = (p.municipality ?? '') === municipality;
+        const inArray = Array.isArray(p.municipalities) && p.municipalities.includes(municipality);
+        if (!inPrimary && !inArray) return false;
+      }
       // The Rastra Gaurav column on `projects` is `national_pride` (see
       // migration 20260513170000_projects_national_pride.sql). Keep
       // `is_rastra_gaurav` as a fallback in case future code lands either.

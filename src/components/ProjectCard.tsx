@@ -57,6 +57,15 @@ export function ProjectCard({ p }: { p: any }) {
               <span key={s} className="text-[10px] normal-case tracking-normal bg-muted/60 text-foreground/70 rounded px-1.5 py-0.5">+ {s}</span>
             ))}
             {p.province && <><span>·</span><span>{p.province}</span></>}
+            {/* Spanning indicator — when provinces[] has more entries than
+                just the primary, surface "+ N more" so a 7-province highway
+                doesn't read as if it were a single-province project. */}
+            {(() => {
+              const extras = Array.isArray(p.provinces) ? p.provinces.filter((x: string) => x && x !== p.province).length : 0;
+              return extras > 0
+                ? <span className="text-[10px] normal-case tracking-normal bg-accent/15 text-accent rounded px-1.5 py-0.5">+ {extras} more</span>
+                : null;
+            })()}
           </div>
           <h3 className="font-display text-lg font-semibold leading-snug line-clamp-2 group-hover:text-accent transition-colors">{p.title}</h3>
           <div className="grid grid-cols-2 gap-2 text-xs text-muted-foreground pt-2 border-t border-border/60">
