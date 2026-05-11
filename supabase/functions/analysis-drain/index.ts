@@ -144,6 +144,10 @@ async function callChat(messages: ChatMessage[]):
 // enabled rows, substitutes {title}/{sector}/{province}/{district} into the
 // query_template, and filters by sector_filter when set.
 type Hit = { title: string; url: string; content: string; bucket: string; published_date: string | null };
+// Image hits from Tavily (separate stream so we don't conflate them with
+// article URLs). Each entry is { url, description }; description is the
+// AI-generated alt-text Tavily attaches.
+type ImageHit = { url: string; description: string; bucket: string };
 type BucketDef = { name: string; payload: Record<string, unknown> };
 type BucketRow = {
   name: string;
@@ -187,6 +191,10 @@ async function loadBuckets(admin: any, project: any): Promise<BucketDef[]> {
       search_depth: b.search_depth,
       max_results: b.max_results,
       include_answer: false,
+      // Pull images alongside articles. Lets the AI propose a cover_image_url
+      // for the project and gives Trace History richer assets when available.
+      include_images: true,
+      include_image_descriptions: true,
     };
     if (b.topic) payload.topic = b.topic;
     if (b.days) payload.days = b.days;
@@ -204,35 +212,38 @@ async function patchBucketStatus(admin: any, runId: string, name: string, patch:
 }
 
 // Run one bucket: write running → run Tavily → write succeeded/failed with hits.
-async function runBucket(admin: any, runId: string, keys: string[], b: BucketDef): Promise<Hit[]> {
+// Returns both article hits AND image hits (Tavily's separate images stream).
+async function runBucket(admin: any, runId: string, keys: string[], b: BucketDef): Promise<{ hits: Hit[]; images: ImageHit[] }> {
   await patchBucketStatus(admin, runId, b.name, { state: "running", started_at: new Date().toISOString() });
   const r = await tavily(keys, b.payload);
   if ("exhausted" in r) {
     await patchBucketStatus(admin, runId, b.name, { state: "failed", finished_at: new Date().toISOString(), error: "Tavily keys exhausted" });
-    return [];
+    return { hits: [], images: [] };
   }
   if (!r.res.ok) {
     await patchBucketStatus(admin, runId, b.name, { state: "failed", finished_at: new Date().toISOString(), error: `HTTP ${r.res.status}` });
-    return [];
+    return { hits: [], images: [] };
   }
   const j = await r.res.json();
   const hits: Hit[] = [];
   for (const item of (j.results ?? []) as any[]) {
     if (!item?.url || !item?.content) continue;
-    // Tavily returns `published_date` mostly on news/article hits. Format varies
-    // (ISO, RFC2822, "Aug 15, 2024", etc.) so we run it through Date.parse() and
-    // normalise to YYYY-MM-DD. Falls back to null when missing/unparseable.
     let published_date: string | null = null;
     if (typeof item.published_date === "string" && item.published_date.trim()) {
       const parsed = new Date(item.published_date);
-      if (!isNaN(parsed.getTime())) {
-        published_date = parsed.toISOString().slice(0, 10);
-      }
+      if (!isNaN(parsed.getTime())) published_date = parsed.toISOString().slice(0, 10);
     }
     hits.push({ title: item.title ?? "", url: item.url, content: String(item.content).slice(0, 1500), bucket: b.name, published_date });
   }
-  await patchBucketStatus(admin, runId, b.name, { state: "succeeded", finished_at: new Date().toISOString(), hits: hits.length });
-  return hits;
+  // Tavily returns images either as `["https://...", ...]` or as
+  // `[{ url, description }, ...]` depending on include_image_descriptions.
+  const images: ImageHit[] = [];
+  for (const img of (j.images ?? []) as any[]) {
+    if (typeof img === "string") images.push({ url: img, description: "", bucket: b.name });
+    else if (img && typeof img.url === "string") images.push({ url: img.url, description: typeof img.description === "string" ? img.description : "", bucket: b.name });
+  }
+  await patchBucketStatus(admin, runId, b.name, { state: "succeeded", finished_at: new Date().toISOString(), hits: hits.length, images: images.length });
+  return { hits, images };
 }
 
 // ─── Extraction prompt — hub-grade output ────────────────────────────────────
@@ -318,14 +329,58 @@ When facts conflict, prefer the most recent. A 2026 audit overrides a 2022 news 
       "finding": str|null, "notes": str|null,
       "sources": [str, ...], "confidence_score": num }
   ],
+  "milestones": [
+    { "title": str,                                              // <= 100 chars, the milestone's name (e.g. "Groundbreaking", "Phase 1 inauguration", "EIA approved")
+      "description": str|null,                                   // 1-2 sentence context
+      "milestone_date": "YYYY-MM-DD"|null,                       // when it happened (or was scheduled)
+      "stage": "planning|approval|tendering|construction|operation|closure"|null,
+      "status": "pending|in_progress|completed|missed",
+      "sources": [str, ...], "confidence_score": num }
+  ],
+  "updates": [
+    { "title": str,                                              // <= 120 chars, headline-style
+      "content": str,                                            // 2-4 sentences, plain prose
+      "update_date": "YYYY-MM-DD"|null,
+      "update_type": "news|status|progress|issue|completion|funding|legal"|null,
+      "sources": [str, ...], "confidence_score": num }
+  ],
+  "additional_sources": [
+    { "title": str,                                              // article / page title
+      "url": str,                                                // the source URL
+      "source_type": "news|government|audit|procurement|donor|academic|other",
+      "published_at": "YYYY-MM-DD"|null,
+      "confidence_score": num }
+  ],
   "basic_updates": {
     "procurement_method": str|null,
     "esia_status": "not_started|in_progress|iee_approved|eia_approved|rejected|exempt"|null,
     "funding_committed_npr": num|null,
     "estimated_beneficiaries": num|null,
-    "project_type": str|null
+    "project_type": str|null,
+    "status": "proposed|approved|in_progress|delayed|completed|cancelled"|null,
+    "status_evidence_date": "YYYY-MM-DD"|null,  // the latest date in the corpus that supports the status above
+    "status_confidence": num|null                // 0.00-1.00 per the confidence rubric above
   }
 }
+
+## Status rubric — extreme importance
+Set "status" in basic_updates using the LATEST evidence in the corpus, not a year-old article. Pick exactly one:
+
+- "proposed": announced/under study, NO formal sanction. Keywords: feasibility study, DPR preparation, concept stage, proposed, planned, envisaged.
+- "approved": formal sanction (cabinet, ministry, parliament, board) AND/OR budget allocated, but physical work has NOT started. Keywords: approved by Cabinet, endorsed, sanctioned, tender awarded, contract signed, groundbreaking scheduled.
+- "in_progress": physical construction/implementation actively underway as of the latest article. Keywords: construction began, X% complete, contractor mobilised, ongoing, underway, partial work done. Even 5% done = in_progress unless explicitly stalled.
+- "delayed": missed a stated deadline AND article explicitly says so. Keywords: delayed, behind schedule, stalled, halted, deadline pushed, suspended, blacklisted contractor walked off, "yet to start despite approval years ago". Do NOT default to delayed for any slow project.
+- "completed": formally finished AND/OR inaugurated AND/OR operational. Keywords: completed, inaugurated, handed over, operational, in service, commissioned, COD reached.
+- "cancelled": formally scrapped. Keywords: cancelled, scrapped, abandoned, terminated, contract rescinded, shelved indefinitely.
+
+Tie-breakers:
+- Multiple status-relevant facts at different times → pick the one from the LATEST date.
+- Tender stages (issued/awarded/signed) without construction start → "approved".
+- Partial inauguration of one section while others are still being built → "in_progress".
+- Article reports troubles but no explicit delay language → still "in_progress".
+- Unclear / passing mention only → leave status null (don't guess).
+
+Always emit "status_evidence_date" with the date of the article that supports the status. The pipeline uses this to skip stale overrides.
 
 Rules:
 - Use ISO date "YYYY-MM-DD" or null. NPR amounts as raw number (no commas).
@@ -699,6 +754,113 @@ async function insertAll(admin: any, projectId: number, parsed: any, hitDateMap:
     await tryInsert("project_compliance", rows);
   }
 
+  // ── Trace History trio ──────────────────────────────────────────────────
+  // project_milestones — no approval_status column, no submitted_by_ai. Just
+  // ordered events on the project timeline. Inserted directly so the
+  // Milestones tab populates without a separate moderation step.
+  {
+    const STAGES = ["planning","approval","tendering","construction","operation","closure"];
+    const MS_STATUSES = ["pending","in_progress","completed","missed"];
+    const candidates = (Array.isArray(parsed.milestones) ? parsed.milestones : []).slice(0, 10);
+    const rows: any[] = [];
+    let idx = 0;
+    for (const m of candidates) {
+      const title = strOrNull(m.title);
+      if (!title) continue;
+      // Fuzzy dedupe against existing milestones (title + date).
+      const existing = await admin.from("project_milestones").select("id, title, milestone_date").eq("project_id", projectId);
+      const existingRows = (existing.data ?? []) as any[];
+      const matched = existingRows.find(r => {
+        if (!fuzzyEqual(r.title ?? "", title)) return false;
+        const a = m.milestone_date ?? null, b = r.milestone_date ?? null;
+        return a === b || (!a && !b);
+      });
+      if (matched) { deduped["project_milestones"] = (deduped["project_milestones"] ?? 0) + 1; continue; }
+      rows.push({
+        project_id: projectId,
+        title,
+        description: strOrNull(m.description),
+        milestone_date: validDate(m.milestone_date) ? m.milestone_date : null,
+        stage: typeof m.stage === "string" && STAGES.includes(m.stage) ? m.stage : null,
+        status: typeof m.status === "string" && MS_STATUSES.includes(m.status) ? m.status : "pending",
+        order_index: idx++,
+      });
+    }
+    inserted["project_milestones"] = 0;
+    deduped["project_milestones"] = deduped["project_milestones"] ?? 0;
+    if (rows.length > 0) {
+      const { error } = await admin.from("project_milestones").insert(rows);
+      if (error) errs.push(`project_milestones: ${error.message}`);
+      else inserted["project_milestones"] = rows.length;
+    }
+  }
+
+  // project_updates — AI-suggested news/status updates. Has approval_status
+  // (auto-approved by trigger if the parent project is approved; otherwise
+  // pending for moderator review on the project detail page).
+  {
+    const TYPES = ["news","status","progress","issue","completion","funding","legal"];
+    const candidates = (Array.isArray(parsed.updates) ? parsed.updates : []).slice(0, 8);
+    inserted["project_updates"] = 0;
+    deduped["project_updates"] = 0;
+    for (const u of candidates) {
+      const title = strOrNull(u.title);
+      const content = strOrNull(u.content);
+      if (!title || !content) continue;
+      const existing = await admin.from("project_updates").select("id, title, update_date").eq("project_id", projectId);
+      const existingRows = (existing.data ?? []) as any[];
+      const matched = existingRows.find(r => {
+        if (!fuzzyEqual(r.title ?? "", title)) return false;
+        const a = u.update_date ?? null, b = r.update_date ?? null;
+        return a === b || (!a && !b);
+      });
+      if (matched) { deduped["project_updates"] += 1; continue; }
+      const { error } = await admin.from("project_updates").insert({
+        project_id: projectId,
+        title,
+        content,
+        update_text: content,
+        update_date: validDate(u.update_date) ? u.update_date : null,
+        update_type: typeof u.update_type === "string" && TYPES.includes(u.update_type) ? u.update_type : "news",
+        submitted_by_ai: true,
+        approval_status: "pending",
+      });
+      if (error) { errs.push(`project_updates: ${error.message}`); continue; }
+      inserted["project_updates"] += 1;
+    }
+  }
+
+  // project_sources — additional citations the AI saw alongside the per-row
+  // sources jsonb. These show up as "Sources" tab pills with verified=false
+  // until a moderator verifies them.
+  {
+    const TYPES = ["news","government","audit","procurement","donor","academic","other","article"];
+    const candidates = (Array.isArray(parsed.additional_sources) ? parsed.additional_sources : []).slice(0, 12);
+    inserted["project_sources"] = 0;
+    deduped["project_sources"] = 0;
+    for (const a of candidates) {
+      const url = strOrNull(a.url);
+      if (!url) continue;
+      try { new URL(url); } catch { continue; }
+      const nUrl = normUrl(url);
+      const existing = await admin.from("project_sources").select("id, url").eq("project_id", projectId);
+      const existingRows = (existing.data ?? []) as any[];
+      if (existingRows.some(r => normUrl(r.url) === nUrl)) { deduped["project_sources"] += 1; continue; }
+      const { error } = await admin.from("project_sources").insert({
+        project_id: projectId,
+        title: strOrNull(a.title) ?? new URL(url).hostname.replace(/^www\./, ""),
+        url,
+        source_type: typeof a.source_type === "string" && TYPES.includes(a.source_type) ? a.source_type : "article",
+        published_at: validDate(a.published_at) ? a.published_at : null,
+        verified: false,
+        submitted_by_ai: true,
+        approval_status: "pending",
+      });
+      if (error) { errs.push(`project_sources: ${error.message}`); continue; }
+      inserted["project_sources"] += 1;
+    }
+  }
+
   return { inserted, deduped, errors: errs };
 }
 
@@ -765,7 +927,22 @@ serve(async (req) => {
     // Each bucket independently writes its own state to bucket_status.
     const settled = await Promise.allSettled(buckets.map(b => runBucket(admin, runId!, tavilyKeys, b)));
     const hits: Hit[] = [];
-    for (const s of settled) if (s.status === "fulfilled") hits.push(...s.value);
+    const imageHits: ImageHit[] = [];
+    for (const s of settled) if (s.status === "fulfilled") {
+      hits.push(...s.value.hits);
+      imageHits.push(...s.value.images);
+    }
+    // Dedupe + cap images. Up to 12 unique URLs in bucket-priority order
+    // (news first, donor pages last) so the carousel shows the freshest first.
+    const imageSeen = new Set<string>();
+    const galleryImages: string[] = [];
+    for (const im of imageHits) {
+      if (!im.url || imageSeen.has(im.url)) continue;
+      try { new URL(im.url); } catch { continue; }
+      imageSeen.add(im.url);
+      galleryImages.push(im.url);
+      if (galleryImages.length >= 12) break;
+    }
 
     if (hits.length === 0) {
       await admin.from("project_analysis_runs").update({
@@ -817,22 +994,55 @@ serve(async (req) => {
 
     const { inserted, deduped, errors: insertErrors } = await insertAll(admin, projectId, parsed, hitDateMap);
 
-    // ── NULL-only enrichment of basic project columns (same posture as the old function) ──
+    // ── Enrichment of basic project columns. Most fields are NULL-fill only
+    //    so we never trample manual edits. `status` is a special case: it's
+    //    meant to evolve as projects progress, so we DO refresh it when the
+    //    AI provides clear evidence (confidence >= 0.7) — UNLESS the AI's
+    //    evidence date is older than the value already present, which would
+    //    be a regression. status_evidence_date carries the latest-fact date
+    //    from the AI and gets stamped onto last_comprehensive_analysis_at.
     const ESIA_VALUES = ["not_started","in_progress","iee_approved","eia_approved","rejected","exempt"];
+    const STATUS_VALUES = ["proposed","approved","in_progress","delayed","completed","cancelled"];
     const PROJECT_TYPES = ["Road","Bridge","Tunnel","Cable car","Airport","Railway","Hydropower","Solar","Wind","Transmission line","Substation","Drinking water","Sewerage","Treatment plant","Reservoir","Irrigation canal","Hospital","School","Stadium","Market","Office building","Telecom tower","Other"];
     const eRaw = parsed.basic_updates ?? {};
-    const enrich: Record<string, any> = {};
-    if (typeof eRaw.procurement_method === "string" && eRaw.procurement_method.trim()) enrich.procurement_method = eRaw.procurement_method.trim().slice(0, 60);
-    if (typeof eRaw.esia_status === "string" && ESIA_VALUES.includes(eRaw.esia_status)) enrich.esia_status = eRaw.esia_status;
-    if (typeof eRaw.funding_committed_npr === "number" && Number.isFinite(eRaw.funding_committed_npr) && eRaw.funding_committed_npr >= 0) enrich.funding_committed_npr = eRaw.funding_committed_npr;
-    if (typeof eRaw.estimated_beneficiaries === "number" && Number.isFinite(eRaw.estimated_beneficiaries) && eRaw.estimated_beneficiaries >= 0) enrich.estimated_beneficiaries = Math.round(eRaw.estimated_beneficiaries);
-    if (typeof eRaw.project_type === "string" && PROJECT_TYPES.includes(eRaw.project_type)) enrich.project_type = eRaw.project_type;
-    if (Object.keys(enrich).length > 0) {
-      const cols = Object.keys(enrich);
-      const { data: cur } = await admin.from("projects").select(["id", ...cols].join(",")).eq("id", projectId).single();
+    const nullFill: Record<string, any> = {};
+    if (typeof eRaw.procurement_method === "string" && eRaw.procurement_method.trim()) nullFill.procurement_method = eRaw.procurement_method.trim().slice(0, 60);
+    if (typeof eRaw.esia_status === "string" && ESIA_VALUES.includes(eRaw.esia_status)) nullFill.esia_status = eRaw.esia_status;
+    if (typeof eRaw.funding_committed_npr === "number" && Number.isFinite(eRaw.funding_committed_npr) && eRaw.funding_committed_npr >= 0) nullFill.funding_committed_npr = eRaw.funding_committed_npr;
+    if (typeof eRaw.estimated_beneficiaries === "number" && Number.isFinite(eRaw.estimated_beneficiaries) && eRaw.estimated_beneficiaries >= 0) nullFill.estimated_beneficiaries = Math.round(eRaw.estimated_beneficiaries);
+    if (typeof eRaw.project_type === "string" && PROJECT_TYPES.includes(eRaw.project_type)) nullFill.project_type = eRaw.project_type;
+
+    // Build the actual UPDATE patch: NULL-fill columns vs status which is
+    // allowed to refresh.
+    const statusFromAi = typeof eRaw.status === "string" && STATUS_VALUES.includes(eRaw.status) ? eRaw.status : null;
+    const statusConfidence = typeof eRaw.status_confidence === "number" ? eRaw.status_confidence : 0;
+    const statusEvidenceDate = (typeof eRaw.status_evidence_date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(eRaw.status_evidence_date)) ? eRaw.status_evidence_date : null;
+
+    if (Object.keys(nullFill).length > 0 || statusFromAi) {
+      const colsToRead = ["id", ...Object.keys(nullFill), "status", "last_comprehensive_analysis_at"];
+      const { data: cur } = await admin.from("projects").select(colsToRead.join(",")).eq("id", projectId).single();
       const patch: Record<string, any> = {};
-      for (const k of cols) if (cur && (cur as any)[k] == null) patch[k] = enrich[k];
+      for (const k of Object.keys(nullFill)) if (cur && (cur as any)[k] == null) patch[k] = nullFill[k];
+
+      // Status: refresh when AI has high confidence (>= 0.7) AND the value
+      // would actually change. We don't gate on "evidence newer than last
+      // analysis" because the corpus is per-run; the AI's own recency rule
+      // is what picks the latest fact.
+      if (statusFromAi && statusConfidence >= 0.7 && cur && (cur as any).status !== statusFromAi) {
+        patch.status = statusFromAi;
+      }
+
       if (Object.keys(patch).length > 0) await admin.from("projects").update(patch).eq("id", projectId);
+    }
+
+    // ── Image gallery: write the deduped Tavily image URLs to the project.
+    //    cover_image_url is NULL-filled (manual covers stay); image_urls is
+    //    replaced wholesale because the AI re-curates the carousel per run.
+    if (galleryImages.length > 0) {
+      const { data: imgCur } = await admin.from("projects").select("cover_image_url").eq("id", projectId).single();
+      const patch: Record<string, any> = { image_urls: galleryImages };
+      if (imgCur && (imgCur as any).cover_image_url == null) patch.cover_image_url = galleryImages[0];
+      await admin.from("projects").update(patch).eq("id", projectId);
     }
 
     await admin.from("projects").update({ last_comprehensive_analysis_at: new Date().toISOString() }).eq("id", projectId);

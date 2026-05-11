@@ -5,7 +5,8 @@ import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Sparkles, Loader2, ExternalLink, Wallet, FileText, Users, AlertTriangle, BarChart3, Gavel, ShieldCheck, Plus, Pencil, Trash2, Check, X, ChevronDown } from 'lucide-react';
+import { Sparkles, Loader2, ExternalLink, Wallet, FileText, Users, AlertTriangle, BarChart3, Gavel, ShieldCheck, Plus, Pencil, Trash2, Check, X, ChevronDown, RotateCcw, CheckSquare } from 'lucide-react';
+import { Checkbox } from '@/components/ui/checkbox';
 import { formatNPR } from '@/lib/parseCoords';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
@@ -67,6 +68,10 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
   const [latestRun, setLatestRun] = useState<AnalysisRun | null>(null);
   const [recentRuns, setRecentRuns] = useState<AnalysisRun[]>([]);
   const [showHistory, setShowHistory] = useState(false);
+  // Cross-tab selection. Key shape `${table}:${id}` so the action bar can
+  // batch by table and produce one UPDATE/DELETE per table.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   // Same setter array as before — used both by loadAll and by Realtime re-fetches.
   const setters: Array<(rows: any[]) => void> = [setFunding, setDocuments, setStakeholders, setRisks, setImpact, setProcurement, setCompliance];
@@ -196,6 +201,107 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
   // Run-in-flight cue: disable the button while a queued/running job exists.
   const runInFlight = !!activeJob;
 
+  // ─── Bulk selection helpers ────────────────────────────────────────────────
+  const toggleSelected = (table: DetailTable, id: string) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      const k = `${table}:${id}`;
+      if (next.has(k)) next.delete(k); else next.add(k);
+      return next;
+    });
+  };
+  const clearSelection = () => setSelected(new Set());
+
+  // Group selection by table for batched UPDATE/DELETE calls.
+  const selectionByTable = useMemo(() => {
+    const m: Record<string, string[]> = {};
+    for (const k of selected) {
+      const [t, id] = k.split(':');
+      if (!t || !id) continue;
+      (m[t] ??= []).push(id);
+    }
+    return m;
+  }, [selected]);
+  const selectionCount = selected.size;
+
+  // Apply approve/reject/delete to every selected row, batched per table.
+  const bulkAction = async (action: 'approved' | 'rejected' | 'delete') => {
+    if (selectionCount === 0) return;
+    const label = action === 'delete' ? 'delete' : action;
+    if (!confirm(`${label.charAt(0).toUpperCase() + label.slice(1)} ${selectionCount} selected row${selectionCount === 1 ? '' : 's'}?`)) return;
+    setBulkBusy(true);
+    const { data: u } = await supabase.auth.getUser();
+    const userId = u.user?.id ?? null;
+    const errors: string[] = [];
+    let done = 0;
+    for (const [table, ids] of Object.entries(selectionByTable)) {
+      if (action === 'delete') {
+        const { error } = await supabase.from(table as any).delete().in('id', ids);
+        if (error) { errors.push(`${table}: ${error.message}`); continue; }
+        await supabase.from('project_reviews').insert(ids.map(id => ({
+          target_table: table, target_id: String(id),
+          reviewer_id: userId, reviewer_role: 'admin',
+          action: 'rejected', notes: 'Bulk-deleted', was_admin: true,
+        })));
+      } else {
+        const { error } = await supabase.from(table as any)
+          .update({ approval_status: action, reviewed_by: userId })
+          .in('id', ids);
+        if (error) { errors.push(`${table}: ${error.message}`); continue; }
+        await supabase.from('project_reviews').insert(ids.map(id => ({
+          target_table: table, target_id: String(id),
+          reviewer_id: userId, reviewer_role: 'admin',
+          action, notes: `Bulk ${action}`, was_admin: true,
+        })));
+      }
+      done += ids.length;
+    }
+    setBulkBusy(false);
+    clearSelection();
+    if (errors.length > 0) toast.error(`${done} processed, errors: ${errors.join('; ').slice(0, 200)}`);
+    else toast.success(`${done} row${done === 1 ? '' : 's'} ${action === 'delete' ? 'deleted' : action}`);
+    loadAll();
+  };
+
+  // Cancel an active analysis job mid-flight. For 'queued' the cron will
+  // skip it next tick; for 'running' the edge function may still finish and
+  // burn tokens — we just mark intent so the UI doesn't lie.
+  const cancelActiveAnalysis = async () => {
+    if (!activeJob) return;
+    if (activeJob.status === 'running'
+      && !confirm('Analysis is mid-flight. The edge function may still complete and burn tokens; the UI will mark it cancelled. Proceed?')) return;
+    const { error: jobErr } = await supabase.from('analysis_jobs')
+      .update({ status: 'cancelled', finished_at: new Date().toISOString(), last_error: 'Cancelled by operator' })
+      .eq('id', activeJob.id).in('status', ['queued', 'running']);
+    if (jobErr) return toast.error(jobErr.message);
+    await supabase.from('project_analysis_runs')
+      .update({ status: 'cancelled', finished_at: new Date().toISOString() })
+      .eq('id', activeJob.run_id).in('status', ['queued', 'running']);
+    toast.success('Analysis cancelled');
+    loadRunMeta();
+  };
+
+  // Hard reset — wipe every AI-submitted row across the 7 detail tables for
+  // THIS project. Lets the operator start clean before re-running.
+  const resetAllAiRows = async () => {
+    const ok = confirm('Delete ALL AI-submitted rows for this project across funding / documents / stakeholders / risks / impact / procurement / compliance? Approved rows are deleted too. Manual entries (submitted_by_ai=false) stay intact. This cannot be undone.');
+    if (!ok) return;
+    setBulkBusy(true);
+    const errors: string[] = [];
+    let total = 0;
+    for (const t of DETAIL_TABLE_NAMES) {
+      const { error, count } = await supabase.from(t).delete({ count: 'exact' })
+        .eq('project_id', projectId).eq('submitted_by_ai', true);
+      if (error) errors.push(`${t}: ${error.message}`);
+      else total += (count ?? 0);
+    }
+    setBulkBusy(false);
+    if (errors.length > 0) toast.error(`Wiped ${total}, errors: ${errors.join('; ').slice(0, 200)}`);
+    else toast.success(`Wiped ${total} AI-submitted row${total === 1 ? '' : 's'} for this project. Ready for a fresh run.`);
+    clearSelection();
+    loadAll();
+  };
+
   // Bulk-approve pool: pending AI rows with confidence_score >= 0.85 across all
   // 7 tables. Counted from already-loaded data so the badge updates instantly
   // as the reviewer works.
@@ -283,13 +389,47 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
                 Approve {highConfPending} high-conf
               </Button>
             )}
+            <Button size="sm" variant="outline" onClick={resetAllAiRows} disabled={bulkBusy} title="Delete every AI-submitted row for this project (approved + pending). Manual entries stay.">
+              <RotateCcw className="h-4 w-4" />
+              Reset AI rows
+            </Button>
             <Button size="sm" onClick={runAnalysis} disabled={busy || runInFlight}>
               {busy || runInFlight ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
               {runInFlight ? 'Analysis in flight…' : 'Run AI Analysis'}
             </Button>
+            {runInFlight && (
+              <Button size="sm" variant="outline" className="text-destructive hover:bg-destructive/10" onClick={cancelActiveAnalysis} title="Cancel the in-flight analysis. Already-spent tokens are not refunded.">
+                <X className="h-4 w-4" /> Cancel
+              </Button>
+            )}
           </div>
         )}
       </div>
+
+      {/* Sticky-ish bulk-action bar — appears whenever any row is selected. */}
+      {isReviewer && selectionCount > 0 && (
+        <div className="mb-3 p-2.5 rounded-md border border-info/40 bg-info/10 flex items-center gap-2 flex-wrap">
+          <CheckSquare className="h-4 w-4 text-info" />
+          <span className="text-xs font-semibold">{selectionCount} selected</span>
+          <span className="text-[10px] text-muted-foreground font-mono truncate">
+            {Object.entries(selectionByTable).map(([t, ids]) => `${t.replace('project_', '')}:${ids.length}`).join(' · ')}
+          </span>
+          <div className="ml-auto flex items-center gap-1.5">
+            <Button size="sm" variant="ghost" className="h-7 text-xs text-success hover:bg-success/10" onClick={() => bulkAction('approved')} disabled={bulkBusy}>
+              <Check className="h-3.5 w-3.5 mr-1" /> Approve
+            </Button>
+            <Button size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => bulkAction('rejected')} disabled={bulkBusy}>
+              <X className="h-3.5 w-3.5 mr-1" /> Reject
+            </Button>
+            <Button size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:bg-destructive/10" onClick={() => bulkAction('delete')} disabled={bulkBusy}>
+              <Trash2 className="h-3.5 w-3.5 mr-1" /> Delete
+            </Button>
+            <Button size="sm" variant="ghost" className="h-7 text-xs text-muted-foreground" onClick={clearSelection} disabled={bulkBusy}>
+              Clear
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* Live per-bucket progress strip while a run is queued/running. */}
       {runInFlight && latestRun && (
@@ -321,7 +461,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
           <ModToolbar bucket="funding" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {funding.length === 0 ? <Empty msg="No funding records yet." /> : funding.map(f => (
             <Card key={f.id} className={cn("p-4", f.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
-              <RowMetaBar bucket="funding" row={f} isReviewer={isReviewer} onModerate={moderateRow} />
+              <RowMetaBar bucket="funding" row={f} isReviewer={isReviewer} onModerate={moderateRow} table="project_funding" selected={selected.has(`project_funding:${f.id}`)} onToggleSelect={toggleSelected} />
               <div className="flex items-start justify-between gap-3 mb-1">
                 <h4 className="font-semibold">{f.source_name}</h4>
                 <Badge variant="outline" className="text-[10px] uppercase font-mono shrink-0">{f.source_type}</Badge>
@@ -343,7 +483,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
           <ModToolbar bucket="documents" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {documents.length === 0 ? <Empty msg="No documents linked yet." /> : documents.map(d => (
             <Card key={d.id} className={cn("p-4", d.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
-              <RowMetaBar bucket="documents" row={d} isReviewer={isReviewer} onModerate={moderateRow} />
+              <RowMetaBar bucket="documents" row={d} isReviewer={isReviewer} onModerate={moderateRow} table="project_documents" selected={selected.has(`project_documents:${d.id}`)} onToggleSelect={toggleSelected} />
               <div className="flex items-start justify-between gap-3 mb-1">
                 <a href={d.url} target="_blank" rel="noreferrer" className="font-semibold hover:text-accent inline-flex items-center gap-1.5">
                   {d.title} <ExternalLink className="h-3.5 w-3.5" />
@@ -365,7 +505,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
           <ModToolbar bucket="stakeholders" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {stakeholders.length === 0 ? <Empty msg="No stakeholders recorded yet." /> : stakeholders.map(s => (
             <Card key={s.id} className={cn("p-4", s.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
-              <RowMetaBar bucket="stakeholders" row={s} isReviewer={isReviewer} onModerate={moderateRow} />
+              <RowMetaBar bucket="stakeholders" row={s} isReviewer={isReviewer} onModerate={moderateRow} table="project_stakeholders" selected={selected.has(`project_stakeholders:${s.id}`)} onToggleSelect={toggleSelected} />
               <div className="flex items-start justify-between gap-3 mb-1">
                 <h4 className="font-semibold">{s.org_name}</h4>
                 <Badge variant="outline" className="text-[10px] uppercase font-mono shrink-0">{s.role.replace(/_/g, ' ')}</Badge>
@@ -393,7 +533,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               r.severity === 'medium' && 'border-l-warning',
               r.severity === 'low' && 'border-l-muted-foreground/40',
               r.approval_status === 'pending' && 'bg-warning/5')}>
-              <RowMetaBar bucket="risks" row={r} isReviewer={isReviewer} onModerate={moderateRow} />
+              <RowMetaBar bucket="risks" row={r} isReviewer={isReviewer} onModerate={moderateRow} table="project_risks" selected={selected.has(`project_risks:${r.id}`)} onToggleSelect={toggleSelected} />
               <div className="flex items-start justify-between gap-3 mb-1">
                 <h4 className="font-semibold">{r.title}</h4>
                 <div className="flex gap-1.5 shrink-0">
@@ -415,7 +555,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
           <ModToolbar bucket="impact" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {impact.length === 0 ? <Empty msg="No impact metrics yet." /> : impact.map(i => (
             <Card key={i.id} className={cn("p-4", i.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
-              <RowMetaBar bucket="impact" row={i} isReviewer={isReviewer} onModerate={moderateRow} />
+              <RowMetaBar bucket="impact" row={i} isReviewer={isReviewer} onModerate={moderateRow} table="project_impact" selected={selected.has(`project_impact:${i.id}`)} onToggleSelect={toggleSelected} />
               <div className="flex items-start justify-between gap-3 mb-1">
                 <h4 className="font-semibold capitalize">{i.metric_type.replace(/_/g, ' ')}</h4>
                 {i.measured_at && <Badge variant="outline" className="text-[10px] font-mono shrink-0">{i.measured_at}</Badge>}
@@ -437,7 +577,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
           <ModToolbar bucket="procurement" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {procurement.length === 0 ? <Empty msg="No procurement records yet." /> : procurement.map(p => (
             <Card key={p.id} className={cn("p-4", p.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
-              <RowMetaBar bucket="procurement" row={p} isReviewer={isReviewer} onModerate={moderateRow} />
+              <RowMetaBar bucket="procurement" row={p} isReviewer={isReviewer} onModerate={moderateRow} table="project_procurement" selected={selected.has(`project_procurement:${p.id}`)} onToggleSelect={toggleSelected} />
               <div className="flex items-start justify-between gap-3 mb-1">
                 {p.tender_url ? (
                   <a href={p.tender_url} target="_blank" rel="noreferrer" className="font-semibold hover:text-accent inline-flex items-center gap-1.5">
@@ -466,7 +606,7 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
           <ModToolbar bucket="compliance" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
           {compliance.length === 0 ? <Empty msg="No compliance items yet." /> : compliance.map(c => (
             <Card key={c.id} className={cn("p-4", c.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
-              <RowMetaBar bucket="compliance" row={c} isReviewer={isReviewer} onModerate={moderateRow} />
+              <RowMetaBar bucket="compliance" row={c} isReviewer={isReviewer} onModerate={moderateRow} table="project_compliance" selected={selected.has(`project_compliance:${c.id}`)} onToggleSelect={toggleSelected} />
               <div className="flex items-start justify-between gap-3 mb-1">
                 <h4 className="font-semibold capitalize">{c.item_type.replace(/_/g, ' ')}</h4>
                 <Badge variant="outline" className={cn("text-[10px] uppercase font-mono shrink-0",
@@ -548,23 +688,37 @@ function ModRowControls({ bucket, row, isReviewer, onSaved, onDelete }: {
   );
 }
 
-// Per-row metadata bar shown above each card's existing content. Renders
-// nothing for approved manual rows with no confidence score (so existing
-// rows look unchanged); for pending or AI-scored rows it shows a Pending
-// badge + Confidence pill + (for reviewers on pending) Approve/Reject.
-function RowMetaBar({ bucket, row, isReviewer, onModerate }: {
+// Per-row metadata bar shown above each card's existing content. Renders a
+// selection checkbox for reviewers regardless of status (so manual rows can
+// also be bulk-moderated/deleted), plus pending/confidence badges and inline
+// Approve/Reject buttons for pending AI rows.
+function RowMetaBar({ bucket, row, isReviewer, onModerate, table, selected, onToggleSelect }: {
   bucket: keyof DetailsState;
   row: any;
   isReviewer: boolean;
   onModerate: (b: keyof DetailsState, id: string, action: 'approved' | 'rejected') => void;
+  table: DetailTable;
+  selected: boolean;
+  onToggleSelect: (table: DetailTable, id: string) => void;
 }) {
   const pending = row?.approval_status === 'pending';
   const score: number | null = typeof row?.confidence_score === 'number' ? row.confidence_score : null;
   const isAi = !!row?.submitted_by_ai;
-  if (!pending && score == null) return null;
+  // Reviewers always see the checkbox so they can bulk-act. Hide the rest of
+  // the bar when there's nothing else interesting to surface.
+  const showRightSide = pending || score != null;
+  if (!isReviewer && !showRightSide) return null;
   return (
     <div className="flex items-center justify-between gap-2 mb-2 -mt-1 flex-wrap">
-      <div className="flex items-center gap-1.5 flex-wrap">
+      <div className="flex items-center gap-2 flex-wrap">
+        {isReviewer && (
+          <Checkbox
+            checked={selected}
+            onCheckedChange={() => onToggleSelect(table, row.id)}
+            aria-label="Select row for bulk action"
+            className="h-3.5 w-3.5"
+          />
+        )}
         {pending && (
           <Badge className="bg-warning/15 text-warning border-warning/40 border text-[10px] uppercase font-mono">
             {isAi ? 'AI suggestion · pending review' : 'Pending review'}

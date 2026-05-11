@@ -1,6 +1,7 @@
 // TODO: extract auth gate + Lovable call to _shared if a third caller appears.
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { NATIONAL_PRIDE_PROJECTS, matchNationalPride } from "../_shared/national_pride.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -226,16 +227,41 @@ serve(async (req) => {
     // Optional sherlock_jobs row id; if present, we write status/counts back at the end.
     const jobId: string | null = body.jobId?.toString().trim() || null;
     jobIdForCatch = jobId;
+    // National Pride mode: caller asks Sherlock to focus specifically on the
+    // 24 officially-designated राष्ट्रिय गौरवका आयोजना. Replaces the generic
+    // "Nepal infrastructure" query with a targeted one per project; every
+    // resulting row is force-labeled national_pride=true regardless of the
+    // fuzzy match (which is a belt-and-braces fallback).
+    const nationalPrideMode: boolean = body.nationalPride === true;
 
     const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
     // Build the list of (query, sector?) tuples to run.
+    // - National Pride mode: pick one of the 24 names per "sector" the caller
+    //   asked for, OR rotate through up to maxResults of them.
     // - Geo mode: province (or any geo field) provided → fan out one Tavily query per sector.
     // - Topic mode: legacy single query from topic/region.
-    type Search = { query: string; sector?: string };
+    type Search = { query: string; sector?: string; npName?: string };
     const searches: Search[] = [];
     const geoMode = !!(province || district || municipality);
-    if (geoMode) {
+    if (nationalPrideMode) {
+      // If a specific sector subset was passed, only pull National Pride
+      // entries matching those sectors. Otherwise rotate through the whole 24.
+      const wantSectors = (sectorsParam && sectorsParam.length > 0) ? new Set(sectorsParam) : null;
+      const wantProvince = province || district ? (province ?? "") : null;
+      let pool = NATIONAL_PRIDE_PROJECTS.filter(p => {
+        if (wantSectors && p.sector && !wantSectors.has(p.sector)) return false;
+        if (wantProvince && p.province && p.province !== wantProvince) return false;
+        return true;
+      });
+      // Cap to keep edge function wall-time bounded — one Tavily + one AI call
+      // per name, max 8 per invocation.
+      pool = pool.slice(0, 8);
+      for (const np of pool) {
+        const parts = ['"' + np.name + '"', "Nepal", np.sector ?? "", np.province ?? "", "project"].filter(Boolean);
+        searches.push({ query: parts.join(" "), sector: np.sector, npName: np.name });
+      }
+    } else if (geoMode) {
       const targetSectors = (sectorsParam && sectorsParam.length > 0) ? sectorsParam : SECTORS;
       for (const sec of targetSectors) {
         const parts = ["Nepal infrastructure", sec, municipality, district, province].filter(Boolean);
@@ -271,8 +297,16 @@ Return ONLY a JSON object (no prose, no markdown, no code fence) matching this s
   "esia_status": one of ${JSON.stringify(ESIA_VALUES)} or null,
   "start_date": "YYYY-MM-DD" or null,
   "expected_completion": "YYYY-MM-DD" or null,
-  "status": one of ${JSON.stringify(STATUS_VALUES)}   // best inference from article (proposed if unclear)
+  "status": one of ${JSON.stringify(STATUS_VALUES)},   // SEE STATUS RUBRIC BELOW
+  "confidence_score": number 0.00-1.00                 // see CONFIDENCE RUBRIC below
 }
+
+CONFIDENCE RUBRIC — required, 0.00-1.00:
+- 0.95-1.00: article unambiguously names a specific Nepali infrastructure project with budget/agency/dates/location all stated.
+- 0.80-0.94: article names the project clearly and gives 3+ concrete fields (sector, location, agency, or budget).
+- 0.60-0.79: article mentions the project by name but key fields (location/budget) are inferred or vague.
+- 0.40-0.59: project is mentioned in passing; significant fields guessed.
+- Below 0.40: skip — return "null" instead of emitting a low-confidence record.
 If the article is NOT about a specific infrastructure project in Nepal, return the literal string "null".
 
 DESCRIPTION RULES — this is the most important field:
@@ -280,6 +314,27 @@ DESCRIPTION RULES — this is the most important field:
 - Cover: scope/scale, geography, stakeholders, timeline, financing, current status, and any reported issues, delays, beneficiaries, environmental/social context, and political or economic significance.
 - Use ONLY facts the article actually contains. If a detail isn't in the article, omit it — DO NOT invent. The reader will see the source URL alongside.
 - Plain prose. No markdown. No bullet points. Neutral tone. Treat the project name as an opaque label — do NOT pull in outside knowledge about real-world Nepali projects with similar names.
+
+STATUS RUBRIC — extreme importance. Pick exactly one value using these rules (latest evidence in the article wins; if the article spans multiple time points, the MOST RECENT state takes priority):
+
+- "proposed": the project has been announced, studied, or talked about but has NO formal sanction yet. Indicators: "feasibility study", "DPR (detailed project report) in preparation", "concept stage", "under consideration", "proposed", "planned", "concept", "envisaged". No budget formally allocated and no contract awarded.
+
+- "approved": the project has formal sanction from the relevant authority (cabinet, ministry, parliament, board) AND/OR budget has been allocated in a national/provincial budget — BUT physical work has NOT started. Indicators: "approved by Cabinet", "endorsed", "budget allocated", "sanctioned", "tender issued", "tender awarded", "DPR approved", "groundbreaking ceremony scheduled". No construction/implementation reported yet.
+
+- "in_progress": physical construction or implementation is actively underway as of the article's reporting period. Indicators: "construction began", "X% complete", "ongoing", "underway", "in progress", "active works", "contractor mobilised", a contractor is actually on site doing work. Even partial completion (e.g. "30% done") is in_progress unless explicitly stalled.
+
+- "delayed": the project was supposed to be in_progress or completed by a stated date but has missed that target AND there is explicit reporting of the slippage. Indicators: "delayed", "missed deadline", "behind schedule", "stalled", "halted", "suspended", "extension granted (again)", "yet to start despite approval years ago", "deadline pushed", "blacklisted contractor", "contractor walked off site". This is a state ABOVE in_progress when there's clear schedule failure — do NOT default to delayed for any slow project; require explicit delay language.
+
+- "completed": project has been formally finished AND/OR inaugurated AND/OR is in operation. Indicators: "completed", "inaugurated", "handed over", "operational", "now in service", "ribbon cut", "commercial operation date (COD) reached", "commissioned".
+
+- "cancelled": project has been formally scrapped, terminated, or abandoned. Indicators: "cancelled", "scrapped", "abandoned", "terminated", "contract rescinded", "shelved indefinitely", "withdrawn".
+
+Tie-breakers and defaults:
+- If the article gives multiple status-relevant facts at different times, pick the one from the LATEST date in the article.
+- If genuinely unclear and the article only mentions the project in passing → "proposed".
+- An article reporting on tender stages (issued / awarded / signed) without construction start → "approved".
+- An article reporting active construction problems but not explicit delay language → still "in_progress".
+- An article reporting a partial inauguration of one section while others are still being built → "in_progress" (not "completed") unless the entire project is described as done.
 
 Other rules:
 - Title is the project's actual name, not the article's headline (unless they match).
@@ -300,6 +355,11 @@ Other rules:
         search_depth: "advanced",
         max_results: maxResults,
         include_answer: false,
+        // Capture images so we can populate cover_image_url + image_urls when
+        // we insert the project. Images are scoped per Tavily search so we
+        // grab the first few and attach them to whatever project gets created
+        // from this search's article hits.
+        include_images: true,
       });
 
       if ("exhausted" in tavResult) {
@@ -315,6 +375,18 @@ Other rules:
 
       const tavJson = await tav.json();
       const results: any[] = tavJson.results ?? [];
+      // Deduped image URLs from this Tavily search. Up to 6 per search.
+      // Reused for every project we extract from this search's articles —
+      // not perfect (one search can yield multiple projects) but cheap.
+      const searchImages: string[] = [];
+      const imgSeen = new Set<string>();
+      for (const img of (tavJson.images ?? []) as any[]) {
+        const u = typeof img === "string" ? img : (img && typeof img.url === "string" ? img.url : null);
+        if (!u || imgSeen.has(u)) continue;
+        try { new URL(u); } catch { continue; }
+        imgSeen.add(u); searchImages.push(u);
+        if (searchImages.length >= 6) break;
+      }
 
       for (let idx = 0; idx < results.length; idx++) {
         const r = results[idx];
@@ -403,6 +475,23 @@ Other rules:
               submitted_by: null,
               submitted_by_ai: true,
               ai_tag: aiTag,
+              // Force-label when this came from a National Pride sweep; else
+              // fall back to a fuzzy match against the 24-name list so even
+              // organic discoveries get the badge when the title is recognisable.
+              national_pride: nationalPrideMode || !!matchNationalPride(parsed.title ?? ""),
+              // Image gallery from this Tavily search. cover_image_url
+              // doubles as the first carousel item + the legacy single-image
+              // field used by cards/lists.
+              image_urls: searchImages,
+              cover_image_url: searchImages[0] ?? null,
+              // AI-rated confidence (clamped 0..1). The auto-approve trigger
+              // promotes high-confidence rows when the site_settings toggle
+              // is on; otherwise they sit pending like before.
+              confidence_score: (() => {
+                const v = typeof parsed.confidence_score === "number" ? parsed.confidence_score : null;
+                if (v == null || !Number.isFinite(v)) return null;
+                return Math.max(0, Math.min(1, Math.round(v * 100) / 100));
+              })(),
             })
             .select("id")
             .single();

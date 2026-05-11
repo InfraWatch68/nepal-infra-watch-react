@@ -9,7 +9,7 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Loader2, Search, Trash2, Plus, MapPin, ListChecks, Clock, Filter as FilterIcon, Play, ChevronDown, Radio, Square } from 'lucide-react';
+import { Loader2, Search, Trash2, Plus, MapPin, ListChecks, Clock, Filter as FilterIcon, Play, ChevronDown, Radio, Square, X } from 'lucide-react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { toast } from 'sonner';
@@ -32,7 +32,7 @@ type Job = {
   id: string;
   kind: 'topic' | 'geo' | 'sweep_child';
   params: Record<string, unknown>;
-  status: 'queued' | 'running' | 'done' | 'failed';
+  status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
   inserted: number | null;
   skipped: number | null;
   error_text: string | null;
@@ -52,6 +52,7 @@ type Sweep = {
   sectors: string[];
   per_query_max: number;
   include_districts: boolean;
+  national_pride: boolean;
   cron_job_id: number | null;
   last_run_at: string | null;
   last_run_note: string | null;
@@ -133,10 +134,24 @@ function QueueTab() {
     const { error } = await supabase
       .from('sherlock_jobs')
       .delete()
-      .in('status', ['done', 'failed']);
+      .in('status', ['done', 'failed', 'cancelled']);
     setClearing(false);
     if (error) return toast.error(error.message);
     toast.success('Cleared completed jobs');
+    refresh();
+  };
+
+  // Cancel a queued or running job. For 'queued' the drainer's WHERE clause
+  // skips it on the next tick. For 'running' the in-flight edge function may
+  // still complete and burn its tokens — we just mark intent so the queue UI
+  // doesn't lie about state. The 10-min reaper will catch any orphan.
+  const cancelJob = async (j: Job) => {
+    if (j.status === 'running' && !confirm("This job is mid-flight. The edge function may still complete and consume tokens — but the UI will mark it cancelled. Proceed?")) return;
+    const { error } = await supabase.from('sherlock_jobs')
+      .update({ status: 'cancelled', finished_at: new Date().toISOString(), error_text: 'Cancelled by operator' })
+      .eq('id', j.id).in('status', ['queued', 'running']);
+    if (error) return toast.error(error.message);
+    toast.success('Job cancelled');
     refresh();
   };
 
@@ -155,15 +170,16 @@ function QueueTab() {
 
   const statusBadge = (s: Job['status']) => {
     switch (s) {
-      case 'queued':  return <Badge variant="outline" className="text-[10px]">queued</Badge>;
-      case 'running': return <Badge className="bg-info/15 text-info text-[10px]"><Loader2 className="h-2.5 w-2.5 mr-1 animate-spin" />running</Badge>;
-      case 'done':    return <Badge className="bg-success/15 text-success text-[10px]">done</Badge>;
-      case 'failed':  return <Badge className="bg-destructive/15 text-destructive text-[10px]">failed</Badge>;
+      case 'queued':    return <Badge variant="outline" className="text-[10px]">queued</Badge>;
+      case 'running':   return <Badge className="bg-info/15 text-info text-[10px]"><Loader2 className="h-2.5 w-2.5 mr-1 animate-spin" />running</Badge>;
+      case 'done':      return <Badge className="bg-success/15 text-success text-[10px]">done</Badge>;
+      case 'failed':    return <Badge className="bg-destructive/15 text-destructive text-[10px]">failed</Badge>;
+      case 'cancelled': return <Badge variant="outline" className="text-[10px] text-muted-foreground">cancelled</Badge>;
     }
   };
 
   const counts = useMemo(() => {
-    const c = { queued: 0, running: 0, done: 0, failed: 0 };
+    const c: Record<Job['status'], number> = { queued: 0, running: 0, done: 0, failed: 0, cancelled: 0 };
     for (const j of jobs) c[j.status] += 1;
     return c;
   }, [jobs]);
@@ -195,6 +211,11 @@ function QueueTab() {
                   <span className="text-[10px] text-success">+{j.inserted ?? 0} · skipped {j.skipped ?? 0}</span>
                 )}
                 <span className="text-[10px] text-muted-foreground">{new Date(j.enqueued_at).toLocaleString()}</span>
+                {(j.status === 'queued' || j.status === 'running') && (
+                  <Button size="sm" variant="ghost" className="h-6 px-2 text-[10px] text-destructive hover:bg-destructive/10" onClick={() => cancelJob(j)}>
+                    <X className="h-3 w-3 mr-0.5" /> Cancel
+                  </Button>
+                )}
               </div>
               {j.error_text && (
                 <p className="mt-1 text-[10px] text-destructive font-mono truncate" title={j.error_text}>
@@ -478,6 +499,7 @@ type LiveState = {
   stopped_at: string | null;
   started_by: string | null;
   include_districts: boolean;
+  national_pride: boolean;
   per_query_max: number;
   provinces: string[];
   sectors: string[];
@@ -503,11 +525,12 @@ function SweepsTab() {
   const [draftSectors, setDraftSectors] = useState<string[]>([]);     // empty = all
   const [draftMax, setDraftMax] = useState(3);
   const [draftIncludeDistricts, setDraftIncludeDistricts] = useState(false);
+  const [draftNationalPride, setDraftNationalPride] = useState(false);
 
   const refresh = useCallback(async () => {
     const { data } = await supabase
       .from('sherlock_sweeps')
-      .select('id, label, enabled, cadence, provinces, sectors, per_query_max, include_districts, cron_job_id, last_run_at, last_run_note')
+      .select('id, label, enabled, cadence, provinces, sectors, per_query_max, include_districts, national_pride, cron_job_id, last_run_at, last_run_note')
       .order('created_at', { ascending: true });
     setSweeps((data ?? []) as Sweep[]);
   }, []);
@@ -541,6 +564,7 @@ function SweepsTab() {
       sectors: draftSectors,     // empty = all
       per_query_max: draftMax,
       include_districts: draftIncludeDistricts,
+      national_pride: draftNationalPride,
       created_by: user?.id ?? null,
     });
     if (error) return toast.error(error.message);
@@ -548,7 +572,7 @@ function SweepsTab() {
     setDraftLabel(''); setDraftCustomCron(''); setDraftCustomMode(false);
     setDraftCadencePreset(CADENCE_PRESETS[0].value);
     setDraftProvinces([]); setDraftSectors([]); setDraftMax(3);
-    setDraftIncludeDistricts(false);
+    setDraftIncludeDistricts(false); setDraftNationalPride(false);
     setAddOpen(false);
     refresh();
   };
@@ -608,8 +632,13 @@ function SweepsTab() {
               <Card key={s.id} className="p-3 flex items-center gap-3 flex-wrap">
                 <Switch checked={s.enabled} onCheckedChange={() => toggleEnabled(s)} />
                 <div className="min-w-0 flex-1">
-                  <div className="font-semibold text-sm truncate flex items-center gap-1.5">
+                  <div className="font-semibold text-sm truncate flex items-center gap-1.5 flex-wrap">
                     {s.label}
+                    {s.national_pride && (
+                      <span className="text-[10px] uppercase tracking-wide bg-accent text-accent-foreground border border-accent rounded px-1.5 py-0.5 font-mono">
+                        Rastra Gaurab
+                      </span>
+                    )}
                     {s.include_districts && (
                       <span className="text-[10px] uppercase tracking-wide bg-accent/15 text-accent border border-accent/40 rounded px-1.5 py-0.5 font-mono">
                         district-comp
@@ -730,12 +759,28 @@ function SweepsTab() {
         {/* District-comprehensive toggle. When ON the sweep fans out by district
             inside each included province instead of just one cell per province
             — much deeper coverage, much higher token spend. */}
-        <div className="flex items-start gap-2 p-2 rounded-md border border-muted bg-muted/30">
-          <Switch checked={draftIncludeDistricts} onCheckedChange={setDraftIncludeDistricts} className="mt-0.5" />
+        <div className={cn('flex items-start gap-2 p-2 rounded-md border bg-muted/30', draftNationalPride && 'opacity-50 pointer-events-none')}>
+          <Switch checked={draftIncludeDistricts} onCheckedChange={setDraftIncludeDistricts} className="mt-0.5" disabled={draftNationalPride} />
           <div className="text-xs min-w-0 flex-1">
             <div className="font-semibold">Cover every district of each included province</div>
             <div className="text-muted-foreground">
               Fans out per (province × district × sector). Much deeper coverage but multiplies the combo count {districtCountForProvs > 0 && <>(currently {districtCountForProvs} district{districtCountForProvs === 1 ? '' : 's'} across the selected provinces)</>}; token spend scales accordingly.
+            </div>
+          </div>
+        </div>
+
+        {/* National Pride Project mode. Bypasses province/sector iteration and
+            scans the 24 officially-designated Rastra Gaurab projects directly.
+            Every result is auto-labeled `national_pride=true`. */}
+        <div className="flex items-start gap-2 p-2 rounded-md border border-accent/40 bg-accent/5">
+          <Switch checked={draftNationalPride} onCheckedChange={setDraftNationalPride} className="mt-0.5" />
+          <div className="text-xs min-w-0 flex-1">
+            <div className="font-semibold flex items-center gap-1.5">
+              National Pride mode
+              <span className="text-[10px] font-mono text-accent">राष्ट्रिय गौरवका आयोजना</span>
+            </div>
+            <div className="text-muted-foreground">
+              Targets the 24 official Rastra Gaurab projects directly (Pokhara airport, Melamchi, Kathmandu-Terai fast track, etc.). One job per sweep run iterates up to 8 names. Every discovered project is auto-labeled with the National Pride flag.
             </div>
           </div>
         </div>
@@ -766,6 +811,7 @@ function LiveDiscoveryCard({ userId }: { userId: string | null }) {
   const [state, setState] = useState<LiveState | null>(null);
   const [busy, setBusy] = useState(false);
   const [draftDistricts, setDraftDistricts] = useState(false);
+  const [draftNationalPride, setDraftNationalPride] = useState(false);
   const [draftMax, setDraftMax] = useState(3);
   const [now, setNow] = useState(Date.now());
 
@@ -774,6 +820,7 @@ function LiveDiscoveryCard({ userId }: { userId: string | null }) {
     setState((data ?? null) as LiveState | null);
     if (data) {
       setDraftDistricts(!!(data as any).include_districts);
+      setDraftNationalPride(!!(data as any).national_pride);
       setDraftMax((data as any).per_query_max ?? 3);
     }
   }, []);
@@ -803,7 +850,8 @@ function LiveDiscoveryCard({ userId }: { userId: string | null }) {
       started_at: new Date().toISOString(),
       stopped_at: null,
       started_by: userId,
-      include_districts: draftDistricts,
+      include_districts: draftNationalPride ? false : draftDistricts,
+      national_pride: draftNationalPride,
       per_query_max: draftMax,
       enqueued_count: 0,
       last_province: null,
@@ -813,7 +861,9 @@ function LiveDiscoveryCard({ userId }: { userId: string | null }) {
     }).eq('id', 1);
     setBusy(false);
     if (error) return toast.error(error.message);
-    toast.success('Live discovery started. Sherlock will keep feeding the queue every minute.');
+    toast.success(draftNationalPride
+      ? 'Live discovery started in National Pride mode — Sherlock will rotate through the 24 Rastra Gaurab projects.'
+      : 'Live discovery started. Sherlock will keep feeding the queue every minute.');
     refresh();
   };
 
@@ -842,13 +892,20 @@ function LiveDiscoveryCard({ userId }: { userId: string | null }) {
             <Radio className={cn('h-3.5 w-3.5', live && 'animate-pulse')} />
           </div>
           <div className="min-w-0">
-            <div className="text-xs font-semibold">
+            <div className="text-xs font-semibold flex items-center gap-1.5 flex-wrap">
               Live discovery {live ? <span className="text-success">· ON</span> : <span className="text-muted-foreground">· off</span>}
+              {state?.national_pride && (
+                <span className="text-[10px] uppercase tracking-wide bg-accent text-accent-foreground rounded px-1.5 py-0.5 font-mono">
+                  Rastra Gaurab
+                </span>
+              )}
             </div>
             <div className="text-[11px] text-muted-foreground font-mono">
               {live
-                ? <>Running {runningMin} min · {state?.enqueued_count ?? 0} cells enqueued · cursor at <span className="text-foreground">{state?.last_province ?? '—'}{state?.last_district ? ' / ' + state.last_district : ''} / {state?.last_sector ?? '—'}</span></>
-                : 'Continuously feed the queue with one new (province × sector) cell every minute until stopped.'}
+                ? state?.national_pride
+                  ? <>Running {runningMin} min · {state?.enqueued_count ?? 0} National Pride scans enqueued</>
+                  : <>Running {runningMin} min · {state?.enqueued_count ?? 0} cells enqueued · cursor at <span className="text-foreground">{state?.last_province ?? '—'}{state?.last_district ? ' / ' + state.last_district : ''} / {state?.last_sector ?? '—'}</span></>
+                : 'Continuously feed the queue until stopped. Use National Pride mode below to focus on the 24 Rastra Gaurab projects.'}
             </div>
           </div>
         </div>
@@ -866,17 +923,24 @@ function LiveDiscoveryCard({ userId }: { userId: string | null }) {
       </div>
 
       {!live && (
-        <div className="mt-2.5 pt-2.5 border-t border-dashed border-muted flex flex-wrap items-end gap-3">
-          <div>
-            <Label className="text-[10px] text-muted-foreground">Per-query max</Label>
-            <Select value={String(draftMax)} onValueChange={(v) => setDraftMax(Number(v))}>
-              <SelectTrigger className="w-[110px] h-8 text-xs"><SelectValue /></SelectTrigger>
-              <SelectContent>{[1, 2, 3, 5, 8, 10].map(n => <SelectItem key={n} value={String(n)}>{n}/cell</SelectItem>)}</SelectContent>
-            </Select>
+        <div className="mt-2.5 pt-2.5 border-t border-dashed border-muted space-y-2">
+          <div className="flex flex-wrap items-end gap-3">
+            <div>
+              <Label className="text-[10px] text-muted-foreground">Per-query max</Label>
+              <Select value={String(draftMax)} onValueChange={(v) => setDraftMax(Number(v))}>
+                <SelectTrigger className="w-[110px] h-8 text-xs"><SelectValue /></SelectTrigger>
+                <SelectContent>{[1, 2, 3, 5, 8, 10].map(n => <SelectItem key={n} value={String(n)}>{n}/cell</SelectItem>)}</SelectContent>
+              </Select>
+            </div>
+            <label className={cn('flex items-center gap-2 text-xs cursor-pointer', draftNationalPride && 'opacity-50 pointer-events-none')}>
+              <Switch checked={draftDistricts} onCheckedChange={setDraftDistricts} disabled={draftNationalPride} />
+              <span>District-comprehensive (77 districts × 9 sectors rotation)</span>
+            </label>
           </div>
           <label className="flex items-center gap-2 text-xs cursor-pointer">
-            <Switch checked={draftDistricts} onCheckedChange={setDraftDistricts} />
-            <span>District-comprehensive (77 districts × 9 sectors rotation)</span>
+            <Switch checked={draftNationalPride} onCheckedChange={setDraftNationalPride} />
+            <span className="font-semibold">National Pride mode</span>
+            <span className="text-[10px] text-muted-foreground">— iterates the 24 Rastra Gaurab projects on each tick</span>
           </label>
         </div>
       )}
