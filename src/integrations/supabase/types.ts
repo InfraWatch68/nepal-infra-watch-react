@@ -62,6 +62,68 @@ export type Database = {
         }
         Relationships: []
       }
+      admin_removal_proposals: {
+        Row: {
+          created_at: string
+          executed_at: string | null
+          id: string
+          proposed_by: string
+          reason: string
+          status: string
+          target_user_id: string
+        }
+        Insert: {
+          created_at?: string
+          executed_at?: string | null
+          id?: string
+          proposed_by: string
+          reason: string
+          status?: string
+          target_user_id: string
+        }
+        Update: {
+          created_at?: string
+          executed_at?: string | null
+          id?: string
+          proposed_by?: string
+          reason?: string
+          status?: string
+          target_user_id?: string
+        }
+        Relationships: []
+      }
+      admin_removal_votes: {
+        Row: {
+          created_at: string
+          id: string
+          proposal_id: string
+          vote: string
+          voter_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          proposal_id: string
+          vote: string
+          voter_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          proposal_id?: string
+          vote?: string
+          voter_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "admin_removal_votes_proposal_id_fkey"
+            columns: ["proposal_id"]
+            isOneToOne: false
+            referencedRelation: "admin_removal_proposals"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       global_briefs: {
         Row: {
           body: string
@@ -89,6 +151,30 @@ export type Database = {
           id?: string
           scope?: string
           sources?: Json | null
+        }
+        Relationships: []
+      }
+      municipalities: {
+        Row: {
+          district: string
+          id: number
+          kind: string
+          name: string
+          province: string
+        }
+        Insert: {
+          district: string
+          id?: number
+          kind: string
+          name: string
+          province: string
+        }
+        Update: {
+          district?: string
+          id?: number
+          kind?: string
+          name?: string
+          province?: string
         }
         Relationships: []
       }
@@ -137,9 +223,11 @@ export type Database = {
           item_type: string
           notes: string | null
           project_id: number
+          published_at: string | null
           review_notes: string | null
           reviewed_by: string | null
           source_url: string | null
+          sources: Json
           status: string
           submitted_by: string | null
           submitted_by_ai: boolean
@@ -156,9 +244,11 @@ export type Database = {
           item_type: string
           notes?: string | null
           project_id: number
+          published_at?: string | null
           review_notes?: string | null
           reviewed_by?: string | null
           source_url?: string | null
+          sources?: Json
           status?: string
           submitted_by?: string | null
           submitted_by_ai?: boolean
@@ -175,9 +265,11 @@ export type Database = {
           item_type?: string
           notes?: string | null
           project_id?: number
+          published_at?: string | null
           review_notes?: string | null
           reviewed_by?: string | null
           source_url?: string | null
+          sources?: Json
           status?: string
           submitted_by?: string | null
           submitted_by_ai?: boolean
@@ -207,6 +299,7 @@ export type Database = {
           review_notes: string | null
           reviewed_by: string | null
           source_org: string | null
+          sources: Json
           submitted_by: string | null
           submitted_by_ai: boolean
           title: string
@@ -226,6 +319,7 @@ export type Database = {
           review_notes?: string | null
           reviewed_by?: string | null
           source_org?: string | null
+          sources?: Json
           submitted_by?: string | null
           submitted_by_ai?: boolean
           title: string
@@ -245,6 +339,7 @@ export type Database = {
           review_notes?: string | null
           reviewed_by?: string | null
           source_org?: string | null
+          sources?: Json
           submitted_by?: string | null
           submitted_by_ai?: boolean
           title?: string
@@ -274,11 +369,13 @@ export type Database = {
           lender_terms: string | null
           notes: string | null
           project_id: number
+          published_at: string | null
           review_notes: string | null
           reviewed_by: string | null
           source_name: string
           source_type: string
           source_url: string | null
+          sources: Json
           submitted_by: string | null
           submitted_by_ai: boolean
           updated_at: string
@@ -295,11 +392,13 @@ export type Database = {
           lender_terms?: string | null
           notes?: string | null
           project_id: number
+          published_at?: string | null
           review_notes?: string | null
           reviewed_by?: string | null
           source_name: string
           source_type: string
           source_url?: string | null
+          sources?: Json
           submitted_by?: string | null
           submitted_by_ai?: boolean
           updated_at?: string
@@ -316,11 +415,13 @@ export type Database = {
           lender_terms?: string | null
           notes?: string | null
           project_id?: number
+          published_at?: string | null
           review_notes?: string | null
           reviewed_by?: string | null
           source_name?: string
           source_type?: string
           source_url?: string | null
+          sources?: Json
           submitted_by?: string | null
           submitted_by_ai?: boolean
           updated_at?: string
@@ -347,9 +448,11 @@ export type Database = {
           metric_value: number | null
           notes: string | null
           project_id: number
+          published_at: string | null
           review_notes: string | null
           reviewed_by: string | null
           source_url: string | null
+          sources: Json
           submitted_by: string | null
           submitted_by_ai: boolean
           target_value: number | null
@@ -367,9 +470,11 @@ export type Database = {
           metric_value?: number | null
           notes?: string | null
           project_id: number
+          published_at?: string | null
           review_notes?: string | null
           reviewed_by?: string | null
           source_url?: string | null
+          sources?: Json
           submitted_by?: string | null
           submitted_by_ai?: boolean
           target_value?: number | null
@@ -387,9 +492,11 @@ export type Database = {
           metric_value?: number | null
           notes?: string | null
           project_id?: number
+          published_at?: string | null
           review_notes?: string | null
           reviewed_by?: string | null
           source_url?: string | null
+          sources?: Json
           submitted_by?: string | null
           submitted_by_ai?: boolean
           target_value?: number | null
@@ -470,9 +577,11 @@ export type Database = {
           notes: string | null
           procurement_method: string | null
           project_id: number
+          published_at: string | null
           review_notes: string | null
           reviewed_by: string | null
           source_url: string | null
+          sources: Json
           status: string
           submitted_by: string | null
           submitted_by_ai: boolean
@@ -495,9 +604,11 @@ export type Database = {
           notes?: string | null
           procurement_method?: string | null
           project_id: number
+          published_at?: string | null
           review_notes?: string | null
           reviewed_by?: string | null
           source_url?: string | null
+          sources?: Json
           status?: string
           submitted_by?: string | null
           submitted_by_ai?: boolean
@@ -520,9 +631,11 @@ export type Database = {
           notes?: string | null
           procurement_method?: string | null
           project_id?: number
+          published_at?: string | null
           review_notes?: string | null
           reviewed_by?: string | null
           source_url?: string | null
+          sources?: Json
           status?: string
           submitted_by?: string | null
           submitted_by_ai?: boolean
@@ -542,6 +655,42 @@ export type Database = {
           },
         ]
       }
+      project_reviews: {
+        Row: {
+          action: string
+          created_at: string
+          id: string
+          notes: string | null
+          reviewer_id: string | null
+          reviewer_role: string | null
+          target_id: string
+          target_table: string
+          was_admin: boolean
+        }
+        Insert: {
+          action: string
+          created_at?: string
+          id?: string
+          notes?: string | null
+          reviewer_id?: string | null
+          reviewer_role?: string | null
+          target_id: string
+          target_table: string
+          was_admin?: boolean
+        }
+        Update: {
+          action?: string
+          created_at?: string
+          id?: string
+          notes?: string | null
+          reviewer_id?: string | null
+          reviewer_role?: string | null
+          target_id?: string
+          target_table?: string
+          was_admin?: boolean
+        }
+        Relationships: []
+      }
       project_risks: {
         Row: {
           approval_status: string
@@ -550,12 +699,14 @@ export type Database = {
           description: string | null
           id: string
           project_id: number
+          published_at: string | null
           reported_at: string | null
           resolved_at: string | null
           review_notes: string | null
           reviewed_by: string | null
           severity: string
           source_url: string | null
+          sources: Json
           status: string
           submitted_by: string | null
           submitted_by_ai: boolean
@@ -569,12 +720,14 @@ export type Database = {
           description?: string | null
           id?: string
           project_id: number
+          published_at?: string | null
           reported_at?: string | null
           resolved_at?: string | null
           review_notes?: string | null
           reviewed_by?: string | null
           severity: string
           source_url?: string | null
+          sources?: Json
           status?: string
           submitted_by?: string | null
           submitted_by_ai?: boolean
@@ -588,12 +741,14 @@ export type Database = {
           description?: string | null
           id?: string
           project_id?: number
+          published_at?: string | null
           reported_at?: string | null
           resolved_at?: string | null
           review_notes?: string | null
           reviewed_by?: string | null
           severity?: string
           source_url?: string | null
+          sources?: Json
           status?: string
           submitted_by?: string | null
           submitted_by_ai?: boolean
@@ -617,6 +772,7 @@ export type Database = {
           created_at: string | null
           id: number
           project_id: number | null
+          published_at: string | null
           review_notes: string | null
           reviewed_by: string | null
           source_type: string | null
@@ -632,6 +788,7 @@ export type Database = {
           created_at?: string | null
           id?: number
           project_id?: number | null
+          published_at?: string | null
           review_notes?: string | null
           reviewed_by?: string | null
           source_type?: string | null
@@ -647,6 +804,7 @@ export type Database = {
           created_at?: string | null
           id?: number
           project_id?: number | null
+          published_at?: string | null
           review_notes?: string | null
           reviewed_by?: string | null
           source_type?: string | null
@@ -678,10 +836,12 @@ export type Database = {
           notes: string | null
           org_name: string
           project_id: number
+          published_at: string | null
           review_notes: string | null
           reviewed_by: string | null
           role: string
           source_url: string | null
+          sources: Json
           submitted_by: string | null
           submitted_by_ai: boolean
           updated_at: string
@@ -698,10 +858,12 @@ export type Database = {
           notes?: string | null
           org_name: string
           project_id: number
+          published_at?: string | null
           review_notes?: string | null
           reviewed_by?: string | null
           role: string
           source_url?: string | null
+          sources?: Json
           submitted_by?: string | null
           submitted_by_ai?: boolean
           updated_at?: string
@@ -718,10 +880,12 @@ export type Database = {
           notes?: string | null
           org_name?: string
           project_id?: number
+          published_at?: string | null
           review_notes?: string | null
           reviewed_by?: string | null
           role?: string
           source_url?: string | null
+          sources?: Json
           submitted_by?: string | null
           submitted_by_ai?: boolean
           updated_at?: string
@@ -747,6 +911,7 @@ export type Database = {
           image_url: string | null
           project_id: number | null
           published: boolean | null
+          published_at: string | null
           review_notes: string | null
           reviewed_by: string | null
           submitted_by_ai: boolean
@@ -764,6 +929,7 @@ export type Database = {
           image_url?: string | null
           project_id?: number | null
           published?: boolean | null
+          published_at?: string | null
           review_notes?: string | null
           reviewed_by?: string | null
           submitted_by_ai?: boolean
@@ -781,6 +947,7 @@ export type Database = {
           image_url?: string | null
           project_id?: number | null
           published?: boolean | null
+          published_at?: string | null
           review_notes?: string | null
           reviewed_by?: string | null
           submitted_by_ai?: boolean
@@ -802,6 +969,7 @@ export type Database = {
       projects: {
         Row: {
           actual_completion: string | null
+          ai_tag: string | null
           approval_status: string | null
           budget: number | null
           budget_npr: number | null
@@ -824,6 +992,7 @@ export type Database = {
           is_approved: boolean | null
           is_delayed: boolean | null
           is_featured: boolean | null
+          is_rastra_gaurav: boolean
           last_audit_at: string | null
           last_audit_finding: string | null
           last_comprehensive_analysis_at: string | null
@@ -837,6 +1006,7 @@ export type Database = {
           progress_stage: string | null
           project_type: string | null
           province: string | null
+          published_at: string | null
           review_notes: string | null
           review_status:
             | Database["public"]["Enums"]["review_status_type"]
@@ -863,6 +1033,7 @@ export type Database = {
         }
         Insert: {
           actual_completion?: string | null
+          ai_tag?: string | null
           approval_status?: string | null
           budget?: number | null
           budget_npr?: number | null
@@ -885,6 +1056,7 @@ export type Database = {
           is_approved?: boolean | null
           is_delayed?: boolean | null
           is_featured?: boolean | null
+          is_rastra_gaurav?: boolean
           last_audit_at?: string | null
           last_audit_finding?: string | null
           last_comprehensive_analysis_at?: string | null
@@ -898,6 +1070,7 @@ export type Database = {
           progress_stage?: string | null
           project_type?: string | null
           province?: string | null
+          published_at?: string | null
           review_notes?: string | null
           review_status?:
             | Database["public"]["Enums"]["review_status_type"]
@@ -924,6 +1097,7 @@ export type Database = {
         }
         Update: {
           actual_completion?: string | null
+          ai_tag?: string | null
           approval_status?: string | null
           budget?: number | null
           budget_npr?: number | null
@@ -946,6 +1120,7 @@ export type Database = {
           is_approved?: boolean | null
           is_delayed?: boolean | null
           is_featured?: boolean | null
+          is_rastra_gaurav?: boolean
           last_audit_at?: string | null
           last_audit_finding?: string | null
           last_comprehensive_analysis_at?: string | null
@@ -959,6 +1134,7 @@ export type Database = {
           progress_stage?: string | null
           project_type?: string | null
           province?: string | null
+          published_at?: string | null
           review_notes?: string | null
           review_status?:
             | Database["public"]["Enums"]["review_status_type"]
@@ -1011,6 +1187,138 @@ export type Database = {
         }
         Relationships: []
       }
+      sherlock_filters: {
+        Row: {
+          active: boolean
+          created_at: string
+          created_by: string | null
+          id: string
+          label: string
+          last_inserted: number | null
+          last_run_at: string | null
+          max_results: number
+          region: string | null
+          topic: string | null
+        }
+        Insert: {
+          active?: boolean
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          label: string
+          last_inserted?: number | null
+          last_run_at?: string | null
+          max_results?: number
+          region?: string | null
+          topic?: string | null
+        }
+        Update: {
+          active?: boolean
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          label?: string
+          last_inserted?: number | null
+          last_run_at?: string | null
+          max_results?: number
+          region?: string | null
+          topic?: string | null
+        }
+        Relationships: []
+      }
+      sherlock_jobs: {
+        Row: {
+          enqueued_at: string
+          enqueued_by: string | null
+          error_text: string | null
+          finished_at: string | null
+          id: string
+          inserted: number | null
+          kind: string
+          params: Json
+          priority: number
+          skipped: number | null
+          started_at: string | null
+          status: string
+          sweep_id: string | null
+        }
+        Insert: {
+          enqueued_at?: string
+          enqueued_by?: string | null
+          error_text?: string | null
+          finished_at?: string | null
+          id?: string
+          inserted?: number | null
+          kind: string
+          params?: Json
+          priority?: number
+          skipped?: number | null
+          started_at?: string | null
+          status?: string
+          sweep_id?: string | null
+        }
+        Update: {
+          enqueued_at?: string
+          enqueued_by?: string | null
+          error_text?: string | null
+          finished_at?: string | null
+          id?: string
+          inserted?: number | null
+          kind?: string
+          params?: Json
+          priority?: number
+          skipped?: number | null
+          started_at?: string | null
+          status?: string
+          sweep_id?: string | null
+        }
+        Relationships: []
+      }
+      sherlock_sweeps: {
+        Row: {
+          cadence: string
+          created_at: string
+          created_by: string | null
+          cron_job_id: number | null
+          enabled: boolean
+          id: string
+          label: string
+          last_run_at: string | null
+          last_run_note: string | null
+          per_query_max: number
+          provinces: string[]
+          sectors: string[]
+        }
+        Insert: {
+          cadence: string
+          created_at?: string
+          created_by?: string | null
+          cron_job_id?: number | null
+          enabled?: boolean
+          id?: string
+          label: string
+          last_run_at?: string | null
+          last_run_note?: string | null
+          per_query_max?: number
+          provinces?: string[]
+          sectors?: string[]
+        }
+        Update: {
+          cadence?: string
+          created_at?: string
+          created_by?: string | null
+          cron_job_id?: number | null
+          enabled?: boolean
+          id?: string
+          label?: string
+          last_run_at?: string | null
+          last_run_note?: string | null
+          per_query_max?: number
+          provinces?: string[]
+          sectors?: string[]
+        }
+        Relationships: []
+      }
       user_roles: {
         Row: {
           created_at: string | null
@@ -1037,6 +1345,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      admin_count: { Args: never; Returns: number }
       has_role: {
         Args: {
           _role: Database["public"]["Enums"]["app_role"]
@@ -1046,6 +1355,10 @@ export type Database = {
       }
       is_admin_or_coadmin: { Args: { _user_id: string }; Returns: boolean }
       is_moderator: { Args: { _user_id: string }; Returns: boolean }
+      sherlock_drain_queue_once: { Args: never; Returns: Json }
+      sherlock_enqueue_sweep: { Args: { p_sweep_id: string }; Returns: Json }
+      sherlock_run_all_active: { Args: never; Returns: Json }
+      user_contribution_count: { Args: { _user_id: string }; Returns: number }
     }
     Enums: {
       app_role: "admin" | "reviewer" | "contributor" | "coadmin"

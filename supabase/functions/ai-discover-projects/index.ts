@@ -124,6 +124,10 @@ async function callChatModel(
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
+  // Hoisted so the outer catch can write `failed` back to sherlock_jobs even
+  // if processing throws after the body parse.
+  let jobIdForCatch: string | null = null;
+
   try {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
     const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -174,37 +178,41 @@ serve(async (req) => {
     const body = await req.json().catch(() => ({}));
     const topic: string | undefined = body.topic?.toString().trim() || undefined;
     const region: string | undefined = body.region?.toString().trim() || undefined;
+    const province: string | undefined = body.province?.toString().trim() || undefined;
+    const district: string | undefined = body.district?.toString().trim() || undefined;
+    const municipality: string | undefined = body.municipality?.toString().trim() || undefined;
+    const sectorsParam: string[] | undefined = Array.isArray(body.sectors)
+      ? body.sectors.map((s: unknown) => String(s).trim()).filter(Boolean)
+      : undefined;
     const maxResults = Math.min(Math.max(Number(body.maxResults) || 5, 1), 10);
     // Optional tag for autonomous tools (e.g. "Sherlock") — surfaces in admin queue.
     const aiTag: string | null = body.aiTag?.toString().trim().slice(0, 40) || null;
-
-    const query = ["Nepal infrastructure project", topic ?? "", region ?? ""].filter(Boolean).join(" ");
-
-    const tavResult = await tavilySearch(tavilyKeys, {
-      query,
-      search_depth: "advanced",
-      max_results: maxResults,
-      include_answer: false,
-    });
-
-    if ("exhausted" in tavResult) {
-      return json({
-        error: `All ${tavilyKeys.length} Tavily key(s) are rate-limited. Try again later.`,
-      }, 429);
-    }
-    const { response: tav, keyIndex } = tavResult;
-    if (!tav.ok) return json({ error: `Tavily error ${tav.status}` }, 502);
-    const tavJson = await tav.json();
-    const results: any[] = tavJson.results ?? [];
+    // Optional sherlock_jobs row id; if present, we write status/counts back at the end.
+    const jobId: string | null = body.jobId?.toString().trim() || null;
+    jobIdForCatch = jobId;
 
     const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+    // Build the list of (query, sector?) tuples to run.
+    // - Geo mode: province (or any geo field) provided → fan out one Tavily query per sector.
+    // - Topic mode: legacy single query from topic/region.
+    type Search = { query: string; sector?: string };
+    const searches: Search[] = [];
+    const geoMode = !!(province || district || municipality);
+    if (geoMode) {
+      const targetSectors = (sectorsParam && sectorsParam.length > 0) ? sectorsParam : SECTORS;
+      for (const sec of targetSectors) {
+        const parts = ["Nepal infrastructure", sec, municipality, district, province].filter(Boolean);
+        searches.push({ query: parts.join(" "), sector: sec });
+      }
+    } else {
+      const parts = ["Nepal infrastructure project", topic, region].filter(Boolean);
+      searches.push({ query: parts.join(" ") });
+    }
 
     const errors: string[] = [];
     let inserted = 0;
     let skipped = 0;
-
-    // Log which key was used (index only — never log the key value).
-    if (tavilyKeys.length > 1) console.log(`Tavily: used key index ${keyIndex} of ${tavilyKeys.length}`);
 
     const sysPrompt = `You extract a single Nepal infrastructure project record from a news article and write a thorough public-facing entry.
 Return ONLY a JSON object (no prose, no markdown, no code fence) matching this schema:
@@ -243,124 +251,183 @@ Other rules:
 - Treat 1 lakh = 100,000 NPR and 1 crore = 10,000,000 NPR; convert reported figures to raw NPR.
 - If the article mentions multiple projects, pick the most prominent one. The dedupe layer will skip exact title matches.`;
 
-    for (let idx = 0; idx < results.length; idx++) {
-      const r = results[idx];
-      if (idx > 0) await new Promise(res => setTimeout(res, 2500)); // pace under 30 RPM free tier
-      if (!r?.content || r.content.length < 50) {
-        skipped += 1;
+    // Outer loop: one Tavily search per `searches` entry. Geo mode runs once
+    // per sector; topic mode runs once total.
+    outer: for (let sIdx = 0; sIdx < searches.length; sIdx++) {
+      const search = searches[sIdx];
+
+      // Pace between Tavily calls in geo mode to be polite to upstream.
+      if (sIdx > 0) await new Promise(res => setTimeout(res, 1500));
+
+      const tavResult = await tavilySearch(tavilyKeys, {
+        query: search.query,
+        search_depth: "advanced",
+        max_results: maxResults,
+        include_answer: false,
+      });
+
+      if ("exhausted" in tavResult) {
+        errors.push(`All ${tavilyKeys.length} Tavily key(s) rate-limited at sector "${search.sector ?? "topic"}"`);
+        break outer;
+      }
+      const { response: tav, keyIndex } = tavResult;
+      if (!tav.ok) {
+        errors.push(`Tavily ${tav.status} for sector "${search.sector ?? "topic"}"`);
         continue;
       }
-      try {
-        const ai = await callChatModel([
-          { role: "system", content: sysPrompt },
-          { role: "user", content: `Title: ${r.title}\nURL: ${r.url}\n\nArticle:\n${r.content.slice(0, 4000)}` },
-        ]);
-        if (!ai.ok) {
-          errors.push(`AI ${ai.status}: ${ai.error}`);
-          if (ai.status === 429 || ai.status === 402) break;
-          continue;
-        }
-        const raw = stripFences(ai.text);
-        if (!raw || raw === "null" || raw === '"null"') {
+      if (tavilyKeys.length > 1) console.log(`Tavily: used key index ${keyIndex} of ${tavilyKeys.length} for sector "${search.sector ?? "topic"}"`);
+
+      const tavJson = await tav.json();
+      const results: any[] = tavJson.results ?? [];
+
+      for (let idx = 0; idx < results.length; idx++) {
+        const r = results[idx];
+        if (idx > 0 || sIdx > 0) await new Promise(res => setTimeout(res, 2500)); // pace under 30 RPM free tier
+        if (!r?.content || r.content.length < 50) {
           skipped += 1;
           continue;
         }
-        let parsed: any;
         try {
-          parsed = JSON.parse(raw);
-        } catch {
-          errors.push(`JSON parse failed for ${r.url}`);
-          continue;
-        }
-        if (!parsed || !parsed.title) {
-          skipped += 1;
-          continue;
-        }
+          const ai = await callChatModel([
+            { role: "system", content: sysPrompt },
+            { role: "user", content: `Title: ${r.title}\nURL: ${r.url}\n\nArticle:\n${r.content.slice(0, 4000)}` },
+          ]);
+          if (!ai.ok) {
+            errors.push(`AI ${ai.status}: ${ai.error}`);
+            if (ai.status === 429 || ai.status === 402) break outer;
+            continue;
+          }
+          const raw = stripFences(ai.text);
+          if (!raw || raw === "null" || raw === '"null"') {
+            skipped += 1;
+            continue;
+          }
+          let parsed: any;
+          try {
+            parsed = JSON.parse(raw);
+          } catch {
+            errors.push(`JSON parse failed for ${r.url}`);
+            continue;
+          }
+          if (!parsed || !parsed.title) {
+            skipped += 1;
+            continue;
+          }
 
-        // Skip if a project with this title already exists (case-insensitive exact match).
-        // Escape ILIKE wildcards so special chars in titles aren't treated as SQL patterns.
-        const safeTitle = parsed.title.trim()
-          .replace(/\\/g, "\\\\")
-          .replace(/%/g, "\\%")
-          .replace(/_/g, "\\_");
-        const { data: existingProject, error: dedupeErr } = await admin
-          .from("projects")
-          .select("id")
-          .ilike("title", safeTitle)
-          .maybeSingle();
-        if (dedupeErr) {
-          errors.push(`Dedupe check failed: ${dedupeErr.message}`);
-          continue;
-        }
-        if (existingProject) {
-          skipped += 1;
-          continue;
-        }
+          // Skip if a project with this title already exists (case-insensitive exact match).
+          // Escape ILIKE wildcards so special chars in titles aren't treated as SQL patterns.
+          const safeTitle = parsed.title.trim()
+            .replace(/\\/g, "\\\\")
+            .replace(/%/g, "\\%")
+            .replace(/_/g, "\\_");
+          const { data: existingProject, error: dedupeErr } = await admin
+            .from("projects")
+            .select("id")
+            .ilike("title", safeTitle)
+            .maybeSingle();
+          if (dedupeErr) {
+            errors.push(`Dedupe check failed: ${dedupeErr.message}`);
+            continue;
+          }
+          if (existingProject) {
+            skipped += 1;
+            continue;
+          }
 
-        const slug = slugify(parsed.title) + "-" + crypto.randomUUID().slice(0, 4);
-        const ward = (typeof parsed.ward === "number" && parsed.ward >= 0 && parsed.ward <= 99) ? parsed.ward : null;
-        const status = STATUS_VALUES.includes(parsed.status) ? parsed.status : "proposed";
-        const esia = ESIA_VALUES.includes(parsed.esia_status) ? parsed.esia_status : null;
-        const { data: proj, error: pErr } = await admin
-          .from("projects")
-          .insert({
-            title: String(parsed.title).slice(0, 200),
-            slug,
-            description: parsed.description ?? null,
-            sector: SECTORS.includes(parsed.sector) ? parsed.sector : "Transport",
-            project_type: PROJECT_TYPES.includes(parsed.project_type) ? parsed.project_type : null,
-            province: PROVINCES.includes(parsed.province) ? parsed.province : null,
-            district: parsed.district ?? null,
-            municipality: parsed.municipality ?? null,
-            ward,
-            location_text: parsed.location_text ?? null,
-            contractor: parsed.contractor ?? null,
-            implementing_agency: parsed.implementing_agency ?? null,
-            budget_npr: typeof parsed.budget_npr === "number" ? parsed.budget_npr : null,
-            funding_committed_npr: typeof parsed.funding_committed_npr === "number" ? parsed.funding_committed_npr : null,
-            estimated_beneficiaries: typeof parsed.estimated_beneficiaries === "number" ? parsed.estimated_beneficiaries : null,
-            procurement_method: parsed.procurement_method ?? null,
-            esia_status: esia,
-            start_date: parsed.start_date ?? null,
-            expected_completion: parsed.expected_completion ?? null,
-            status,
+          const slug = slugify(parsed.title) + "-" + crypto.randomUUID().slice(0, 4);
+          const ward = (typeof parsed.ward === "number" && parsed.ward >= 0 && parsed.ward <= 99) ? parsed.ward : null;
+          const status = STATUS_VALUES.includes(parsed.status) ? parsed.status : "proposed";
+          const esia = ESIA_VALUES.includes(parsed.esia_status) ? parsed.esia_status : null;
+          // Sector default: in geo mode, use the sector we searched for; else "Transport" as before.
+          const fallbackSector = search.sector && SECTORS.includes(search.sector) ? search.sector : "Transport";
+          const { data: proj, error: pErr } = await admin
+            .from("projects")
+            .insert({
+              title: String(parsed.title).slice(0, 200),
+              slug,
+              description: parsed.description ?? null,
+              sector: SECTORS.includes(parsed.sector) ? parsed.sector : fallbackSector,
+              project_type: PROJECT_TYPES.includes(parsed.project_type) ? parsed.project_type : null,
+              province: PROVINCES.includes(parsed.province) ? parsed.province : null,
+              district: parsed.district ?? null,
+              municipality: parsed.municipality ?? null,
+              ward,
+              location_text: parsed.location_text ?? null,
+              contractor: parsed.contractor ?? null,
+              implementing_agency: parsed.implementing_agency ?? null,
+              budget_npr: typeof parsed.budget_npr === "number" ? parsed.budget_npr : null,
+              funding_committed_npr: typeof parsed.funding_committed_npr === "number" ? parsed.funding_committed_npr : null,
+              estimated_beneficiaries: typeof parsed.estimated_beneficiaries === "number" ? parsed.estimated_beneficiaries : null,
+              procurement_method: parsed.procurement_method ?? null,
+              esia_status: esia,
+              start_date: parsed.start_date ?? null,
+              expected_completion: parsed.expected_completion ?? null,
+              status,
+              approval_status: "pending",
+              submitted_by: null,
+              submitted_by_ai: true,
+              ai_tag: aiTag,
+            })
+            .select("id")
+            .single();
+          if (pErr) {
+            errors.push(`Insert project failed: ${pErr.message}`);
+            continue;
+          }
+
+          const { error: sErr } = await admin.from("project_sources").insert({
+            project_id: proj.id,
+            added_by: null,
+            source_type: "article",
+            title: r.title || new URL(r.url).hostname,
+            url: r.url,
+            verified: false,
             approval_status: "pending",
-            submitted_by: null,
             submitted_by_ai: true,
-            ai_tag: aiTag,
-          })
-          .select("id")
-          .single();
-        if (pErr) {
-          errors.push(`Insert project failed: ${pErr.message}`);
-          continue;
+          });
+          if (sErr) {
+            errors.push(`Insert source failed: ${sErr.message}`);
+            // Roll back the orphaned project so the DB stays clean.
+            await admin.from("projects").delete().eq("id", proj.id);
+          } else {
+            inserted += 1;
+          }
+        } catch (e) {
+          errors.push(e instanceof Error ? e.message : String(e));
         }
-
-        const { error: sErr } = await admin.from("project_sources").insert({
-          project_id: proj.id,
-          added_by: null,
-          source_type: "article",
-          title: r.title || new URL(r.url).hostname,
-          url: r.url,
-          verified: false,
-          approval_status: "pending",
-          submitted_by_ai: true,
-        });
-        if (sErr) {
-          errors.push(`Insert source failed: ${sErr.message}`);
-          // Roll back the orphaned project so the DB stays clean.
-          await admin.from("projects").delete().eq("id", proj.id);
-        } else {
-          inserted += 1;
-        }
-      } catch (e) {
-        errors.push(e instanceof Error ? e.message : String(e));
       }
+    }
+
+    // If invoked from sherlock_drain_queue_once(), close out the job row so
+    // the admin UI sees it transition queued → running → done.
+    if (jobId) {
+      const { error: jobUpdateErr } = await admin.from("sherlock_jobs").update({
+        status: "done",
+        inserted,
+        skipped,
+        error_text: errors.length ? errors.slice(0, 10).join("\n").slice(0, 2000) : null,
+        finished_at: new Date().toISOString(),
+      }).eq("id", jobId);
+      if (jobUpdateErr) console.error("Failed to update sherlock_jobs:", jobUpdateErr);
     }
 
     return json({ inserted, skipped, errors });
   } catch (e) {
     console.error("ai-discover-projects error:", e);
+    // Best-effort: if this run came from the queue drain, mark the job failed.
+    if (jobIdForCatch) {
+      try {
+        const adminClient = createClient(
+          Deno.env.get("SUPABASE_URL")!,
+          Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+        );
+        await adminClient.from("sherlock_jobs").update({
+          status: "failed",
+          error_text: (e instanceof Error ? e.message : String(e)).slice(0, 2000),
+          finished_at: new Date().toISOString(),
+        }).eq("id", jobIdForCatch);
+      } catch { /* nothing further we can do */ }
+    }
     return json({ error: e instanceof Error ? e.message : "Unknown error" }, 500);
   }
 });
