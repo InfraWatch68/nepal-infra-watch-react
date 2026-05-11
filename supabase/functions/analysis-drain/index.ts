@@ -56,47 +56,87 @@ async function tavily(keys: string[], payload: Record<string, unknown>) {
   return { exhausted: true } as const;
 }
 
-// ─── Chat (Mistral > Google > Lovable) ───────────────────────────────────────
+// ─── Chat (Mistral keys with rotation > Google > Lovable) ────────────────────
 type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
+
+function parseMistralKeys(): string[] {
+  // Merge MISTRAL_API_KEY (single, primary) with MISTRAL_API_KEYS
+  // (comma-separated, additional). Adding a fallback just needs the new key
+  // appended to MISTRAL_API_KEYS — the existing single key keeps working.
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const single = (Deno.env.get("MISTRAL_API_KEY") ?? "").trim();
+  if (single) { out.push(single); seen.add(single); }
+  const multi = (Deno.env.get("MISTRAL_API_KEYS") ?? "").split(",").map(k => k.trim()).filter(Boolean);
+  for (const k of multi) if (!seen.has(k)) { out.push(k); seen.add(k); }
+  return out;
+}
+
 async function callChat(messages: ChatMessage[]):
   Promise<{ ok: true; text: string } | { ok: false; status: number; error: string }>
 {
-  const mistral = Deno.env.get("MISTRAL_API_KEY");
+  const mistralKeys = parseMistralKeys();
   const google = Deno.env.get("GOOGLE_AI_API_KEY");
   const lovable = Deno.env.get("LOVABLE_API_KEY");
-  let endpoint: string, apiKey: string, model: string;
-  if (mistral) {
-    endpoint = "https://api.mistral.ai/v1/chat/completions";
-    apiKey = mistral; model = "mistral-small-latest";
-  } else if (google) {
-    endpoint = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
-    apiKey = google; model = "gemini-2.0-flash-lite";
-  } else if (lovable) {
-    endpoint = "https://ai.gateway.lovable.dev/v1/chat/completions";
-    apiKey = lovable; model = "google/gemini-2.0-flash";
-  } else {
+  if (mistralKeys.length === 0 && !google && !lovable) {
     return { ok: false, status: 500, error: "No AI key configured" };
   }
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const r = await fetch(endpoint, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, messages, response_format: { type: "json_object" } }),
-    });
-    if (r.status === 402) return { ok: false, status: 402, error: "AI credits exhausted" };
-    if (r.status === 429) {
-      const b = await r.text();
-      if (attempt === 0) { await new Promise(res => setTimeout(res, 5000)); continue; }
-      return { ok: false, status: 429, error: `AI rate limit (after retry): ${b.slice(0, 300)}` };
+
+  const callOnce = async (endpoint: string, apiKey: string, model: string) => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const r = await fetch(endpoint, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model, messages, response_format: { type: "json_object" } }),
+      });
+      if (r.status === 402) return { kind: "exhausted" as const, status: 402, body: "credits exhausted" };
+      if (r.status === 429) {
+        const b = await r.text();
+        if (b.includes("free_tier") || b.includes("RESOURCE_EXHAUSTED")) {
+          return { kind: "exhausted" as const, status: 429, body: b.slice(0, 300) };
+        }
+        if (attempt === 0) { await new Promise(res => setTimeout(res, 5000)); continue; }
+        return { kind: "transient" as const, status: 429, body: b.slice(0, 400) };
+      }
+      if (!r.ok) {
+        const b = await r.text();
+        return { kind: "error" as const, status: r.status, body: b.slice(0, 300) };
+      }
+      const j = await r.json();
+      return { kind: "ok" as const, text: (j.choices?.[0]?.message?.content ?? "") as string };
     }
-    if (!r.ok) {
-      const b = await r.text();
-      return { ok: false, status: r.status, error: `AI provider error ${r.status}: ${b.slice(0, 300)}` };
+    return { kind: "error" as const, status: 500, body: "exhausted retries" };
+  };
+
+  for (let i = 0; i < mistralKeys.length; i++) {
+    const res = await callOnce("https://api.mistral.ai/v1/chat/completions", mistralKeys[i], "mistral-small-latest");
+    if (res.kind === "ok") {
+      if (mistralKeys.length > 1) console.log(`Mistral: used key index ${i} of ${mistralKeys.length}`);
+      return { ok: true, text: res.text };
     }
-    const j = await r.json();
-    return { ok: true, text: j.choices?.[0]?.message?.content ?? "" };
+    if (res.kind === "exhausted") {
+      console.log(`Mistral key index ${i} exhausted (${res.status}); rolling to next`);
+      continue;
+    }
+    console.log(`Mistral key index ${i} returned ${res.status}: ${res.body}`);
+    break;
   }
-  return { ok: false, status: 500, error: "AI call failed" };
+
+  if (google) {
+    const res = await callOnce("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", google, "gemini-2.0-flash-lite");
+    if (res.kind === "ok") return { ok: true, text: res.text };
+    if (res.kind === "exhausted") console.log("Google AI key exhausted");
+    else console.log(`Google AI error ${res.status}: ${res.body}`);
+  }
+
+  if (lovable) {
+    const res = await callOnce("https://ai.gateway.lovable.dev/v1/chat/completions", lovable, "google/gemini-2.0-flash");
+    if (res.kind === "ok") return { ok: true, text: res.text };
+    if (res.kind === "exhausted") return { ok: false, status: 402, error: "All AI providers exhausted (Mistral keys + Google + Lovable)" };
+    return { ok: false, status: res.status, error: `AI provider error ${res.status}: ${res.body}` };
+  }
+
+  return { ok: false, status: 429, error: "All Mistral keys exhausted and no fallback provider configured" };
 }
 
 // ─── Bucket definitions — read from public.analysis_buckets ──────────────────

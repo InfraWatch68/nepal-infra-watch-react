@@ -169,14 +169,20 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
         body: { projectId: Number(projectId) },
       });
       if (error) {
-        // Supabase functions client unfortunately collapses non-2xx into a generic
-        // FunctionsHttpError; inspect data for our structured error.
-        const code = (data as any)?.code;
+        // supabase-js packages non-2xx into FunctionsHttpError with the
+        // response on .context (NOT on data). Parse the body so we can
+        // distinguish our structured 409 ALREADY_RUNNING from random 500s.
+        let body: any = null;
+        try { body = await (error as any).context?.json?.(); } catch { /* non-JSON */ }
+        const code = body?.code ?? (data as any)?.code;
         if (code === 'ALREADY_RUNNING') {
           toast.message('An analysis is already in flight for this project. Watch the bucket progress above.');
+          loadRunMeta();
           return;
         }
-        throw error;
+        const detail = body?.error ?? error.message ?? 'Edge function failed';
+        toast.error(`Could not enqueue analysis: ${detail}`);
+        return;
       }
       toast.success('Analysis queued — bucket progress will appear here in a moment.');
       loadRunMeta();

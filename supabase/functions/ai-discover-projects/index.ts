@@ -65,60 +65,96 @@ function parseTavilyKeys(): string[] {
 
 type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
 
-// Dual-provider chat: Lovable AI Gateway if LOVABLE_API_KEY is set,
-// otherwise Google AI Studio's OpenAI-compatible endpoint via GOOGLE_AI_API_KEY.
+// Multi-key Mistral parser. Merges MISTRAL_API_KEY (single, primary) with
+// MISTRAL_API_KEYS (comma-separated, additional). Lets operators add fallback
+// keys via MISTRAL_API_KEYS without needing to know/touch the existing
+// primary key. Deduped — same key in both vars is fine.
+function parseMistralKeys(): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const single = (Deno.env.get("MISTRAL_API_KEY") ?? "").trim();
+  if (single) { out.push(single); seen.add(single); }
+  const multi = (Deno.env.get("MISTRAL_API_KEYS") ?? "").split(",").map(k => k.trim()).filter(Boolean);
+  for (const k of multi) if (!seen.has(k)) { out.push(k); seen.add(k); }
+  return out;
+}
+
+// Triple-provider chat with Mistral key rotation, then Google/Lovable fallback.
+// Each Mistral key gets one retry on transient 429; quota-exhausted (402 or
+// 429 with free_tier/resource_exhausted body) → roll over to next key
+// immediately. After all Mistral keys exhaust, fall through to Google then
+// Lovable.
 async function callChatModel(
   messages: ChatMessage[],
 ): Promise<{ ok: true; text: string } | { ok: false; status: number; error: string }> {
-  const mistral = Deno.env.get("MISTRAL_API_KEY");
+  const mistralKeys = parseMistralKeys();
   const google = Deno.env.get("GOOGLE_AI_API_KEY");
   const lovable = Deno.env.get("LOVABLE_API_KEY");
-  let endpoint: string;
-  let apiKey: string;
-  let model: string;
-  if (mistral) {
-    endpoint = "https://api.mistral.ai/v1/chat/completions";
-    apiKey = mistral;
-    model = "mistral-small-latest";
-  } else if (google) {
-    endpoint = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
-    apiKey = google;
-    model = "gemini-2.0-flash-lite";
-  } else if (lovable) {
-    endpoint = "https://ai.gateway.lovable.dev/v1/chat/completions";
-    apiKey = lovable;
-    model = "google/gemini-2.0-flash";
-  } else {
-    return { ok: false, status: 500, error: "No AI key configured (set MISTRAL_API_KEY, GOOGLE_AI_API_KEY, or LOVABLE_API_KEY)" };
+  if (mistralKeys.length === 0 && !google && !lovable) {
+    return { ok: false, status: 500, error: "No AI key configured (set MISTRAL_API_KEY/MISTRAL_API_KEYS, GOOGLE_AI_API_KEY, or LOVABLE_API_KEY)" };
   }
-  // One retry on transient 429s; skip retry immediately for quota-exhausted errors.
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const r = await fetch(endpoint, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, messages }),
-    });
-    if (r.status === 402) return { ok: false, status: 402, error: "AI credits exhausted" };
-    if (r.status === 429) {
-      const body429 = await r.text();
-      // Quota-exhausted errors (daily/monthly limit) won't recover — return immediately.
-      if (body429.includes("free_tier") || body429.includes("RESOURCE_EXHAUSTED")) {
-        return { ok: false, status: 429, error: `AI quota exhausted (free tier limit hit). Use a Google AI Studio key for higher quota. Details: ${body429.slice(0, 200)}` };
+
+  const callOnce = async (endpoint: string, apiKey: string, model: string) => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const r = await fetch(endpoint, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model, messages }),
+      });
+      if (r.status === 402) return { kind: "exhausted" as const, status: 402, body: "credits exhausted" };
+      if (r.status === 429) {
+        const body429 = await r.text();
+        if (body429.includes("free_tier") || body429.includes("RESOURCE_EXHAUSTED")) {
+          return { kind: "exhausted" as const, status: 429, body: body429.slice(0, 300) };
+        }
+        if (attempt === 0) { await new Promise(res => setTimeout(res, 3000)); continue; }
+        return { kind: "transient" as const, status: 429, body: body429.slice(0, 400) };
       }
-      // Transient per-second rate limit: one fast retry after 3 s (safe within edge fn timeout).
-      console.log(`AI 429 attempt ${attempt} body: ${body429}`);
-      if (attempt === 0) { await new Promise(res => setTimeout(res, 3000)); continue; }
-      return { ok: false, status: 429, error: `AI rate limit (after retry): ${body429.slice(0, 400)}` };
+      if (!r.ok) {
+        const body = await r.text();
+        return { kind: "error" as const, status: r.status, body: body.slice(0, 200) };
+      }
+      const j = await r.json();
+      return { kind: "ok" as const, text: (j.choices?.[0]?.message?.content ?? "") as string };
     }
-    if (!r.ok) {
-      const body = await r.text();
-      return { ok: false, status: r.status, error: `AI provider error ${r.status}: ${body.slice(0, 200)}` };
+    return { kind: "error" as const, status: 500, body: "exhausted retries" };
+  };
+
+  // 1. Try each Mistral key in order. Roll over on exhaustion.
+  for (let i = 0; i < mistralKeys.length; i++) {
+    const res = await callOnce("https://api.mistral.ai/v1/chat/completions", mistralKeys[i], "mistral-small-latest");
+    if (res.kind === "ok") {
+      if (mistralKeys.length > 1) console.log(`Mistral: used key index ${i} of ${mistralKeys.length}`);
+      return { ok: true, text: res.text };
     }
-    const j = await r.json();
-    const text: string = j.choices?.[0]?.message?.content ?? "";
-    return { ok: true, text };
+    if (res.kind === "exhausted") {
+      console.log(`Mistral key index ${i} exhausted (${res.status}); rolling to next`);
+      continue;
+    }
+    // transient (after retry) or other provider error → surface but don't roll
+    // through remaining Mistral keys (the issue is likely transient and other
+    // keys share the same problem). Drop to Google fallback below.
+    console.log(`Mistral key index ${i} returned ${res.status}: ${res.body}`);
+    break;
   }
-  return { ok: false, status: 500, error: "AI call failed" };
+
+  // 2. Google AI Studio fallback.
+  if (google) {
+    const res = await callOnce("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", google, "gemini-2.0-flash-lite");
+    if (res.kind === "ok") return { ok: true, text: res.text };
+    if (res.kind === "exhausted") console.log("Google AI key exhausted");
+    else console.log(`Google AI error ${res.status}: ${res.body}`);
+  }
+
+  // 3. Lovable gateway last resort.
+  if (lovable) {
+    const res = await callOnce("https://ai.gateway.lovable.dev/v1/chat/completions", lovable, "google/gemini-2.0-flash");
+    if (res.kind === "ok") return { ok: true, text: res.text };
+    if (res.kind === "exhausted") return { ok: false, status: 402, error: "All AI providers exhausted (Mistral keys + Google + Lovable)" };
+    return { ok: false, status: res.status, error: `AI provider error ${res.status}: ${res.body}` };
+  }
+
+  return { ok: false, status: 429, error: "All Mistral keys exhausted and no fallback provider configured" };
 }
 
 serve(async (req) => {

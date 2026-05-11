@@ -9,11 +9,13 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Loader2, Search, Trash2, Plus, MapPin, ListChecks, Clock, Filter as FilterIcon, Play } from 'lucide-react';
+import { Loader2, Search, Trash2, Plus, MapPin, ListChecks, Clock, Filter as FilterIcon, Play, ChevronDown, Radio, Square } from 'lucide-react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { toast } from 'sonner';
-import { PROVINCES, SECTORS, districtsFor, type Province } from '@/lib/constants';
+import { PROVINCES, SECTORS, districtsFor, type Province, DISTRICTS_BY_PROVINCE } from '@/lib/constants';
 import { useMunicipalities } from '@/lib/municipalities';
+import { cn } from '@/lib/utils';
 
 type TopicFilter = {
   id: string;
@@ -49,6 +51,7 @@ type Sweep = {
   provinces: string[];
   sectors: string[];
   per_query_max: number;
+  include_districts: boolean;
   cron_job_id: number | null;
   last_run_at: string | null;
   last_run_note: string | null;
@@ -66,7 +69,11 @@ const CADENCE_PRESETS: { label: string; value: string }[] = [
 // server-side when the trigger calls cron.schedule().
 const looksLikeCron = (s: string) => /^\s*\S+\s+\S+\s+\S+\s+\S+\s+\S+\s*$/.test(s);
 
-const SWEEP_CAP = 50;
+// Server-side enqueue caps. Matches the values in
+// supabase/migrations/20260513150000_sherlock_district_comprehensive.sql.
+// Bumped to 500 so a district-comprehensive multi-province sweep (~270-693
+// combos) isn't truncated to a meaningless slice.
+const SWEEP_CAP = 500;
 
 export function SherlockManager() {
   return (
@@ -465,10 +472,27 @@ function TopicFiltersTab() {
 
 // ─── Scheduled sweeps ─────────────────────────────────────────────────────────
 
+type LiveState = {
+  is_live: boolean;
+  started_at: string | null;
+  stopped_at: string | null;
+  started_by: string | null;
+  include_districts: boolean;
+  per_query_max: number;
+  provinces: string[];
+  sectors: string[];
+  enqueued_count: number;
+  last_province: string | null;
+  last_district: string | null;
+  last_sector: string | null;
+  updated_at: string;
+};
+
 function SweepsTab() {
   const { user } = useAuth();
   const [sweeps, setSweeps] = useState<Sweep[]>([]);
   const [runningId, setRunningId] = useState<string | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
 
   // Draft form state for "Add sweep"
   const [draftLabel, setDraftLabel] = useState('');
@@ -478,11 +502,12 @@ function SweepsTab() {
   const [draftProvinces, setDraftProvinces] = useState<string[]>([]); // empty = all
   const [draftSectors, setDraftSectors] = useState<string[]>([]);     // empty = all
   const [draftMax, setDraftMax] = useState(3);
+  const [draftIncludeDistricts, setDraftIncludeDistricts] = useState(false);
 
   const refresh = useCallback(async () => {
     const { data } = await supabase
       .from('sherlock_sweeps')
-      .select('id, label, enabled, cadence, provinces, sectors, per_query_max, cron_job_id, last_run_at, last_run_note')
+      .select('id, label, enabled, cadence, provinces, sectors, per_query_max, include_districts, cron_job_id, last_run_at, last_run_note')
       .order('created_at', { ascending: true });
     setSweeps((data ?? []) as Sweep[]);
   }, []);
@@ -490,7 +515,15 @@ function SweepsTab() {
 
   const provCount = draftProvinces.length || PROVINCES.length;
   const secCount = draftSectors.length || SECTORS.length;
-  const combos = provCount * secCount;
+  // When include_districts is on, each province contributes its district count
+  // (from src/lib/constants.ts DISTRICTS_BY_PROVINCE) × sector count instead
+  // of just 1 × sector count. Lets the UI surface the real combo blast
+  // before the operator clicks Add.
+  const districtCountForProvs = useMemo(() => {
+    const list = draftProvinces.length ? draftProvinces : PROVINCES;
+    return list.reduce((sum, p) => sum + (DISTRICTS_BY_PROVINCE[p as Province]?.length ?? 0), 0);
+  }, [draftProvinces]);
+  const combos = draftIncludeDistricts ? districtCountForProvs * secCount : provCount * secCount;
   const capped = combos > SWEEP_CAP;
 
   const finalCadence = draftCustomMode ? draftCustomCron.trim() : draftCadencePreset;
@@ -507,6 +540,7 @@ function SweepsTab() {
       provinces: draftProvinces, // empty = all
       sectors: draftSectors,     // empty = all
       per_query_max: draftMax,
+      include_districts: draftIncludeDistricts,
       created_by: user?.id ?? null,
     });
     if (error) return toast.error(error.message);
@@ -514,6 +548,8 @@ function SweepsTab() {
     setDraftLabel(''); setDraftCustomCron(''); setDraftCustomMode(false);
     setDraftCadencePreset(CADENCE_PRESETS[0].value);
     setDraftProvinces([]); setDraftSectors([]); setDraftMax(3);
+    setDraftIncludeDistricts(false);
+    setAddOpen(false);
     refresh();
   };
 
@@ -554,21 +590,37 @@ function SweepsTab() {
 
   return (
     <div className="space-y-3">
+      <LiveDiscoveryCard userId={user?.id ?? null} />
+
       {sweeps.length === 0 ? (
         <p className="text-xs text-muted-foreground italic">No sweeps yet. Add one below.</p>
       ) : (
         <div className="space-y-1.5">
           {sweeps.map(s => {
-            const totalCombos = (s.provinces.length || PROVINCES.length) * (s.sectors.length || SECTORS.length);
+            const provList = s.provinces.length ? s.provinces : (PROVINCES as readonly string[]);
+            const districtCount = s.include_districts
+              ? provList.reduce((n, p) => n + (DISTRICTS_BY_PROVINCE[p as Province]?.length ?? 0), 0)
+              : 0;
+            const totalCombos = s.include_districts
+              ? districtCount * (s.sectors.length || SECTORS.length)
+              : (s.provinces.length || PROVINCES.length) * (s.sectors.length || SECTORS.length);
             return (
               <Card key={s.id} className="p-3 flex items-center gap-3 flex-wrap">
                 <Switch checked={s.enabled} onCheckedChange={() => toggleEnabled(s)} />
                 <div className="min-w-0 flex-1">
-                  <div className="font-semibold text-sm truncate">{s.label}</div>
+                  <div className="font-semibold text-sm truncate flex items-center gap-1.5">
+                    {s.label}
+                    {s.include_districts && (
+                      <span className="text-[10px] uppercase tracking-wide bg-accent/15 text-accent border border-accent/40 rounded px-1.5 py-0.5 font-mono">
+                        district-comp
+                      </span>
+                    )}
+                  </div>
                   <div className="text-xs text-muted-foreground font-mono truncate">
                     <span className="text-foreground">{s.cadence}</span>
                     {' · '}
                     {s.provinces.length ? `${s.provinces.length} province${s.provinces.length === 1 ? '' : 's'}` : 'all 7 provinces'}
+                    {s.include_districts && <> {'× '}{districtCount} district{districtCount === 1 ? '' : 's'}</>}
                     {' × '}
                     {s.sectors.length ? `${s.sectors.length} sector${s.sectors.length === 1 ? '' : 's'}` : 'all 9 sectors'}
                     {' = '}
@@ -595,8 +647,12 @@ function SweepsTab() {
         </div>
       )}
 
-      <Card className="p-3 space-y-2.5">
-        <div className="text-xs font-semibold flex items-center gap-1.5"><Plus className="h-3.5 w-3.5" /> Add a scheduled sweep</div>
+      <Collapsible open={addOpen} onOpenChange={setAddOpen} className="rounded-lg border bg-card">
+        <CollapsibleTrigger className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold hover:bg-muted/50 transition-colors rounded-lg">
+          <span className="flex items-center gap-1.5"><Plus className="h-3.5 w-3.5" /> Add a scheduled sweep</span>
+          <ChevronDown className={cn('h-3.5 w-3.5 text-muted-foreground transition-transform', addOpen && 'rotate-180')} />
+        </CollapsibleTrigger>
+        <CollapsibleContent className="px-3 pb-3 pt-1 space-y-2.5">
 
         <div className="grid sm:grid-cols-2 gap-2">
           <div>
@@ -671,18 +727,159 @@ function SweepsTab() {
           </div>
         </div>
 
+        {/* District-comprehensive toggle. When ON the sweep fans out by district
+            inside each included province instead of just one cell per province
+            — much deeper coverage, much higher token spend. */}
+        <div className="flex items-start gap-2 p-2 rounded-md border border-muted bg-muted/30">
+          <Switch checked={draftIncludeDistricts} onCheckedChange={setDraftIncludeDistricts} className="mt-0.5" />
+          <div className="text-xs min-w-0 flex-1">
+            <div className="font-semibold">Cover every district of each included province</div>
+            <div className="text-muted-foreground">
+              Fans out per (province × district × sector). Much deeper coverage but multiplies the combo count {districtCountForProvs > 0 && <>(currently {districtCountForProvs} district{districtCountForProvs === 1 ? '' : 's'} across the selected provinces)</>}; token spend scales accordingly.
+            </div>
+          </div>
+        </div>
+
         <div className="flex items-center justify-between flex-wrap gap-2 pt-1">
           <p className={`text-xs ${capped ? 'text-warning' : 'text-muted-foreground'}`}>
-            Each run will enqueue <strong>{Math.min(combos, SWEEP_CAP)}</strong> of {combos} (province × sector) combos
+            Each run will enqueue <strong>{Math.min(combos, SWEEP_CAP)}</strong> of {combos} {draftIncludeDistricts ? '(province × district × sector)' : '(province × sector)'} combos
             {capped && <> — capped at {SWEEP_CAP}.</>}
           </p>
           <Button onClick={addSweep}>Add sweep</Button>
         </div>
-      </Card>
+        </CollapsibleContent>
+      </Collapsible>
 
       <p className="text-[10px] text-muted-foreground">
-        Each enabled sweep gets its own pg_cron job. The queue drainer runs every 2 minutes and fires one job at a time to respect AI provider rate limits.
+        Each enabled sweep gets its own pg_cron job. The queue drainer runs every minute and fires one job at a time to respect AI provider rate limits.
       </p>
     </div>
+  );
+}
+
+// Singleton "Go Live" controller. While is_live=true, the sherlock-live-feed
+// cron job (every minute) drops the next (province × [district] × sector)
+// combo into the queue any time the queue empties — so Sherlock keeps
+// discovering until the operator hits Stop. Cursor + counter live on the
+// sherlock_live_state row and survive restarts.
+function LiveDiscoveryCard({ userId }: { userId: string | null }) {
+  const [state, setState] = useState<LiveState | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [draftDistricts, setDraftDistricts] = useState(false);
+  const [draftMax, setDraftMax] = useState(3);
+  const [now, setNow] = useState(Date.now());
+
+  const refresh = useCallback(async () => {
+    const { data } = await supabase.from('sherlock_live_state').select('*').eq('id', 1).maybeSingle();
+    setState((data ?? null) as LiveState | null);
+    if (data) {
+      setDraftDistricts(!!(data as any).include_districts);
+      setDraftMax((data as any).per_query_max ?? 3);
+    }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  // Tick a "now" ref every 10s so the "running for X min" label refreshes
+  // without subscribing to anything heavy.
+  useEffect(() => {
+    if (!state?.is_live) return;
+    const t = setInterval(() => setNow(Date.now()), 10_000);
+    return () => clearInterval(t);
+  }, [state?.is_live]);
+
+  // Realtime — pick up enqueued_count + cursor changes from the live-feed cron.
+  useEffect(() => {
+    const ch = supabase.channel('sherlock-live-state')
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'sherlock_live_state', filter: 'id=eq.1' }, () => refresh())
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, [refresh]);
+
+  const goLive = async () => {
+    setBusy(true);
+    const { error } = await supabase.from('sherlock_live_state').update({
+      is_live: true,
+      started_at: new Date().toISOString(),
+      stopped_at: null,
+      started_by: userId,
+      include_districts: draftDistricts,
+      per_query_max: draftMax,
+      enqueued_count: 0,
+      last_province: null,
+      last_district: null,
+      last_sector: null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', 1);
+    setBusy(false);
+    if (error) return toast.error(error.message);
+    toast.success('Live discovery started. Sherlock will keep feeding the queue every minute.');
+    refresh();
+  };
+
+  const stopLive = async () => {
+    setBusy(true);
+    const { error } = await supabase.from('sherlock_live_state').update({
+      is_live: false,
+      stopped_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }).eq('id', 1);
+    setBusy(false);
+    if (error) return toast.error(error.message);
+    toast.success('Live discovery stopped.');
+    refresh();
+  };
+
+  const live = !!state?.is_live;
+  const startedAt = state?.started_at ? new Date(state.started_at).getTime() : null;
+  const runningMin = live && startedAt ? Math.max(0, Math.floor((now - startedAt) / 60000)) : 0;
+
+  return (
+    <Card className={cn('p-3 border', live && 'border-success/50 bg-success/5')}>
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <div className={cn('h-7 w-7 rounded-md flex items-center justify-center', live ? 'bg-success/15 text-success' : 'bg-muted text-muted-foreground')}>
+            <Radio className={cn('h-3.5 w-3.5', live && 'animate-pulse')} />
+          </div>
+          <div className="min-w-0">
+            <div className="text-xs font-semibold">
+              Live discovery {live ? <span className="text-success">· ON</span> : <span className="text-muted-foreground">· off</span>}
+            </div>
+            <div className="text-[11px] text-muted-foreground font-mono">
+              {live
+                ? <>Running {runningMin} min · {state?.enqueued_count ?? 0} cells enqueued · cursor at <span className="text-foreground">{state?.last_province ?? '—'}{state?.last_district ? ' / ' + state.last_district : ''} / {state?.last_sector ?? '—'}</span></>
+                : 'Continuously feed the queue with one new (province × sector) cell every minute until stopped.'}
+            </div>
+          </div>
+        </div>
+        {live ? (
+          <Button size="sm" variant="destructive" onClick={stopLive} disabled={busy}>
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
+            Stop Live
+          </Button>
+        ) : (
+          <Button size="sm" onClick={goLive} disabled={busy}>
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Radio className="h-4 w-4" />}
+            Go Live
+          </Button>
+        )}
+      </div>
+
+      {!live && (
+        <div className="mt-2.5 pt-2.5 border-t border-dashed border-muted flex flex-wrap items-end gap-3">
+          <div>
+            <Label className="text-[10px] text-muted-foreground">Per-query max</Label>
+            <Select value={String(draftMax)} onValueChange={(v) => setDraftMax(Number(v))}>
+              <SelectTrigger className="w-[110px] h-8 text-xs"><SelectValue /></SelectTrigger>
+              <SelectContent>{[1, 2, 3, 5, 8, 10].map(n => <SelectItem key={n} value={String(n)}>{n}/cell</SelectItem>)}</SelectContent>
+            </Select>
+          </div>
+          <label className="flex items-center gap-2 text-xs cursor-pointer">
+            <Switch checked={draftDistricts} onCheckedChange={setDraftDistricts} />
+            <span>District-comprehensive (77 districts × 9 sectors rotation)</span>
+          </label>
+        </div>
+      )}
+    </Card>
   );
 }
