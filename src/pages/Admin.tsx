@@ -77,11 +77,6 @@ export default function Admin() {
   const [ads, setAds] = useState<any[]>([]);
   const [users, setUsers] = useState<any[]>([]);
   const [stats, setStats] = useState({ pending: 0, approved: 0, total: 0, aiInserted: 0, aiApproved: 0 });
-  const [discoverTopic, setDiscoverTopic] = useState('');
-  const [discoverRegion, setDiscoverRegion] = useState('');
-  const [discoverMax, setDiscoverMax] = useState(2);
-  const [discovering, setDiscovering] = useState(false);
-  const [discoverErrors, setDiscoverErrors] = useState<string[]>([]);
   const [busyRow, setBusyRow] = useState<string | null>(null);
   const [globalScope, setGlobalScope] = useState<'all' | 'province' | 'sector'>('all');
   const [globalProvince, setGlobalProvince] = useState<string>('');
@@ -238,24 +233,6 @@ export default function Admin() {
     refresh();
   };
 
-  const runDiscover = async () => {
-    setDiscovering(true);
-    setDiscoverErrors([]);
-    const { data, error } = await supabase.functions.invoke('ai-discover-projects', {
-      body: {
-        topic: discoverTopic.trim() || undefined,
-        region: discoverRegion.trim() || undefined,
-        maxResults: discoverMax,
-      },
-    });
-    setDiscovering(false);
-    if (error) return toast.error(await extractFnError(error));
-    const errs: string[] = data?.errors ?? [];
-    setDiscoverErrors(errs);
-    toast.success(`Inserted ${data?.inserted ?? 0}, skipped ${data?.skipped ?? 0}${errs.length ? ` — ${errs.length} error(s) below` : ''}`);
-    refresh();
-  };
-
   const fetchNews = async (projectId: string) => {
     setBusyRow(projectId + ':news');
     const { data, error } = await supabase.functions.invoke('ai-fetch-project-news', {
@@ -350,19 +327,6 @@ export default function Admin() {
     refresh();
   };
 
-  const runFetchNewsAll = async () => {
-    setBusyGlobal('news');
-    const { data, error } = await supabase.functions.invoke('ai-fetch-news-all', {
-      body: { maxProjects: 8, newsPerProject: 2 },
-    });
-    setBusyGlobal(null);
-    if (error) return toast.error(await extractFnError(error));
-    const errs: string[] = data?.errors ?? [];
-    toast.success(`Inserted ${data?.inserted ?? 0} updates across ${data?.projectsScanned ?? 0} projects${errs.length ? ` (${errs.length} errors)` : ''}`);
-    if (errs.length) console.warn('ai-fetch-news-all errors:', errs);
-    refresh();
-  };
-
   return (
     <div className="min-h-screen flex flex-col">
       <SiteHeader />
@@ -400,47 +364,6 @@ export default function Admin() {
 
           <div className="space-y-2">
             <p className="text-xs text-muted-foreground">
-              <span className="font-semibold text-foreground">Discover new projects.</span>{' '}
-              Tavily searches Nepali infrastructure news; Gemini extracts a structured project record. New rows land in the review queue with an AI badge.
-            </p>
-            <div className="flex gap-2 flex-wrap items-center">
-              <Input
-                placeholder='Topic e.g. "Kathmandu metro"'
-                value={discoverTopic}
-                onChange={e => setDiscoverTopic(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && !discovering && runDiscover()}
-                className="max-w-xs"
-              />
-              <Input
-                placeholder="Region (optional)"
-                value={discoverRegion}
-                onChange={e => setDiscoverRegion(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && !discovering && runDiscover()}
-                className="max-w-xs"
-              />
-              <Select value={String(discoverMax)} onValueChange={v => setDiscoverMax(Number(v))}>
-                <SelectTrigger className="w-[110px]"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {[2, 3, 5, 8, 10].map(n => (
-                    <SelectItem key={n} value={String(n)}>{n} results</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Button disabled={discovering} onClick={runDiscover} className="bg-accent hover:bg-accent/90 text-accent-foreground">
-                {discovering ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Discover new projects'}
-              </Button>
-            </div>
-            {discoverErrors.length > 0 && (
-              <ul className="mt-2 space-y-1">
-                {discoverErrors.map((e, i) => (
-                  <li key={i} className="text-xs text-destructive font-mono bg-destructive/10 px-2 py-1 rounded">{e}</li>
-                ))}
-              </ul>
-            )}
-          </div>
-
-          <div className="space-y-2 pt-3 border-t border-accent/20">
-            <p className="text-xs text-muted-foreground">
               <span className="font-semibold text-foreground">Global brief.</span>{' '}
               Aggregates approved projects into a single brief shown on the homepage hero. Optionally narrow by province or sector.
             </p>
@@ -468,9 +391,6 @@ export default function Admin() {
               <Button disabled={busyGlobal === 'brief'} onClick={runGlobalBrief} variant="outline">
                 {busyGlobal === 'brief' ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Generate global brief'}
               </Button>
-              <Button disabled={busyGlobal === 'news'} onClick={runFetchNewsAll} variant="outline">
-                {busyGlobal === 'news' ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Fetch news for all projects'}
-              </Button>
             </div>
           </div>
 
@@ -480,16 +400,15 @@ export default function Admin() {
 
           <div className="space-y-2 pt-3 border-t border-accent/20">
             <p className="text-xs text-muted-foreground">
-              <span className="font-semibold text-foreground">Bulk comprehensive analysis.</span>{' '}
-              Runs the 5-bucket source extraction on up to 10 approved projects whose last analysis is missing or older than 30 days.
-              Each project takes ~30s. Inserted rows land as pending detail moderation.
+              <span className="font-semibold text-foreground">Refresh stale projects.</span>{' '}
+              Enqueues a comprehensive analysis for up to 10 approved projects whose last analysis is missing or older than 30 days. Jobs flow through the analysis queue — each one populates funding/documents/stakeholders/risks/impact/procurement/compliance plus the milestones/updates/sources/images. New rows land as pending review.
             </p>
             <div className="flex gap-2 flex-wrap items-center">
               <Button disabled={!!bulkProgress} onClick={runBulkComprehensive} variant="outline">
                 {bulkProgress ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
                 {bulkProgress
-                  ? `Analyzing ${bulkProgress.done + 1} / ${bulkProgress.total}${bulkProgress.current ? ` — ${bulkProgress.current.slice(0, 40)}…` : ''}`
-                  : 'Run on stale approved projects'}
+                  ? `Enqueueing ${bulkProgress.done + 1} / ${bulkProgress.total}${bulkProgress.current ? ` — ${bulkProgress.current.slice(0, 40)}…` : ''}`
+                  : 'Refresh stale approved projects'}
               </Button>
             </div>
           </div>
