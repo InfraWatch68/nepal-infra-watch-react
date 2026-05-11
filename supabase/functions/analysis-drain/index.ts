@@ -359,9 +359,33 @@ When facts conflict, prefer the most recent. A 2026 audit overrides a 2022 news 
     "project_type": str|null,
     "status": "proposed|approved|in_progress|delayed|completed|cancelled"|null,
     "status_evidence_date": "YYYY-MM-DD"|null,  // the latest date in the corpus that supports the status above
-    "status_confidence": num|null                // 0.00-1.00 per the confidence rubric above
+    "status_confidence": num|null,               // 0.00-1.00 per the confidence rubric above
+    "reported_progress_percent": num|null,       // see REPORTED PROGRESS RULE below
+    "reported_progress_as_of": "YYYY-MM-DD"|null,
+    "reported_progress_source_url": str|null,
+    "reported_progress_quote": str|null
   }
 }
+
+## REPORTED PROGRESS RULE — only emit when the corpus says an EXPLICIT overall project completion percentage
+Search the corpus for sentences naming a single overall completion figure for the whole project (not a sub-section). Acceptable patterns:
+- "the project is X% complete as of [date]"
+- "overall progress stands at X%"
+- "X% of construction has been finished"
+- "the project has reached X% completion"
+Do NOT emit when:
+- The corpus only mentions sub-section progress (e.g. "section A is 67% complete, section B is 42%"). That's not an overall figure.
+- The number is forward-looking ("aims to complete X% by Y").
+- The percentage is qualitative ("nearly complete", "most of the way") — must be a numeric value.
+- You'd have to average sub-section figures yourself — DO NOT compute.
+
+When you DO emit, fill all four fields:
+- "reported_progress_percent": the number (0-100).
+- "reported_progress_as_of": the most recent date in the article anchoring this claim (the article's "as of" / published date / quoted period).
+- "reported_progress_source_url": the URL of the article making the claim. MUST be a URL from the corpus.
+- "reported_progress_quote": the exact short phrase from the article (≤120 chars) that contained the percentage, for transparency. Trim long sentences.
+
+If no overall-progress figure is stated, leave all four fields null. Per-section progress percentages go in project_milestones / project_updates instead.
 
 ## Status rubric — extreme importance
 Set "status" in basic_updates using the LATEST evidence in the corpus, not a year-old article. Pick exactly one:
@@ -1038,8 +1062,24 @@ serve(async (req) => {
     const statusConfidence = typeof eRaw.status_confidence === "number" ? eRaw.status_confidence : 0;
     const statusEvidenceDate = (typeof eRaw.status_evidence_date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(eRaw.status_evidence_date)) ? eRaw.status_evidence_date : null;
 
-    if (Object.keys(nullFill).length > 0 || statusFromAi) {
-      const colsToRead = ["id", ...Object.keys(nullFill), "status", "last_comprehensive_analysis_at"];
+    // Reported-progress extraction (an explicit "X% as of DATE · source").
+    // Stored as a separate quartet of columns so the UI can render with the
+    // citation. Overwrites whenever the AI's `as_of` is newer than what's
+    // already stored — that way the column always reflects the freshest
+    // publicly-reported number.
+    const rpPercent = typeof eRaw.reported_progress_percent === "number" && Number.isFinite(eRaw.reported_progress_percent) && eRaw.reported_progress_percent >= 0 && eRaw.reported_progress_percent <= 100
+      ? Number(eRaw.reported_progress_percent.toFixed(2)) : null;
+    const rpAsOf = (typeof eRaw.reported_progress_as_of === "string" && /^\d{4}-\d{2}-\d{2}$/.test(eRaw.reported_progress_as_of)) ? eRaw.reported_progress_as_of : null;
+    const rpSourceUrl = (() => {
+      if (typeof eRaw.reported_progress_source_url !== "string") return null;
+      try { new URL(eRaw.reported_progress_source_url); return eRaw.reported_progress_source_url; }
+      catch { return null; }
+    })();
+    const rpQuote = typeof eRaw.reported_progress_quote === "string" && eRaw.reported_progress_quote.trim().length > 0
+      ? eRaw.reported_progress_quote.trim().slice(0, 200) : null;
+
+    if (Object.keys(nullFill).length > 0 || statusFromAi || (rpPercent != null && rpAsOf)) {
+      const colsToRead = ["id", ...Object.keys(nullFill), "status", "last_comprehensive_analysis_at", "reported_progress_as_of"];
       const { data: cur } = await admin.from("projects").select(colsToRead.join(",")).eq("id", projectId).single();
       const patch: Record<string, any> = {};
       for (const k of Object.keys(nullFill)) if (cur && (cur as any)[k] == null) patch[k] = nullFill[k];
@@ -1050,6 +1090,19 @@ serve(async (req) => {
       // is what picks the latest fact.
       if (statusFromAi && statusConfidence >= 0.7 && cur && (cur as any).status !== statusFromAi) {
         patch.status = statusFromAi;
+      }
+
+      // Reported progress: refresh only when the new evidence date is newer
+      // than (or replaces a null) the stored value. Protects against an
+      // older article rolling back the most recent figure.
+      if (rpPercent != null && rpAsOf) {
+        const existingAsOf = cur && (cur as any).reported_progress_as_of ? String((cur as any).reported_progress_as_of) : null;
+        if (!existingAsOf || rpAsOf >= existingAsOf) {
+          patch.reported_progress_percent = rpPercent;
+          patch.reported_progress_as_of = rpAsOf;
+          patch.reported_progress_source_url = rpSourceUrl;
+          patch.reported_progress_quote = rpQuote;
+        }
       }
 
       if (Object.keys(patch).length > 0) await admin.from("projects").update(patch).eq("id", projectId);

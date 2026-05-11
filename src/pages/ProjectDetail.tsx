@@ -51,8 +51,7 @@ export default function ProjectDetail() {
     contractor: string | null;
     earliestDate: string | null;
     latestDate: string | null;
-    progressFromMilestones: number | null;
-  }>({ fundingTotalNpr: null, implementingAgency: null, contractor: null, earliestDate: null, latestDate: null, progressFromMilestones: null });
+  }>({ fundingTotalNpr: null, implementingAgency: null, contractor: null, earliestDate: null, latestDate: null });
 
   // Latest analysis run — feeds the Project Record stats line. Same row that
   // ComprehensiveSections.tsx queries internally for its own header; we query
@@ -181,7 +180,7 @@ export default function ProjectDetail() {
         supabase.from('project_funding').select('amount_npr, approval_status').eq('project_id', p.id).eq('approval_status', 'approved'),
         supabase.from('project_stakeholders').select('org_name, role').eq('project_id', p.id).eq('approval_status', 'approved').in('role', ['implementing_agency', 'executing_ministry', 'contractor', 'sub_contractor']),
         supabase.from('project_procurement').select('awardee_name, contract_awarded_at').eq('project_id', p.id).eq('approval_status', 'approved').not('awardee_name', 'is', null).order('contract_awarded_at', { ascending: false }).limit(1),
-        supabase.from('project_milestones').select('milestone_date, due_date, completed_date, status').eq('project_id', p.id),
+        supabase.from('project_milestones').select('milestone_date, due_date, completed_date').eq('project_id', p.id),
       ]);
       const fundingTotalNpr = (funding.data ?? []).reduce((sum: number, r: any) => sum + (Number(r.amount_npr) || 0), 0) || null;
       const stakeholdersData = (stakeholders.data ?? []) as any[];
@@ -200,21 +199,7 @@ export default function ProjectDetail() {
       dates.sort();
       const earliestDate = dates[0] ?? null;
       const latestDate = dates[dates.length - 1] ?? null;
-      // Progress fallback from milestone statuses. Completed counts as 1,
-      // in_progress as 0.5, others as 0. Returns null when no milestones
-      // exist so the caller can fall back to a status-based default.
-      const allMilestones = (milestones.data ?? []) as any[];
-      const allMilestonesWithStatus = allMilestones.filter((m: any) => m.status);
-      let progressFromMilestones: number | null = null;
-      if (allMilestonesWithStatus.length > 0) {
-        const score = allMilestonesWithStatus.reduce((acc: number, m: any) => {
-          if (m.status === 'completed') return acc + 1;
-          if (m.status === 'in_progress') return acc + 0.5;
-          return acc;
-        }, 0);
-        progressFromMilestones = Math.round((score / allMilestonesWithStatus.length) * 100);
-      }
-      setAggregates({ fundingTotalNpr, implementingAgency, contractor, earliestDate, latestDate, progressFromMilestones });
+      setAggregates({ fundingTotalNpr, implementingAgency, contractor, earliestDate, latestDate });
     };
     const reloadLatestRun = async () => {
       const { data } = await supabase
@@ -333,36 +318,48 @@ export default function ProjectDetail() {
               <KV icon={HardHat} label="Contractor" value={p.contractor ?? aggregates.contractor ?? '—'} />
               <KV icon={Calendar} label="Timeline" value={`${p.start_date ?? aggregates.earliestDate ?? 'TBD'} → ${p.expected_completion ?? aggregates.latestDate ?? 'TBD'}`} />
               {(() => {
-                // Effective progress fallback chain:
-                //   1. projects.progress_percent  (only when > 0 — the column
-                //      defaults to 0 NOT NULL across the seed data, so 0 is
-                //      indistinguishable from "never set" and almost always
-                //      wrong. A genuinely 0% project still ends up showing
-                //      0% via the status-fallback path, just tagged as such.)
-                //   2. milestone-derived score    (sum of completed=1, in_progress=0.5, ÷ total)
-                //   3. status-based default       (completed=100, cancelled=0,
-                //                                  in_progress/delayed=30,
-                //                                  approved=5, proposed/null=0)
+                // Progress is shown only when an AI extraction (or manual
+                // edit) supplies a real number. Two paths:
+                //   1. projects.progress_percent  (manual / curator-set, > 0)
+                //   2. projects.reported_progress_* (extracted from corpus by
+                //      analysis-drain — see migration 20260513250000). When
+                //      present, render "X% reported as of YYYY-MM-DD ↗ source".
+                // No derived heuristics. If no number exists yet, the row
+                // says "Not yet reported" with a hint about Trace History.
                 const fromProject = typeof p.progress_percent === 'number' && p.progress_percent > 0 ? p.progress_percent : null;
-                const fromMilestones = aggregates.progressFromMilestones;
-                const fromStatus = p.status === 'completed' ? 100
-                  : p.status === 'cancelled' ? 0
-                  : p.status === 'in_progress' || p.status === 'delayed' ? 30
-                  : p.status === 'approved' ? 5
-                  : 0;
-                const value = fromProject ?? fromMilestones ?? fromStatus;
-                const tag = fromProject != null ? null
-                  : fromMilestones != null ? 'from milestones'
-                  : 'from status';
+                const reportedValue = typeof p.reported_progress_percent === 'number' ? p.reported_progress_percent : null;
+                const reportedAsOf = typeof p.reported_progress_as_of === 'string' ? p.reported_progress_as_of : null;
+                const reportedSource = typeof p.reported_progress_source_url === 'string' ? p.reported_progress_source_url : null;
+                const reportedQuote = typeof p.reported_progress_quote === 'string' ? p.reported_progress_quote : null;
+                const value = fromProject ?? reportedValue;
                 return (
                   <div className="pt-3 border-t border-primary-foreground/10">
                     <div className="flex justify-between text-xs mb-1.5">
-                      <span className="text-primary-foreground/70">Progress{tag ? <span className="ml-1 opacity-60 italic">· {tag}</span> : null}</span>
-                      <span className="font-mono font-semibold">{value}%</span>
+                      <span className="text-primary-foreground/70">Progress</span>
+                      {value != null ? (
+                        <span className="font-mono font-semibold">{value}%</span>
+                      ) : (
+                        <span className="text-[10px] text-primary-foreground/60 italic">Not yet reported</span>
+                      )}
                     </div>
                     <div className="h-2 bg-primary-foreground/10 rounded-full overflow-hidden">
-                      <div className="h-full bg-accent" style={{ width: `${Math.min(100, value)}%` }} />
+                      {value != null && (
+                        <div className="h-full bg-accent" style={{ width: `${Math.min(100, value)}%` }} />
+                      )}
                     </div>
+                    {value != null && reportedValue != null && fromProject == null && (
+                      <p className="text-[10px] text-primary-foreground/70 font-mono mt-2 leading-snug" title={reportedQuote ?? ''}>
+                        as of {reportedAsOf ?? '—'}
+                        {reportedSource && (
+                          <> · <a href={reportedSource} target="_blank" rel="noreferrer" className="underline hover:text-accent">source</a></>
+                        )}
+                      </p>
+                    )}
+                    {value == null && (
+                      <p className="text-[10px] text-primary-foreground/60 mt-2 leading-snug">
+                        No overall completion figure cited in the public record yet. Trace History pulls a fresh corpus.
+                      </p>
+                    )}
                   </div>
                 );
               })()}
