@@ -2,6 +2,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { NATIONAL_PRIDE_PROJECTS, matchNationalPride } from "../_shared/national_pride.ts";
+import { sendAlert } from "../_shared/notify.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -275,7 +276,17 @@ serve(async (req) => {
     } else if (geoMode) {
       const targetSectors = (sectorsParam && sectorsParam.length > 0) ? sectorsParam : SECTORS;
       for (const sec of targetSectors) {
-        const parts = ["Nepal infrastructure", sec, municipality, district, province].filter(Boolean);
+        // Soft-infrastructure sectors (Health, Education) usually surface
+        // *programs/campaigns* (vaccination drives, disease surveillance,
+        // teacher-training initiatives) rather than hardware. Hardcoding
+        // "Nepal infrastructure {sector}" steered Tavily toward construction
+        // stories and missed the program write-ups entirely — e.g. Madhesh /
+        // Rautahat / Health returned 0/5 even though CGPP, WHO MDA, and EMS
+        // campaigns are active in that district. Dropping "infrastructure" and
+        // appending "project OR program" lets the sector keyword carry the
+        // topic for both hard and soft sectors. Tavily's advanced search
+        // still handles "Nepal Transport project" correctly for roads/bridges.
+        const parts = ["Nepal", sec, "project OR program", municipality, district, province].filter(Boolean);
         searches.push({ query: parts.join(" "), sector: sec });
       }
     } else {
@@ -287,7 +298,15 @@ serve(async (req) => {
     let inserted = 0;
     let skipped = 0;
 
-    const sysPrompt = `You extract a single Nepal infrastructure project record from a news article and write a thorough public-facing entry.
+    const sysPrompt = `You extract a single Nepal public-sector project record from a news article and write a thorough public-facing entry.
+
+A "project" includes both physical infrastructure (roads, bridges, hydropower, hospitals, schools, irrigation works) AND named public-service programs / campaigns / initiatives with concrete scope and a reportable identity. Examples of qualifying soft-infrastructure entries:
+  - "Core Group Partners Project (CGPP)" — public-health program in Madhesh with named implementing partner
+  - "Mass Drug Administration (MDA) campaign for lymphatic filariasis" — government-run campaign with target districts and coverage goals
+  - "Epidemiological Monitoring Survey (EMS)" — multi-district surveillance program
+  - "School Sector Development Plan" — education program with budget and target population
+Reject only items that are (a) not about Nepal, (b) generic news/opinion with no named project/program, or (c) one-off events without sustained scope (single workshop, one-day rally, single press release).
+
 Return ONLY a JSON object (no prose, no markdown, no code fence) matching this schema:
 {
   "title": string,                                    // <= 200 chars, the project's actual name
@@ -322,7 +341,7 @@ CONFIDENCE RUBRIC — required, 0.00-1.00:
 - 0.60-0.79: article mentions the project by name but key fields (location/budget) are inferred or vague.
 - 0.40-0.59: project is mentioned in passing; significant fields guessed.
 - Below 0.40: skip — return "null" instead of emitting a low-confidence record.
-If the article is NOT about a specific infrastructure project in Nepal, return the literal string "null".
+If the article is NOT about a specific Nepal project/program (per the qualifying-entries rules above), return the literal string "null".
 
 DESCRIPTION RULES — this is an identity field, NOT a status report:
 - Write 3-5 paragraphs (~250-500 words total) describing what the project IS, not what's currently happening with it.
@@ -390,6 +409,12 @@ Other rules:
           : tavResult.lastStatus === 429 ? "rate-limit"
           : `HTTP ${tavResult.lastStatus}`;
         errors.push(`All ${tavilyKeys.length} Tavily key(s) exhausted (${reason}) at sector "${search.sector ?? "topic"}"`);
+        // Operator alert (non-blocking). Cooldown in notify.ts prevents spam.
+        sendAlert(admin, "tavily_exhausted",
+          `Tavily API keys exhausted (${reason})`,
+          `Reason: ${reason}\nSector: ${search.sector ?? "topic"}\nKeys tried: ${tavilyKeys.length}`,
+          { details: { reason, sector: search.sector, keysCount: tavilyKeys.length } }
+        ).catch((e) => console.warn("sendAlert tavily_exhausted failed:", e));
         break outer;
       }
       const { response: tav, keyIndex } = tavResult;
@@ -428,7 +453,15 @@ Other rules:
           ]);
           if (!ai.ok) {
             errors.push(`AI ${ai.status}: ${ai.error}`);
-            if (ai.status === 429 || ai.status === 402) break outer;
+            if (ai.status === 429 || ai.status === 402) {
+              // Mistral / fallback providers all exhausted. Alert + bail.
+              sendAlert(admin, "mistral_exhausted",
+                `AI provider keys exhausted (HTTP ${ai.status})`,
+                `Status: ${ai.status}\nDetail: ${ai.error}\nSector: ${search.sector ?? "topic"}`,
+                { details: { status: ai.status, detail: ai.error, sector: search.sector } }
+              ).catch((e) => console.warn("sendAlert mistral_exhausted failed:", e));
+              break outer;
+            }
             continue;
           }
           const raw = stripFences(ai.text);

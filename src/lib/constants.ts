@@ -84,3 +84,19 @@ export const STATUS_COLORS: Record<string, string> = {
   completed: 'bg-success/15 text-success',
   cancelled: 'bg-muted text-muted-foreground',
 };
+
+// Overlay-friendly variants for badges that sit on cover photos. The default
+// STATUS_COLORS use /15 alpha tints which disappear against bright photos
+// (Thori Tourist Area, Madhesh Digital Education cards both showed near-
+// invisible "approved"/"in progress" pills). These use solid /90 fills with
+// white-ish text + a backdrop-blur + ring so the pill reads cleanly against
+// any background. ProjectCard uses these; admin badges and the detail-page
+// hero keep the tinted variants because their backdrops are already dark.
+export const STATUS_COLORS_OVERLAY: Record<string, string> = {
+  proposed:    'bg-foreground/80 text-background backdrop-blur-sm shadow-md ring-1 ring-black/10',
+  approved:    'bg-info/95 text-white backdrop-blur-sm shadow-md ring-1 ring-black/10',
+  in_progress: 'bg-warning/95 text-warning-foreground backdrop-blur-sm shadow-md ring-1 ring-black/10',
+  delayed:     'bg-destructive/95 text-white backdrop-blur-sm shadow-md ring-1 ring-black/10',
+  completed:   'bg-success/95 text-white backdrop-blur-sm shadow-md ring-1 ring-black/10',
+  cancelled:   'bg-foreground/80 text-background backdrop-blur-sm shadow-md ring-1 ring-black/10',
+};

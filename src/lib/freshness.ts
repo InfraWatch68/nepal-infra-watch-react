@@ -47,3 +47,13 @@ export const FRESHNESS_CLASSES: Record<FreshnessColor, string> = {
   amber: 'bg-warning/10 text-warning border-warning/30',
   gray:  'bg-muted text-muted-foreground border-muted-foreground/20',
 };
+
+// Overlay variants used when the badge sits on a cover photo. The /10
+// tinted defaults wash out against bright images ("Updated today" was barely
+// readable on the Thori Tourist Area card). These use solid /95 fills with
+// white text + shadow + ring so the pill stays legible on any backdrop.
+export const FRESHNESS_CLASSES_OVERLAY: Record<FreshnessColor, string> = {
+  green: 'bg-success/95 text-white backdrop-blur-sm shadow-md ring-1 ring-black/10',
+  amber: 'bg-warning/95 text-warning-foreground backdrop-blur-sm shadow-md ring-1 ring-black/10',
+  gray:  'bg-foreground/75 text-background backdrop-blur-sm shadow-md ring-1 ring-black/10',
+};

@@ -666,9 +666,6 @@ function ProjectList({ projects, onReview, onFetchNews, onGenerateBrief, onPushN
                 </div>
               </div>
               <div className="flex gap-2 shrink-0 flex-wrap justify-end">
-                <Button size="sm" variant="outline" asChild>
-                  <Link to={`/projects/${p.slug}`} target="_blank" rel="noreferrer">View</Link>
-                </Button>
                 <VerifyDialog projectId={p.id} projectTitle={p.title} />
                 {scheduled && canPushNow && (
                   <Button size="sm" variant="default" onClick={() => onPushNow('projects', p.id)}>Push now</Button>

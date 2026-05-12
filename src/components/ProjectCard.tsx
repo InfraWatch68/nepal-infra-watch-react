@@ -2,9 +2,9 @@ import { Link } from 'react-router-dom';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { MapPin, Calendar, Wallet, Star, Pencil } from 'lucide-react';
-import { STATUS_COLORS, STATUS_LABELS } from '@/lib/constants';
+import { STATUS_COLORS_OVERLAY, STATUS_LABELS } from '@/lib/constants';
 import { formatNPR } from '@/lib/parseCoords';
-import { freshnessLabel, FRESHNESS_CLASSES } from '@/lib/freshness';
+import { freshnessLabel, FRESHNESS_CLASSES_OVERLAY } from '@/lib/freshness';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/hooks/useAuth';
 
@@ -33,17 +33,17 @@ export function ProjectCard({ p }: { p: any }) {
             </div>
           )}
           <div className="absolute top-3 left-3 flex gap-1.5 flex-wrap">
-            <Badge className={cn("text-[10px] uppercase tracking-wider font-mono", STATUS_COLORS[p.status])}>
+            <Badge className={cn("text-[10px] uppercase tracking-wider font-mono border-0", STATUS_COLORS_OVERLAY[p.status])}>
               {STATUS_LABELS[p.status]}
             </Badge>
             {p.is_rastra_gaurav && (
-              <Badge className="text-[10px] uppercase tracking-wider font-mono bg-accent text-accent-foreground gap-1">
+              <Badge className="text-[10px] uppercase tracking-wider font-mono bg-accent text-accent-foreground gap-1 shadow-md ring-1 ring-black/10 border-0">
                 <Star className="h-3 w-3 fill-current" /> Rastra Gaurav
               </Badge>
             )}
           </div>
           <div className="absolute bottom-2 left-3">
-            <Badge variant="outline" className={cn('text-[10px] font-mono', FRESHNESS_CLASSES[freshness.color])}>
+            <Badge className={cn('text-[10px] font-mono border-0', FRESHNESS_CLASSES_OVERLAY[freshness.color])}>
               {freshness.text}
             </Badge>
           </div>

@@ -107,6 +107,7 @@ export function SherlockManager() {
 // ─── Queue ────────────────────────────────────────────────────────────────────
 
 function QueueTab() {
+  const { user } = useAuth();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [clearing, setClearing] = useState(false);
   // Bulk selection. Same pattern as the moderation lists elsewhere — the bar
@@ -114,6 +115,7 @@ function QueueTab() {
   // checkbox is ticked.
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [rerunBusy, setRerunBusy] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     const { data } = await supabase
@@ -179,6 +181,51 @@ function QueueTab() {
     setBulkBusy(false);
     if (error) return toast.error(error.message);
     toast.success(`Deleted ${sel.size} job${sel.size === 1 ? '' : 's'}`);
+    setSel(new Set());
+    refresh();
+  };
+
+  // Rerun a single finished-with-error / failed / cancelled job. We insert a
+  // FRESH row with the same kind + params rather than updating in place —
+  // keeps the failed attempt as history (for the live-tick retry-cap counter
+  // and audit) and lets the drainer pick up the new row normally. Priority
+  // bumped to 1 so reruns drain ahead of fresh sweep_child cells.
+  const rerunOne = async (j: Job) => {
+    setRerunBusy(j.id);
+    const { error } = await supabase.from('sherlock_jobs').insert({
+      kind: j.kind,
+      params: j.params,
+      priority: 1,
+      enqueued_by: user?.id ?? null,
+    });
+    setRerunBusy(null);
+    if (error) return toast.error(error.message);
+    toast.success('Job re-queued');
+    refresh();
+  };
+
+  // Bulk rerun — re-queue every selected job that finished with an error or
+  // was cancelled. Silently ignores rows still in flight or done-without-error.
+  const bulkRerun = async () => {
+    if (sel.size === 0) return;
+    const candidates = jobs.filter(j =>
+      sel.has(j.id) && (j.status === 'failed' || j.status === 'cancelled' || (j.status === 'done' && !!j.error_text))
+    );
+    if (candidates.length === 0) {
+      return toast.message('Nothing rerunnable in the selection — pick failed, cancelled, or errored jobs.');
+    }
+    if (!confirm(`Re-queue ${candidates.length} job${candidates.length === 1 ? '' : 's'}? Original rows are kept as history; fresh rows are enqueued at priority 1.`)) return;
+    setBulkBusy(true);
+    const rows = candidates.map(j => ({
+      kind: j.kind,
+      params: j.params,
+      priority: 1,
+      enqueued_by: user?.id ?? null,
+    }));
+    const { error } = await supabase.from('sherlock_jobs').insert(rows);
+    setBulkBusy(false);
+    if (error) return toast.error(error.message);
+    toast.success(`Re-queued ${candidates.length} job${candidates.length === 1 ? '' : 's'}`);
     setSel(new Set());
     refresh();
   };
@@ -257,6 +304,9 @@ function QueueTab() {
             <span>{sel.size} of {jobs.length} selected</span>
           </label>
           <div className="flex items-center gap-1">
+            <Button size="sm" variant="ghost" className="h-7 text-xs text-accent hover:bg-accent/10" onClick={bulkRerun} disabled={bulkBusy}>
+              <Play className="h-3.5 w-3.5 mr-1" /> Rerun
+            </Button>
             <Button size="sm" variant="ghost" className="h-7 text-xs text-warning hover:bg-warning/10" onClick={bulkCancel} disabled={bulkBusy}>
               <X className="h-3.5 w-3.5 mr-1" /> Cancel
             </Button>
@@ -290,6 +340,19 @@ function QueueTab() {
                 {(j.status === 'queued' || j.status === 'running') && (
                   <Button size="sm" variant="ghost" className="h-6 px-2 text-[10px] text-destructive hover:bg-destructive/10" onClick={() => cancelJob(j)}>
                     <X className="h-3 w-3 mr-0.5" /> Cancel
+                  </Button>
+                )}
+                {(j.status === 'failed' || j.status === 'cancelled' || (j.status === 'done' && !!j.error_text)) && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-6 px-2 text-[10px] text-accent hover:bg-accent/10"
+                    onClick={() => rerunOne(j)}
+                    disabled={rerunBusy === j.id}
+                    title="Insert a fresh copy of this job. The original row is kept as history."
+                  >
+                    {rerunBusy === j.id ? <Loader2 className="h-3 w-3 mr-0.5 animate-spin" /> : <Play className="h-3 w-3 mr-0.5" />}
+                    Rerun
                   </Button>
                 )}
               </div>
@@ -962,6 +1025,19 @@ function LiveDiscoveryCard({ userId }: { userId: string | null }) {
     setBusy(false);
     if (error) return toast.error(error.message);
     setDraftStartFresh(false);
+    // Fire-and-forget operator email so the team sees a Go Live event landed
+    // even if they're not looking at the dashboard. Resend cooldown in
+    // send-alert keeps repeated toggles within a few minutes quiet.
+    supabase.functions.invoke('send-alert', {
+      body: {
+        kind: 'go_live_on',
+        note: draftNationalPride
+          ? 'National Pride mode'
+          : resuming
+            ? `Resumed from ${state?.last_province ?? '—'}${state?.last_district ? ' / ' + state.last_district : ''} / ${state?.last_sector ?? '—'}`
+            : 'Fresh start',
+      },
+    }).catch(() => { /* email is best-effort */ });
     if (draftNationalPride) {
       toast.success('Live discovery started in National Pride mode — Sherlock will rotate through the 24 Rastra Gaurab projects.');
     } else if (resuming) {
@@ -982,6 +1058,9 @@ function LiveDiscoveryCard({ userId }: { userId: string | null }) {
     }).eq('id', 1);
     setBusy(false);
     if (error) return toast.error(error.message);
+    supabase.functions.invoke('send-alert', {
+      body: { kind: 'go_live_off', reason: 'operator stop' },
+    }).catch(() => { /* email is best-effort */ });
     toast.success('Live discovery stopped.');
     refresh();
   };
