@@ -1,7 +1,7 @@
 // After any schema migration, regenerate types with:
 //   npx supabase gen types typescript --project-id vlioybqqswbohdhpnjym > src/integrations/supabase/types.ts
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, Navigate } from 'react-router-dom';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/hooks/useAuth';
@@ -118,6 +118,13 @@ export default function Admin() {
   const [globalSector, setGlobalSector] = useState<string>('');
   const [busyGlobal, setBusyGlobal] = useState<string | null>(null);
   const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number; current?: string } | null>(null);
+  // Status filter for the All-projects tab. Null = show everything.
+  // Set by clicking one of the colored status circles above the list.
+  const [allStatusFilter, setAllStatusFilter] = useState<string | null>(null);
+  // Count of approved projects whose last comprehensive analysis is missing
+  // or older than 30 days — surfaces next to the "Refresh stale" button so
+  // the admin knows the size of the backlog before clicking.
+  const [staleCount, setStaleCount] = useState<number | null>(null);
 
   const refresh = async () => {
     const { data } = await supabase.from('projects').select('*').order('created_at', { ascending: false });
@@ -166,6 +173,20 @@ export default function Admin() {
   };
 
   useEffect(() => { if (user && isReviewer) refresh(); /* eslint-disable-next-line */ }, [user, isReviewer, isAdmin, isCoadmin]);
+
+  // Same cutoff as runBulkComprehensive — head:true skips body, count:'exact'
+  // returns the full match count regardless of the page-size cap that the
+  // bulk runner uses (10). Re-run on mount + after each bulk run.
+  const loadStaleCount = async () => {
+    const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const { count } = await supabase
+      .from('projects')
+      .select('*', { count: 'exact', head: true })
+      .eq('approval_status', 'approved')
+      .or(`last_comprehensive_analysis_at.is.null,last_comprehensive_analysis_at.lt.${cutoff}`);
+    setStaleCount(count ?? 0);
+  };
+  useEffect(() => { if (user && isReviewer) loadStaleCount(); /* eslint-disable-next-line */ }, [user, isReviewer]);
 
   if (loading) return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
   if (!user) return <Navigate to="/auth" replace />;
@@ -360,6 +381,7 @@ export default function Admin() {
     toast.success(`Comprehensive analysis: ${okCount}/${stale.length} succeeded${errs.length ? `, ${errs.length} errors` : ''}`);
     if (errs.length) console.warn('Bulk comprehensive errors:', errs);
     refresh();
+    loadStaleCount();
   };
 
   return (
@@ -445,6 +467,20 @@ export default function Admin() {
                   ? `Enqueueing ${bulkProgress.done + 1} / ${bulkProgress.total}${bulkProgress.current ? ` — ${bulkProgress.current.slice(0, 40)}…` : ''}`
                   : 'Refresh stale approved projects'}
               </Button>
+              {staleCount != null && !bulkProgress && (
+                <Badge
+                  variant="outline"
+                  className={cn(
+                    'font-mono text-xs',
+                    staleCount > 0 ? 'border-warning/40 text-warning' : 'border-success/40 text-success',
+                  )}
+                  title={staleCount === 0
+                    ? 'All approved projects analysed within the last 30 days.'
+                    : `${staleCount} approved project${staleCount === 1 ? ' has' : 's have'} no analysis or one older than 30 days. The bulk run handles up to 10 per click.`}
+                >
+                  {staleCount} stale
+                </Badge>
+              )}
             </div>
           </div>
         </Card>
@@ -474,8 +510,9 @@ export default function Admin() {
             />
           </TabsContent>
           <TabsContent value="all" className="mt-4">
+            <StatusFilterRow projects={projects} active={allStatusFilter} onChange={setAllStatusFilter} />
             <ProjectList
-              projects={projects}
+              projects={allStatusFilter ? projects.filter((p: any) => p.approval_status === allStatusFilter) : projects}
               onReview={review}
               onFetchNews={fetchNews}
               onGenerateBrief={generateBrief}
@@ -511,6 +548,66 @@ export default function Admin() {
         </Tabs>
       </div>
       <SiteFooter />
+    </div>
+  );
+}
+
+// Colored-circle filter strip for the All-projects tab. Each pill shows a dot
+// in the status color (matches APPROVAL_DOT) + the count for that status.
+// Clicking a pill narrows the list to that status; clicking it again clears.
+// 🟢 approved · 🔵 reviewed (= changes_requested) · 🟠 pending · 🔴 rejected
+function StatusFilterRow({
+  projects, active, onChange,
+}: {
+  projects: any[];
+  active: string | null;
+  onChange: (next: string | null) => void;
+}) {
+  const counts = useMemo(() => {
+    const out = { approved: 0, changes_requested: 0, pending: 0, rejected: 0 } as Record<string, number>;
+    for (const p of projects) if (p?.approval_status in out) out[p.approval_status] += 1;
+    return out;
+  }, [projects]);
+  const items: { key: string; label: string; dot: string }[] = [
+    { key: 'approved',          label: 'Approved', dot: 'bg-success' },
+    { key: 'changes_requested', label: 'Reviewed', dot: 'bg-info' },
+    { key: 'pending',           label: 'Pending',  dot: 'bg-warning' },
+    { key: 'rejected',          label: 'Rejected', dot: 'bg-destructive' },
+  ];
+  return (
+    <div className="flex items-center gap-1.5 mb-3 flex-wrap">
+      <span className="text-[10px] uppercase tracking-wider font-mono text-muted-foreground mr-1">Filter</span>
+      {items.map(it => {
+        const isActive = active === it.key;
+        return (
+          <button
+            key={it.key}
+            type="button"
+            onClick={() => onChange(isActive ? null : it.key)}
+            aria-pressed={isActive}
+            title={`Show only ${it.label.toLowerCase()} (${counts[it.key]})`}
+            className={cn(
+              'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs transition-colors',
+              isActive
+                ? 'border-foreground bg-foreground/5 text-foreground shadow-sm'
+                : 'border-border text-muted-foreground hover:bg-muted hover:text-foreground',
+            )}
+          >
+            <span className={cn('h-2.5 w-2.5 rounded-full shrink-0 ring-1 ring-background', it.dot)} />
+            <span>{it.label}</span>
+            <span className="font-mono text-[10px] opacity-70">{counts[it.key]}</span>
+          </button>
+        );
+      })}
+      {active && (
+        <button
+          type="button"
+          onClick={() => onChange(null)}
+          className="text-xs text-muted-foreground hover:text-foreground underline ml-1"
+        >
+          Clear
+        </button>
+      )}
     </div>
   );
 }
@@ -597,6 +694,225 @@ function ProjectList({ projects, onReview, onFetchNews, onGenerateBrief, onPushN
       </div>
     </Card>
   );
+}
+
+// Inline pending-details reviewer. Lists pending rows across the 10 child
+// tables for a single project so an admin can approve/reject them without
+// leaving the All-projects Review dialog. Approved projects routinely have
+// pending child rows because later Sherlock / comprehensive-analysis runs
+// keep inserting rows as `pending` even after the parent is published.
+//
+// Columns hit (label, primary text field used for the row preview):
+//   project_funding      → source_name
+//   project_documents    → title
+//   project_stakeholders → org_name
+//   project_risks        → title
+//   project_impact       → metric_type
+//   project_procurement  → tender_title
+//   project_compliance   → item_type
+//   project_milestones   → title
+//   project_updates      → title
+//   project_sources      → title
+const DETAIL_REVIEW_TABLES: { table: string; label: string; titleField: string }[] = [
+  { table: 'project_funding',      label: 'Funding',      titleField: 'source_name'  },
+  { table: 'project_documents',    label: 'Documents',    titleField: 'title'        },
+  { table: 'project_stakeholders', label: 'Stakeholders', titleField: 'org_name'     },
+  { table: 'project_risks',        label: 'Risks',        titleField: 'title'        },
+  { table: 'project_impact',       label: 'Impact',       titleField: 'metric_type'  },
+  { table: 'project_procurement',  label: 'Procurement',  titleField: 'tender_title' },
+  { table: 'project_compliance',   label: 'Compliance',   titleField: 'item_type'    },
+  { table: 'project_milestones',   label: 'Milestones',   titleField: 'title'        },
+  { table: 'project_updates',      label: 'Updates',      titleField: 'title'        },
+  { table: 'project_sources',      label: 'Sources',      titleField: 'title'        },
+];
+
+function PendingDetailsReview({ projectId }: { projectId: string | number }) {
+  const { user, isAdmin, isCoadmin } = useAuth();
+  const isInstantPublisher = isAdmin || isCoadmin;
+  const [rowsByTable, setRowsByTable] = useState<Record<string, any[]>>({});
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [bulkBusy, setBulkBusy] = useState<string | null>(null);
+
+  const load = async () => {
+    setLoading(true);
+    const results = await Promise.all(DETAIL_REVIEW_TABLES.map(t =>
+      supabase.from(t.table as any)
+        .select('*')
+        .eq('project_id', projectId)
+        .in('approval_status', ['pending', 'changes_requested'])
+        .order('created_at', { ascending: false })
+        .limit(50)
+    ));
+    const out: Record<string, any[]> = {};
+    DETAIL_REVIEW_TABLES.forEach((t, i) => { out[t.table] = (results[i] as any).data ?? []; });
+    setRowsByTable(out);
+    setLoading(false);
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [projectId]);
+
+  const totalPending = Object.values(rowsByTable).reduce((sum, r) => sum + r.length, 0);
+
+  const reviewOne = async (table: string, id: string | number, approval: 'approved' | 'rejected') => {
+    setBusy(`${table}:${id}`);
+    const published_at = approval === 'approved'
+      ? (isInstantPublisher ? new Date().toISOString() : new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString())
+      : null;
+    const { error } = await supabase.from(table as any).update({
+      approval_status: approval,
+      reviewed_by: user?.id ?? null,
+      published_at,
+    }).eq('id', id);
+    if (!error) {
+      const role = isAdmin ? 'admin' : isCoadmin ? 'coadmin' : 'reviewer';
+      await supabase.from('project_reviews').insert({
+        target_table: table, target_id: String(id),
+        reviewer_id: user?.id ?? null, reviewer_role: role,
+        action: approval, was_admin: isInstantPublisher,
+      });
+    }
+    setBusy(null);
+    if (error) return toast.error(`${table}: ${error.message}`);
+    toast.success(approval === 'approved'
+      ? (isInstantPublisher ? 'Approved' : 'Approved — publish in 24h')
+      : 'Rejected');
+    load();
+  };
+
+  const reviewAllInTable = async (table: string, approval: 'approved' | 'rejected') => {
+    const rows = rowsByTable[table] ?? [];
+    if (rows.length === 0) return;
+    if (!confirm(`${approval === 'approved' ? 'Approve' : 'Reject'} all ${rows.length} pending ${table.replace('project_', '')} row(s) for this project?`)) return;
+    setBulkBusy(table);
+    const ids = rows.map(r => r.id);
+    const published_at = approval === 'approved'
+      ? (isInstantPublisher ? new Date().toISOString() : new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString())
+      : null;
+    const { error } = await supabase.from(table as any).update({
+      approval_status: approval,
+      reviewed_by: user?.id ?? null,
+      published_at,
+    }).in('id', ids);
+    if (!error) {
+      const role = isAdmin ? 'admin' : isCoadmin ? 'coadmin' : 'reviewer';
+      await supabase.from('project_reviews').insert(ids.map(id => ({
+        target_table: table, target_id: String(id),
+        reviewer_id: user?.id ?? null, reviewer_role: role,
+        action: approval, notes: `Bulk ${approval} from project review`, was_admin: isInstantPublisher,
+      })));
+    }
+    setBulkBusy(null);
+    if (error) return toast.error(`${table}: ${error.message}`);
+    toast.success(`${ids.length} row${ids.length === 1 ? '' : 's'} ${approval}`);
+    load();
+  };
+
+  return (
+    <div className="border rounded-md">
+      <div className="flex items-center justify-between p-3 border-b bg-muted/30">
+        <div className="text-sm font-semibold">
+          Pending detail rows
+          <span className="ml-2 text-xs font-mono text-muted-foreground">
+            {loading ? '…' : `${totalPending} pending across ${DETAIL_REVIEW_TABLES.length} tables`}
+          </span>
+        </div>
+        <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={load} disabled={loading}>
+          {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Refresh'}
+        </Button>
+      </div>
+      {loading ? (
+        <p className="text-xs text-muted-foreground italic p-4">Loading…</p>
+      ) : totalPending === 0 ? (
+        <p className="text-xs text-muted-foreground italic p-4">
+          No pending detail rows. Sherlock or comprehensive-analysis sweeps may queue more later.
+        </p>
+      ) : (
+        <div className="divide-y">
+          {DETAIL_REVIEW_TABLES.map(t => {
+            const rows = rowsByTable[t.table] ?? [];
+            if (rows.length === 0) return null;
+            return (
+              <div key={t.table} className="p-3 space-y-1.5">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-muted-foreground">
+                    {t.label} <span className="text-foreground">({rows.length})</span>
+                  </div>
+                  <div className="flex gap-1">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 px-2 text-[11px] text-success hover:bg-success/10"
+                      onClick={() => reviewAllInTable(t.table, 'approved')}
+                      disabled={bulkBusy === t.table}
+                      title={`Approve all ${rows.length} pending ${t.label.toLowerCase()} rows`}
+                    >
+                      {bulkBusy === t.table ? <Loader2 className="h-3 w-3 animate-spin" /> : <CheckIcon />} Approve all
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 px-2 text-[11px] text-destructive hover:bg-destructive/10"
+                      onClick={() => reviewAllInTable(t.table, 'rejected')}
+                      disabled={bulkBusy === t.table}
+                    >
+                      Reject all
+                    </Button>
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  {rows.map((r: any) => {
+                    const label = (r[t.titleField] ?? '').toString().trim() || `(untitled · id ${r.id})`;
+                    const key = `${t.table}:${r.id}`;
+                    return (
+                      <div key={key} className="flex items-center gap-2 text-xs py-1">
+                        <span className="truncate flex-1 min-w-0" title={label}>{label}</span>
+                        {typeof r.confidence_score === 'number' && (
+                          <Badge variant="outline" className="text-[10px] font-mono border-accent/40 text-accent shrink-0">
+                            {Math.round(r.confidence_score * 100)}%
+                          </Badge>
+                        )}
+                        <Badge
+                          variant="outline"
+                          className={cn('text-[10px] font-mono shrink-0',
+                            r.approval_status === 'changes_requested' ? 'border-info/40 text-info' : 'border-warning/40 text-warning')}
+                        >
+                          {r.approval_status === 'changes_requested' ? 'changes requested' : 'pending'}
+                        </Badge>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-6 px-2 text-[11px] text-success hover:bg-success/10"
+                          onClick={() => reviewOne(t.table, r.id, 'approved')}
+                          disabled={busy === key}
+                        >
+                          {busy === key ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Approve'}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-6 px-2 text-[11px] text-destructive hover:bg-destructive/10"
+                          onClick={() => reviewOne(t.table, r.id, 'rejected')}
+                          disabled={busy === key}
+                        >
+                          Reject
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Tiny inline check glyph — Lucide's Check is already imported elsewhere but
+// not in this file's import list; using a span keeps the diff narrow.
+function CheckIcon() {
+  return <span aria-hidden className="inline-block">✓</span>;
 }
 
 function ReviewDialog({ project, onReview }: any) {
@@ -717,6 +1033,13 @@ function ReviewDialog({ project, onReview }: any) {
           <Label>Reviewer notes</Label>
           <Textarea rows={2} value={notes} onChange={e => setNotes(e.target.value)} maxLength={1000} />
         </div>
+        {/* Pending child rows for this project. Surfaces here so admins can
+            review comprehensive details (funding, documents, stakeholders, …)
+            and milestones / updates / sources in the same flow that they
+            approve/reject the parent. Especially important for approved
+            projects where the parent has no pending state but child tables
+            keep filling with `pending` rows from later AI sweeps. */}
+        <PendingDetailsReview projectId={project.id} />
         <div className="flex gap-2 pt-2 flex-wrap">
           <Button className="bg-success hover:bg-success/90" onClick={() => { if (validate()) onReview(project.id, 'approved', notes, status, collectEdits()); }}>Approve</Button>
           <Button variant="outline" onClick={() => { if (validate()) onReview(project.id, 'changes_requested', notes, status, collectEdits()); }}>Request changes</Button>
@@ -1136,11 +1459,36 @@ function AutoApproveSettingsCard() {
       updated_at: new Date().toISOString(),
       updated_by: u.user?.id ?? null,
     }).eq('id', 1);
-    setBusy(false);
-    if (error) return toast.error(error.message);
+    if (error) { setBusy(false); return toast.error(error.message); }
     setEnabled(nextEnabled);
     setThreshold(nextThreshold);
     setUpdatedAt(new Date().toISOString());
+
+    // Retroactive sweep: when the toggle flips ON or the threshold changes
+    // while ON, re-evaluate every pending AI row against the new setting.
+    // The BEFORE INSERT/UPDATE triggers only catch newly-arriving rows; this
+    // RPC flushes the existing backlog so the moderator sees an immediate effect.
+    const shouldSweep = nextEnabled && (
+      !enabled ||
+      Number(nextThreshold.toFixed(2)) !== Number(threshold.toFixed(2))
+    );
+    if (shouldSweep) {
+      const { data: sweep, error: sweepErr } = await supabase.rpc('sweep_auto_approve_now');
+      if (sweepErr) {
+        setBusy(false);
+        toast.error(`Saved, but sweep failed: ${sweepErr.message}`);
+        return;
+      }
+      const counts = (sweep as any)?.counts ?? {};
+      const approved = Object.values(counts as Record<string, number>).reduce((a, b) => a + Number(b || 0), 0);
+      setBusy(false);
+      toast.success(approved > 0
+        ? `Auto-approve ON — approved ${approved} pending row${approved === 1 ? '' : 's'} at ≥ ${Math.round(nextThreshold * 100)}%.`
+        : `Auto-approve ON — AI rows ≥ ${Math.round(nextThreshold * 100)}% will publish automatically (no eligible backlog).`);
+      return;
+    }
+
+    setBusy(false);
     toast.success(nextEnabled ? `Auto-approve ON — AI rows ≥ ${Math.round(nextThreshold * 100)}% will publish automatically.` : 'Auto-approve OFF — all AI rows stay pending.');
   };
 

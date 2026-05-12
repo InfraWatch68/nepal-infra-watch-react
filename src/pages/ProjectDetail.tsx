@@ -307,7 +307,17 @@ export default function ProjectDetail() {
               </div>
               <h1 className="font-display text-4xl md:text-5xl font-bold leading-tight text-balance">{p.title}</h1>
               <div className="text-primary-foreground/70"><ReviewHistoryIcon targetTable="projects" targetId={p.id} /></div>
-              <p className="text-lg text-primary-foreground/80 leading-relaxed max-w-3xl">{p.description}</p>
+              {/* Banner blurb prefers projects.description, then falls back to
+                  the latest analysis run's narrative_summary so the hero isn't
+                  blank when an AI sweep has populated the detail tables but
+                  no human-curated description exists yet. line-clamp-6 keeps
+                  long narratives from pushing the hero card off-screen — the
+                  full text is still visible inside the AI Project Brief below. */}
+              {(p.description?.trim() || latestAnalysisRun?.narrative_summary?.trim()) && (
+                <p className="text-lg text-primary-foreground/80 leading-relaxed max-w-3xl whitespace-pre-wrap line-clamp-6">
+                  {p.description?.trim() || latestAnalysisRun.narrative_summary}
+                </p>
+              )}
             </div>
             <Card className="bg-primary-glow/40 backdrop-blur border-primary-foreground/10 text-primary-foreground p-5 space-y-3">
               {/* Each KV row prefers the project's own column when set, else
