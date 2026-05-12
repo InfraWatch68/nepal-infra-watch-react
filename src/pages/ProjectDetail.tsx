@@ -17,6 +17,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { exportProjectReport } from '@/lib/exportPdf';
 import { STATUS_COLORS, STATUS_LABELS } from '@/lib/constants';
 import { formatNPR } from '@/lib/parseCoords';
+import { freshnessLabel, FRESHNESS_CLASSES } from '@/lib/freshness';
 import { cn } from '@/lib/utils';
 import { ProjectMap } from '@/components/ProjectMap';
 import { ComprehensiveSections, SourceLink } from '@/components/ComprehensiveSections';
@@ -295,6 +296,14 @@ export default function ProjectDetail() {
                 <Badge className={cn("text-[10px] uppercase tracking-wider font-mono", STATUS_COLORS[p.status])}>{STATUS_LABELS[p.status]}</Badge>
                 <Badge variant="outline" className="border-primary-foreground/30 text-primary-foreground">{p.sector}</Badge>
                 {p.province && <Badge variant="outline" className="border-primary-foreground/30 text-primary-foreground">{p.province}</Badge>}
+                {(() => {
+                  const fr = freshnessLabel(p.last_activity_at);
+                  return (
+                    <Badge variant="outline" className={cn('text-[10px] font-mono', FRESHNESS_CLASSES[fr.color])}>
+                      {fr.text}
+                    </Badge>
+                  );
+                })()}
               </div>
               <h1 className="font-display text-4xl md:text-5xl font-bold leading-tight text-balance">{p.title}</h1>
               <div className="text-primary-foreground/70"><ReviewHistoryIcon targetTable="projects" targetId={p.id} /></div>

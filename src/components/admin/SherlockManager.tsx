@@ -893,6 +893,11 @@ function LiveDiscoveryCard({ userId }: { userId: string | null }) {
   const [draftDistricts, setDraftDistricts] = useState(false);
   const [draftNationalPride, setDraftNationalPride] = useState(false);
   const [draftMax, setDraftMax] = useState(3);
+  // When true, goLive nulls the cursor so the rotation restarts from the
+  // first (province × district × sector) cell. Default off so that hitting
+  // Go Live after an auto-stop (e.g. exhausted API keys) resumes from where
+  // the previous session ran out.
+  const [draftStartFresh, setDraftStartFresh] = useState(false);
   const [now, setNow] = useState(Date.now());
 
   const refresh = useCallback(async () => {
@@ -925,7 +930,16 @@ function LiveDiscoveryCard({ userId }: { userId: string | null }) {
 
   const goLive = async () => {
     setBusy(true);
-    const { error } = await supabase.from('sherlock_live_state').update({
+    // National Pride mode uses a different code path (no province/sector
+    // cursor), so switching into/out of it always implies a fresh start.
+    // Otherwise resume from the saved cursor unless the operator explicitly
+    // toggled "Start fresh" — letting them pick up after auto-stops caused
+    // by exhausted API keys without re-doing prior cells.
+    const npModeChanged = !!state?.national_pride !== draftNationalPride;
+    const resetCursor = draftStartFresh || draftNationalPride || npModeChanged;
+    const resuming = !resetCursor && (!!state?.last_province || !!state?.last_sector);
+
+    const update: Record<string, unknown> = {
       is_live: true,
       started_at: new Date().toISOString(),
       stopped_at: null,
@@ -933,20 +947,29 @@ function LiveDiscoveryCard({ userId }: { userId: string | null }) {
       include_districts: draftNationalPride ? false : draftDistricts,
       national_pride: draftNationalPride,
       per_query_max: draftMax,
-      enqueued_count: 0,
-      last_province: null,
-      last_district: null,
-      last_sector: null,
       // Clear any prior auto-stop reason so a fresh session starts with a
       // clean slate — only the next auto-stop event will repopulate it.
       last_stopped_reason: null,
       updated_at: new Date().toISOString(),
-    }).eq('id', 1);
+    };
+    if (resetCursor) {
+      update.enqueued_count = 0;
+      update.last_province = null;
+      update.last_district = null;
+      update.last_sector = null;
+    }
+    const { error } = await supabase.from('sherlock_live_state').update(update).eq('id', 1);
     setBusy(false);
     if (error) return toast.error(error.message);
-    toast.success(draftNationalPride
-      ? 'Live discovery started in National Pride mode — Sherlock will rotate through the 24 Rastra Gaurab projects.'
-      : 'Live discovery started. Sherlock will keep feeding the queue every minute.');
+    setDraftStartFresh(false);
+    if (draftNationalPride) {
+      toast.success('Live discovery started in National Pride mode — Sherlock will rotate through the 24 Rastra Gaurab projects.');
+    } else if (resuming) {
+      const cur = `${state?.last_province ?? '—'}${state?.last_district ? ' / ' + state.last_district : ''} / ${state?.last_sector ?? '—'}`;
+      toast.success(`Live discovery resumed from cursor at ${cur}.`);
+    } else {
+      toast.success('Live discovery started. Sherlock will keep feeding the queue every minute.');
+    }
     refresh();
   };
 
@@ -1011,6 +1034,21 @@ function LiveDiscoveryCard({ userId }: { userId: string | null }) {
         </div>
       )}
 
+      {(() => {
+        // Show the "will resume from cursor" hint when stopped, NP mode isn't
+        // about to be (re-)toggled, and the saved cursor is meaningful.
+        if (live || draftNationalPride || draftStartFresh) return null;
+        const npModeChanged = !!state?.national_pride !== draftNationalPride;
+        const hasCursor = !!state?.last_province || !!state?.last_sector;
+        if (npModeChanged || !hasCursor) return null;
+        const cur = `${state?.last_province ?? '—'}${state?.last_district ? ' / ' + state.last_district : ''} / ${state?.last_sector ?? '—'}`;
+        return (
+          <div className="mt-2.5 text-[11px] text-success bg-success/10 border border-success/30 rounded px-2 py-1.5 font-mono break-words">
+            ↻ Will resume from cursor at <span className="font-semibold">{cur}</span> · {state?.enqueued_count ?? 0} cells already processed this run
+          </div>
+        );
+      })()}
+
       {!live && (
         <div className="mt-2.5 pt-2.5 border-t border-dashed border-muted space-y-2">
           <div className="flex flex-wrap items-end gap-3">
@@ -1031,6 +1069,13 @@ function LiveDiscoveryCard({ userId }: { userId: string | null }) {
             <span className="font-semibold">National Pride mode</span>
             <span className="text-[10px] text-muted-foreground">— iterates the 24 Rastra Gaurab projects on each tick</span>
           </label>
+          {!draftNationalPride && (!!state?.last_province || !!state?.last_sector) && (
+            <label className="flex items-center gap-2 text-xs cursor-pointer">
+              <Switch checked={draftStartFresh} onCheckedChange={setDraftStartFresh} />
+              <span>Start fresh</span>
+              <span className="text-[10px] text-muted-foreground">— ignore saved cursor and restart from the first cell</span>
+            </label>
+          )}
           {!draftDistricts && !draftNationalPride && (
             <div className="text-[11px] text-warning bg-warning/10 border border-warning/30 rounded px-2 py-1.5">
               ⚠ Baseline mode (both toggles off). Queries are generic ("Nepal infrastructure {'{'}sector{'}'} {'{'}province{'}'}") and yield is low — most ticks return 0 new projects. Consider flipping <strong>District-comprehensive</strong> for deeper local coverage, or <strong>National Pride mode</strong> for higher per-token yield on the 24 flagship projects.

@@ -4,11 +4,13 @@ import { Badge } from '@/components/ui/badge';
 import { MapPin, Calendar, Wallet, Star, Pencil } from 'lucide-react';
 import { STATUS_COLORS, STATUS_LABELS } from '@/lib/constants';
 import { formatNPR } from '@/lib/parseCoords';
+import { freshnessLabel, FRESHNESS_CLASSES } from '@/lib/freshness';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/hooks/useAuth';
 
 export function ProjectCard({ p }: { p: any }) {
   const { isReviewer } = useAuth();
+  const freshness = freshnessLabel(p.last_activity_at);
   return (
     <Link to={`/projects/${p.slug}`} className="relative block">
       {isReviewer && (
@@ -39,6 +41,11 @@ export function ProjectCard({ p }: { p: any }) {
                 <Star className="h-3 w-3 fill-current" /> Rastra Gaurav
               </Badge>
             )}
+          </div>
+          <div className="absolute bottom-2 left-3">
+            <Badge variant="outline" className={cn('text-[10px] font-mono', FRESHNESS_CLASSES[freshness.color])}>
+              {freshness.text}
+            </Badge>
           </div>
           {typeof p.progress_percent === 'number' && (
             <div className="absolute bottom-0 left-0 right-0 h-1 bg-background/30">

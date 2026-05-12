@@ -26,6 +26,7 @@ import { SECTORS, PROVINCES, districtsFor } from '@/lib/constants';
 import { VerifyDialog } from '@/components/admin/VerifyDialog';
 import { SherlockManager } from '@/components/admin/SherlockManager';
 import { ProjectModerationTab } from '@/components/admin/ProjectModerationTab';
+import { ActivityDashboardTab } from '@/components/admin/ActivityDashboardTab';
 import { AdminRemovalPanel } from '@/components/admin/AdminRemovalPanel';
 import { ReviewHistoryIcon } from '@/components/ReviewHistoryIcon';
 
@@ -452,6 +453,7 @@ export default function Admin() {
           <TabsList>
             <TabsTrigger value="queue">Review queue ({projects.filter(p => p.approval_status === 'pending' || p.approval_status === 'changes_requested').length})</TabsTrigger>
             <TabsTrigger value="all">All projects</TabsTrigger>
+            <TabsTrigger value="activity">Activity</TabsTrigger>
             <TabsTrigger value="moderation">Moderation status</TabsTrigger>
             <TabsTrigger value="updates">Pending updates ({pendingUpdates.length})</TabsTrigger>
             <TabsTrigger value="sources">Pending sources ({pendingSources.length})</TabsTrigger>
@@ -482,6 +484,9 @@ export default function Admin() {
               busyRow={busyRow}
               refresh={refresh}
             />
+          </TabsContent>
+          <TabsContent value="activity" className="mt-4">
+            <ActivityDashboardTab />
           </TabsContent>
           <TabsContent value="moderation" className="mt-4">
             <ProjectModerationTab />
