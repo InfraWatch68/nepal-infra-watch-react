@@ -43,17 +43,22 @@ function parseTavilyKeys(): string[] {
   const single = Deno.env.get("TAVILY_API_KEY") ?? "";
   return single ? [single] : [];
 }
+// Rotate to next key on Tavily's quota/auth codes:
+//   429 rate limit, 432 plan limit, 433 paygo limit, 401 invalid key
+const TAVILY_ROTATE_CODES = new Set([401, 429, 432, 433]);
 async function tavily(keys: string[], payload: Record<string, unknown>) {
+  let lastStatus = 0;
   for (let i = 0; i < keys.length; i++) {
     const res = await fetch("https://api.tavily.com/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...payload, api_key: keys[i] }),
     });
-    if (res.status !== 429) return { res, keyIndex: i };
+    if (!TAVILY_ROTATE_CODES.has(res.status)) return { res, keyIndex: i };
+    lastStatus = res.status;
     await res.text();
   }
-  return { exhausted: true } as const;
+  return { exhausted: true, lastStatus } as const;
 }
 
 // ─── Chat (Mistral keys with rotation > Google > Lovable) ────────────────────
@@ -217,7 +222,12 @@ async function runBucket(admin: any, runId: string, keys: string[], b: BucketDef
   await patchBucketStatus(admin, runId, b.name, { state: "running", started_at: new Date().toISOString() });
   const r = await tavily(keys, b.payload);
   if ("exhausted" in r) {
-    await patchBucketStatus(admin, runId, b.name, { state: "failed", finished_at: new Date().toISOString(), error: "Tavily keys exhausted" });
+    const reason = r.lastStatus === 432 ? "plan-limit"
+      : r.lastStatus === 433 ? "paygo-limit"
+      : r.lastStatus === 401 ? "unauthorized"
+      : r.lastStatus === 429 ? "rate-limit"
+      : `HTTP ${r.lastStatus}`;
+    await patchBucketStatus(admin, runId, b.name, { state: "failed", finished_at: new Date().toISOString(), error: `Tavily keys exhausted (${reason})` });
     return { hits: [], images: [] };
   }
   if (!r.res.ok) {
@@ -827,6 +837,13 @@ async function insertAll(admin: any, projectId: number, parsed: any, hitDateMap:
         status: typeof m.status === "string" && MS_STATUSES.includes(m.status) ? m.status : "pending",
         order_index: idx++,
         sources: buildSourcesArray(m, hitDateMap),
+        // Moderation parity with sources/updates: AI-extracted milestones land
+        // pending with a confidence score; the cascade+confidence triggers
+        // auto-approve them when the parent project is approved or when the
+        // site-wide high-confidence toggle is on.
+        submitted_by_ai: true,
+        approval_status: "pending",
+        confidence_score: clampConfidence(m.confidence_score),
       });
     }
     inserted["project_milestones"] = 0;
@@ -868,6 +885,7 @@ async function insertAll(admin: any, projectId: number, parsed: any, hitDateMap:
         submitted_by_ai: true,
         approval_status: "pending",
         sources: buildSourcesArray(u, hitDateMap),
+        confidence_score: clampConfidence(u.confidence_score),
       });
       if (error) { errs.push(`project_updates: ${error.message}`); continue; }
       inserted["project_updates"] += 1;
@@ -899,6 +917,7 @@ async function insertAll(admin: any, projectId: number, parsed: any, hitDateMap:
         verified: false,
         submitted_by_ai: true,
         approval_status: "pending",
+        confidence_score: clampConfidence(a.confidence_score),
       });
       if (error) { errs.push(`project_sources: ${error.message}`); continue; }
       inserted["project_sources"] += 1;

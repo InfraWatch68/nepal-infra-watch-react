@@ -15,6 +15,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -24,6 +25,7 @@ import { cn } from '@/lib/utils';
 import { SECTORS, PROVINCES, districtsFor } from '@/lib/constants';
 import { VerifyDialog } from '@/components/admin/VerifyDialog';
 import { SherlockManager } from '@/components/admin/SherlockManager';
+import { ProjectModerationTab } from '@/components/admin/ProjectModerationTab';
 import { AdminRemovalPanel } from '@/components/admin/AdminRemovalPanel';
 import { ReviewHistoryIcon } from '@/components/ReviewHistoryIcon';
 
@@ -68,6 +70,38 @@ const AiBadge = ({ tag }: { tag?: string | null }) => (
     <Sparkles className="h-3 w-3 mr-1" /> {tag || 'AI'}
   </Badge>
 );
+
+// AI-rated confidence. Green ≥ auto-approve threshold (drove auto-publish),
+// amber 0.60-0.84 (held for moderation), red below 0.60 (low-trust extract).
+// Tooltip mirrors the rubric in the ai-discover-projects extraction prompt —
+// keep these strings in sync with that prompt's CONFIDENCE RUBRIC section.
+const confidenceReason = (score: number): string => {
+  if (score >= 0.95) return 'Project unambiguously named with budget, agency, dates and location all stated';
+  if (score >= 0.80) return 'Project named clearly with 3+ concrete fields (sector, location, agency, or budget)';
+  if (score >= 0.60) return 'Project named but key fields like location or budget are inferred or vague';
+  if (score >= 0.40) return 'Project mentioned in passing; significant fields guessed by the model';
+  return 'Very low confidence — model would normally skip records below 0.40';
+};
+
+const ConfidenceBadge = ({ score }: { score: number | null | undefined }) => {
+  if (score == null || !Number.isFinite(score)) return null;
+  const pct = Math.round(score * 100);
+  const tone = score >= 0.85 ? 'border-success text-success'
+    : score >= 0.60 ? 'border-warning text-warning'
+    : 'border-destructive text-destructive';
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Badge variant="outline" className={cn('text-[10px] uppercase tracking-wider font-mono cursor-help', tone)}>
+          {pct}%
+        </Badge>
+      </TooltipTrigger>
+      <TooltipContent side="top" className="max-w-xs text-xs leading-relaxed">
+        {confidenceReason(score)}
+      </TooltipContent>
+    </Tooltip>
+  );
+};
 
 export default function Admin() {
   const { user, isReviewer, isAdmin, isCoadmin, loading } = useAuth();
@@ -418,6 +452,7 @@ export default function Admin() {
           <TabsList>
             <TabsTrigger value="queue">Review queue ({projects.filter(p => p.approval_status === 'pending' || p.approval_status === 'changes_requested').length})</TabsTrigger>
             <TabsTrigger value="all">All projects</TabsTrigger>
+            <TabsTrigger value="moderation">Moderation status</TabsTrigger>
             <TabsTrigger value="updates">Pending updates ({pendingUpdates.length})</TabsTrigger>
             <TabsTrigger value="sources">Pending sources ({pendingSources.length})</TabsTrigger>
             {isAdmin && <TabsTrigger value="users"><UsersIcon className="h-4 w-4 mr-1" /> Users ({users.length})</TabsTrigger>}
@@ -447,6 +482,9 @@ export default function Admin() {
               busyRow={busyRow}
               refresh={refresh}
             />
+          </TabsContent>
+          <TabsContent value="moderation" className="mt-4">
+            <ProjectModerationTab />
           </TabsContent>
           <TabsContent value="updates" className="mt-4">
             <PendingUpdatesList items={pendingUpdates} onReview={reviewUpdate} refresh={refresh} />
@@ -517,6 +555,7 @@ function ProjectList({ projects, onReview, onFetchNews, onGenerateBrief, onPushN
                       </Badge>
                     )}
                     {p.submitted_by_ai && <AiBadge tag={p.ai_tag} />}
+                    {p.submitted_by_ai && <ConfidenceBadge score={p.confidence_score} />}
                     <span className="text-xs text-muted-foreground">{p.sector} · {p.province ?? '—'} · {new Date(p.created_at).toLocaleDateString()}</span>
                     <ReviewHistoryIcon targetTable="projects" targetId={p.id} />
                   </div>

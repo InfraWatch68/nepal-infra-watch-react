@@ -584,6 +584,10 @@ type LiveState = {
   last_district: string | null;
   last_sector: string | null;
   updated_at: string;
+  // Set by sherlock_live_feed_tick() when the auto-stop guard fires after a
+  // run of consecutive failed jobs. Null if the operator stopped manually or
+  // live mode has never auto-stopped on this row.
+  last_stopped_reason: string | null;
 };
 
 function SweepsTab() {
@@ -933,6 +937,9 @@ function LiveDiscoveryCard({ userId }: { userId: string | null }) {
       last_province: null,
       last_district: null,
       last_sector: null,
+      // Clear any prior auto-stop reason so a fresh session starts with a
+      // clean slate — only the next auto-stop event will repopulate it.
+      last_stopped_reason: null,
       updated_at: new Date().toISOString(),
     }).eq('id', 1);
     setBusy(false);
@@ -997,6 +1004,12 @@ function LiveDiscoveryCard({ userId }: { userId: string | null }) {
           </Button>
         )}
       </div>
+
+      {!live && state?.last_stopped_reason && (
+        <div className="mt-2.5 text-[11px] text-warning bg-warning/10 border border-warning/30 rounded px-2 py-1.5 font-mono break-words">
+          ⚠ {state.last_stopped_reason}
+        </div>
+      )}
 
       {!live && (
         <div className="mt-2.5 pt-2.5 border-t border-dashed border-muted space-y-2">

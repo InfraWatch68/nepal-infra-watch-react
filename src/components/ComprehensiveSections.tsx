@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/hooks/useAuth';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Sparkles, Loader2, ExternalLink, Wallet, FileText, Users, AlertTriangle, BarChart3, Gavel, ShieldCheck, Plus, Pencil, Trash2, Check, X, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Sparkles, Loader2, ExternalLink, Wallet, FileText, Users, AlertTriangle, BarChart3, Gavel, ShieldCheck, Plus, Pencil, Trash2, Check, X, ChevronDown } from 'lucide-react';
 import { Checkbox } from '@/components/ui/checkbox';
 import { formatNPR } from '@/lib/parseCoords';
 import { cn } from '@/lib/utils';
@@ -19,36 +19,11 @@ const DETAIL_TABLE_NAMES = [
 ] as const;
 type DetailTable = typeof DETAIL_TABLE_NAMES[number];
 
-// Each tab shows 5 rows at a time. Below the rows we render a small
-// "Showing 1-5 of 23 · ◀ 1 / 5 ▶" pager. Bulk selection still operates on
-// the full row list (the per-tab toolbar receives `rows`, not the page
-// slice) so a "Select all" on tab N selects every row across all pages.
-const PAGE_SIZE = 5;
-
-function useTabPager<T>(rows: T[]) {
-  const [page, setPage] = useState(1);
-  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
-  // If the row list shrinks (deletes, dedupe re-renders) and the cursor
-  // would land past the end, slide back to the last page automatically.
-  useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
-  const start = (page - 1) * PAGE_SIZE;
-  const paged = rows.slice(start, start + PAGE_SIZE);
-  const pagerEl = rows.length <= PAGE_SIZE ? null : (
-    <div className="flex items-center justify-between gap-2 pt-2 text-[11px] text-muted-foreground font-mono">
-      <span>Showing {start + 1}–{Math.min(start + PAGE_SIZE, rows.length)} of {rows.length}</span>
-      <div className="flex items-center gap-1.5">
-        <Button size="sm" variant="ghost" className="h-7 px-2" onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1} aria-label="Previous page">
-          <ChevronLeft className="h-3.5 w-3.5" />
-        </Button>
-        <span>page {page} / {totalPages}</span>
-        <Button size="sm" variant="ghost" className="h-7 px-2" onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages} aria-label="Next page">
-          <ChevronRight className="h-3.5 w-3.5" />
-        </Button>
-      </div>
-    </div>
-  );
-  return { paged, pagerEl };
-}
+// Per-tab scroll container className. Sherlock-queue style: every row is
+// rendered into a fixed-height area that scrolls. Replaces the previous
+// 5-per-page paginator so reviewers can sweep through a long list with
+// a flick rather than clicking through pages 1/2/3.
+const SHERLOCK_SCROLL_CLS = 'space-y-2 max-h-[480px] overflow-y-auto pr-1';
 
 type BucketState = { state?: 'queued'|'running'|'succeeded'|'failed'; hits?: number; error?: string };
 
@@ -232,14 +207,10 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
   // Run-in-flight cue: disable the button while a queued/running job exists.
   const runInFlight = !!activeJob;
 
-  // Pagers per tab — 5 rows visible, prev/next slide through the rest.
-  const fundingPager = useTabPager(funding);
-  const documentsPager = useTabPager(documents);
-  const stakeholdersPager = useTabPager(stakeholders);
-  const risksPager = useTabPager(risks);
-  const impactPager = useTabPager(impact);
-  const procurementPager = useTabPager(procurement);
-  const compliancePager = useTabPager(compliance);
+  // Tabs render the full row set inside a scrollable container (Sherlock-
+  // queue style) instead of paginating — see SHERLOCK_SCROLL_CLS below.
+  // Bulk selection still operates on the full row list passed to each
+  // TabBulkBar, so "Select all" covers everything regardless of scroll.
 
   // ─── Bulk selection helpers ────────────────────────────────────────────────
   const toggleSelected = (table: DetailTable, id: string) => {
@@ -334,65 +305,6 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
   };
 
 
-  // Bulk-approve pool: pending AI rows with confidence_score >= 0.85 across all
-  // 7 tables. Counted from already-loaded data so the badge updates instantly
-  // as the reviewer works.
-  const HIGH_CONF_THRESHOLD = 0.85;
-  const bucketsRefByTable: Array<[DetailTable, any[]]> = [
-    ['project_funding', funding],
-    ['project_documents', documents],
-    ['project_stakeholders', stakeholders],
-    ['project_risks', risks],
-    ['project_impact', impact],
-    ['project_procurement', procurement],
-    ['project_compliance', compliance],
-  ];
-  const highConfPending = useMemo(() => {
-    let n = 0;
-    for (const [, rows] of bucketsRefByTable) {
-      for (const r of rows) {
-        if (r.approval_status === 'pending'
-          && typeof r.confidence_score === 'number'
-          && r.confidence_score >= HIGH_CONF_THRESHOLD) n += 1;
-      }
-    }
-    return n;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [funding, documents, stakeholders, risks, impact, procurement, compliance]);
-
-  const bulkApproveHighConfidence = async () => {
-    if (highConfPending === 0) return;
-    if (!confirm(`Approve ${highConfPending} pending row${highConfPending === 1 ? '' : 's'} with AI confidence ≥ ${HIGH_CONF_THRESHOLD}? Lower-confidence rows stay pending for individual review.`)) return;
-    const { data: u } = await supabase.auth.getUser();
-    const userId = u.user?.id ?? null;
-    let approved = 0;
-    const errors: string[] = [];
-    for (const [table, rows] of bucketsRefByTable) {
-      const ids = rows
-        .filter(r => r.approval_status === 'pending'
-          && typeof r.confidence_score === 'number'
-          && r.confidence_score >= HIGH_CONF_THRESHOLD)
-        .map(r => r.id);
-      if (ids.length === 0) continue;
-      const { error: upErr } = await supabase.from(table as any).update({ approval_status: 'approved', reviewed_by: userId }).in('id', ids);
-      if (upErr) { errors.push(`${table}: ${upErr.message}`); continue; }
-      // One project_reviews entry per row so the audit trail matches the
-      // single-row Approve path.
-      const reviewRows = ids.map(id => ({
-        target_table: table, target_id: String(id),
-        reviewer_id: userId, reviewer_role: 'admin',
-        action: 'approved',
-        notes: `Bulk-approved (AI confidence ≥ ${HIGH_CONF_THRESHOLD})`,
-        was_admin: true,
-      }));
-      await supabase.from('project_reviews').insert(reviewRows);
-      approved += ids.length;
-    }
-    if (errors.length > 0) toast.error(`Approved ${approved}, with errors: ${errors.join('; ').slice(0, 200)}`);
-    else toast.success(`Approved ${approved} high-confidence row${approved === 1 ? '' : 's'}`);
-    loadAll();
-  };
-
   const counts = {
     funding: funding.length, documents: documents.length, stakeholders: stakeholders.length,
     risks: risks.length, impact: impact.length, procurement: procurement.length, compliance: compliance.length,
@@ -415,12 +327,6 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
         </div>
         {isReviewer && (
           <div className="flex items-center gap-2 flex-wrap justify-end">
-            {highConfPending > 0 && (
-              <Button size="sm" variant="outline" onClick={bulkApproveHighConfidence} title={`Approve all pending rows with AI confidence ≥ ${HIGH_CONF_THRESHOLD}`}>
-                <Check className="h-4 w-4" />
-                Approve {highConfPending} high-conf
-              </Button>
-            )}
             <Button size="sm" variant="outline" onClick={runAnalysis} disabled={busy || runInFlight}>
               {busy || runInFlight ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
               {runInFlight ? 'Analysis in flight…' : 'Run AI Analysis'}
@@ -458,7 +364,9 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
         <TabsContent value="funding" className="space-y-2 mt-4">
           {isReviewer && <TabBulkBar table="project_funding" rows={funding} selected={selected} onToggleAll={toggleAllInTable} onAction={handleTabAction} busy={bulkBusy} />}
           <ModToolbar bucket="funding" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
-          {funding.length === 0 ? <Empty msg="No funding records yet." /> : fundingPager.paged.map(f => (
+          {funding.length === 0 ? <Empty msg="No funding records yet." /> : (
+            <div className={SHERLOCK_SCROLL_CLS}>
+              {funding.map(f => (
             <Card key={f.id} className={cn("p-4", f.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
               <RowMetaBar bucket="funding" row={f} isReviewer={isReviewer} onModerate={moderateRow} table="project_funding" selected={selected.has(`project_funding:${f.id}`)} onToggleSelect={toggleSelected} />
               <div className="flex items-start justify-between gap-3 mb-1">
@@ -475,14 +383,17 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               <SourceLink url={f.source_url} sources={f.sources} />
               <ModRowControls bucket="funding" row={f} isReviewer={isReviewer} onSaved={loadAll} onDelete={() => deleteRow('funding', f.id)} />
             </Card>
-          ))}
-          {fundingPager.pagerEl}
+              ))}
+            </div>
+          )}
         </TabsContent>
 
         <TabsContent value="documents" className="space-y-2 mt-4">
           {isReviewer && <TabBulkBar table="project_documents" rows={documents} selected={selected} onToggleAll={toggleAllInTable} onAction={handleTabAction} busy={bulkBusy} />}
           <ModToolbar bucket="documents" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
-          {documents.length === 0 ? <Empty msg="No documents linked yet." /> : documentsPager.paged.map(d => (
+          {documents.length === 0 ? <Empty msg="No documents linked yet." /> : (
+            <div className={SHERLOCK_SCROLL_CLS}>
+              {documents.map(d => (
             <Card key={d.id} className={cn("p-4", d.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
               <RowMetaBar bucket="documents" row={d} isReviewer={isReviewer} onModerate={moderateRow} table="project_documents" selected={selected.has(`project_documents:${d.id}`)} onToggleSelect={toggleSelected} />
               <div className="flex items-start justify-between gap-3 mb-1">
@@ -499,14 +410,17 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               {d.notes && <p className="text-sm mt-2">{d.notes}</p>}
               <ModRowControls bucket="documents" row={d} isReviewer={isReviewer} onSaved={loadAll} onDelete={() => deleteRow('documents', d.id)} />
             </Card>
-          ))}
-          {documentsPager.pagerEl}
+              ))}
+            </div>
+          )}
         </TabsContent>
 
         <TabsContent value="stakeholders" className="space-y-2 mt-4">
           {isReviewer && <TabBulkBar table="project_stakeholders" rows={stakeholders} selected={selected} onToggleAll={toggleAllInTable} onAction={handleTabAction} busy={bulkBusy} />}
           <ModToolbar bucket="stakeholders" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
-          {stakeholders.length === 0 ? <Empty msg="No stakeholders recorded yet." /> : stakeholdersPager.paged.map(s => (
+          {stakeholders.length === 0 ? <Empty msg="No stakeholders recorded yet." /> : (
+            <div className={SHERLOCK_SCROLL_CLS}>
+              {stakeholders.map(s => (
             <Card key={s.id} className={cn("p-4", s.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
               <RowMetaBar bucket="stakeholders" row={s} isReviewer={isReviewer} onModerate={moderateRow} table="project_stakeholders" selected={selected.has(`project_stakeholders:${s.id}`)} onToggleSelect={toggleSelected} />
               <div className="flex items-start justify-between gap-3 mb-1">
@@ -524,14 +438,17 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               <SourceLink url={s.source_url} sources={s.sources} />
               <ModRowControls bucket="stakeholders" row={s} isReviewer={isReviewer} onSaved={loadAll} onDelete={() => deleteRow('stakeholders', s.id)} />
             </Card>
-          ))}
-          {stakeholdersPager.pagerEl}
+              ))}
+            </div>
+          )}
         </TabsContent>
 
         <TabsContent value="risks" className="space-y-2 mt-4">
           {isReviewer && <TabBulkBar table="project_risks" rows={risks} selected={selected} onToggleAll={toggleAllInTable} onAction={handleTabAction} busy={bulkBusy} />}
           <ModToolbar bucket="risks" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
-          {risks.length === 0 ? <Empty msg="No risks logged yet." /> : risksPager.paged.map(r => (
+          {risks.length === 0 ? <Empty msg="No risks logged yet." /> : (
+            <div className={SHERLOCK_SCROLL_CLS}>
+              {risks.map(r => (
             <Card key={r.id} className={cn("p-4 border-l-4",
               r.severity === 'critical' && 'border-l-destructive',
               r.severity === 'high' && 'border-l-destructive/70',
@@ -553,14 +470,17 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               <SourceLink url={r.source_url} sources={r.sources} />
               <ModRowControls bucket="risks" row={r} isReviewer={isReviewer} onSaved={loadAll} onDelete={() => deleteRow('risks', r.id)} />
             </Card>
-          ))}
-          {risksPager.pagerEl}
+              ))}
+            </div>
+          )}
         </TabsContent>
 
         <TabsContent value="impact" className="space-y-2 mt-4">
           {isReviewer && <TabBulkBar table="project_impact" rows={impact} selected={selected} onToggleAll={toggleAllInTable} onAction={handleTabAction} busy={bulkBusy} />}
           <ModToolbar bucket="impact" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
-          {impact.length === 0 ? <Empty msg="No impact metrics yet." /> : impactPager.paged.map(i => (
+          {impact.length === 0 ? <Empty msg="No impact metrics yet." /> : (
+            <div className={SHERLOCK_SCROLL_CLS}>
+              {impact.map(i => (
             <Card key={i.id} className={cn("p-4", i.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
               <RowMetaBar bucket="impact" row={i} isReviewer={isReviewer} onModerate={moderateRow} table="project_impact" selected={selected.has(`project_impact:${i.id}`)} onToggleSelect={toggleSelected} />
               <div className="flex items-start justify-between gap-3 mb-1">
@@ -577,14 +497,17 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               <SourceLink url={i.source_url} sources={i.sources} />
               <ModRowControls bucket="impact" row={i} isReviewer={isReviewer} onSaved={loadAll} onDelete={() => deleteRow('impact', i.id)} />
             </Card>
-          ))}
-          {impactPager.pagerEl}
+              ))}
+            </div>
+          )}
         </TabsContent>
 
         <TabsContent value="procurement" className="space-y-2 mt-4">
           {isReviewer && <TabBulkBar table="project_procurement" rows={procurement} selected={selected} onToggleAll={toggleAllInTable} onAction={handleTabAction} busy={bulkBusy} />}
           <ModToolbar bucket="procurement" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
-          {procurement.length === 0 ? <Empty msg="No procurement records yet." /> : procurementPager.paged.map(p => (
+          {procurement.length === 0 ? <Empty msg="No procurement records yet." /> : (
+            <div className={SHERLOCK_SCROLL_CLS}>
+              {procurement.map(p => (
             <Card key={p.id} className={cn("p-4", p.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
               <RowMetaBar bucket="procurement" row={p} isReviewer={isReviewer} onModerate={moderateRow} table="project_procurement" selected={selected.has(`project_procurement:${p.id}`)} onToggleSelect={toggleSelected} />
               <div className="flex items-start justify-between gap-3 mb-1">
@@ -608,14 +531,17 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               <SourceLink url={p.source_url} sources={p.sources} />
               <ModRowControls bucket="procurement" row={p} isReviewer={isReviewer} onSaved={loadAll} onDelete={() => deleteRow('procurement', p.id)} />
             </Card>
-          ))}
-          {procurementPager.pagerEl}
+              ))}
+            </div>
+          )}
         </TabsContent>
 
         <TabsContent value="compliance" className="space-y-2 mt-4">
           {isReviewer && <TabBulkBar table="project_compliance" rows={compliance} selected={selected} onToggleAll={toggleAllInTable} onAction={handleTabAction} busy={bulkBusy} />}
           <ModToolbar bucket="compliance" projectId={projectId} isReviewer={isReviewer} onSaved={loadAll} />
-          {compliance.length === 0 ? <Empty msg="No compliance items yet." /> : compliancePager.paged.map(c => (
+          {compliance.length === 0 ? <Empty msg="No compliance items yet." /> : (
+            <div className={SHERLOCK_SCROLL_CLS}>
+              {compliance.map(c => (
             <Card key={c.id} className={cn("p-4", c.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
               <RowMetaBar bucket="compliance" row={c} isReviewer={isReviewer} onModerate={moderateRow} table="project_compliance" selected={selected.has(`project_compliance:${c.id}`)} onToggleSelect={toggleSelected} />
               <div className="flex items-start justify-between gap-3 mb-1">
@@ -640,8 +566,9 @@ export function ComprehensiveSections({ projectId, projectTitle }: Props) {
               <SourceLink url={c.source_url} sources={c.sources} />
               <ModRowControls bucket="compliance" row={c} isReviewer={isReviewer} onSaved={loadAll} onDelete={() => deleteRow('compliance', c.id)} />
             </Card>
-          ))}
-          {compliancePager.pagerEl}
+              ))}
+            </div>
+          )}
         </TabsContent>
       </Tabs>
 

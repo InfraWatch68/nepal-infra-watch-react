@@ -22,17 +22,21 @@ function parseTavilyKeys(): string[] {
   const single = Deno.env.get("TAVILY_API_KEY") ?? "";
   return single ? [single] : [];
 }
+// Rotate on Tavily quota/auth codes: 429 rate, 432 plan, 433 paygo, 401 unauth.
+const TAVILY_ROTATE_CODES = new Set([401, 429, 432, 433]);
 async function tavily(keys: string[], payload: Record<string, unknown>) {
+  let lastStatus = 0;
   for (let i = 0; i < keys.length; i++) {
     const res = await fetch("https://api.tavily.com/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...payload, api_key: keys[i] }),
     });
-    if (res.status !== 429) return { res };
+    if (!TAVILY_ROTATE_CODES.has(res.status)) return { res };
+    lastStatus = res.status;
     await res.text();
   }
-  return { exhausted: true } as const;
+  return { exhausted: true, lastStatus } as const;
 }
 
 type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
@@ -123,7 +127,7 @@ serve(async (req) => {
     const warnings: string[] = [];
     for (const b of buckets) {
       const r = await tavily(tavilyKeys, b.payload);
-      if ("exhausted" in r) { warnings.push(`Tavily exhausted on ${b.name}`); continue; }
+      if ("exhausted" in r) { warnings.push(`Tavily exhausted on ${b.name} (last status ${r.lastStatus})`); continue; }
       if (!r.res.ok) { warnings.push(`Tavily ${b.name}: HTTP ${r.res.status}`); continue; }
       const j = await r.res.json();
       for (const item of (j.results ?? []) as any[]) {

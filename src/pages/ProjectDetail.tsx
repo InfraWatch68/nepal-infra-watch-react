@@ -62,11 +62,6 @@ export default function ProjectDetail() {
   // back all three tabs without leaking selections across them visually.
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
-  // Pager state per record tab (5 per page; "Prev / Next" controls below the rows).
-  const RECORD_PAGE_SIZE = 5;
-  const [milestonesPage, setMilestonesPage] = useState(1);
-  const [updatesPage, setUpdatesPage] = useState(1);
-  const [sourcesPage, setSourcesPage] = useState(1);
   const toggleRowSelected = (table: string, id: string | number) => {
     const k = `${table}:${id}`;
     setSelectedRows(prev => { const next = new Set(prev); if (next.has(k)) next.delete(k); else next.add(k); return next; });
@@ -127,7 +122,7 @@ export default function ProjectDetail() {
 
   const loadTabs = useCallback(async (projectId: string | number) => {
     const [m, u, s] = await Promise.all([
-      supabase.from('project_milestones').select('*').eq('project_id', projectId).order('order_index'),
+      supabase.from('project_milestones').select('*').eq('project_id', projectId).in('approval_status', isReviewer ? ['approved', 'pending'] : ['approved']).order('order_index'),
       supabase.from('project_updates').select('*').eq('project_id', projectId).in('approval_status', isReviewer ? ['approved', 'pending'] : ['approved']).order('created_at', { ascending: false }),
       supabase.from('project_sources').select('*').eq('project_id', projectId).in('approval_status', isReviewer ? ['approved', 'pending'] : ['approved']).order('created_at'),
     ]);
@@ -486,8 +481,8 @@ export default function ProjectDetail() {
                 />
               )}
               {milestones.length === 0 ? <Card className="p-8 text-center text-muted-foreground text-sm">No milestones recorded yet.</Card> : (
-                <>
-                  {milestones.slice((milestonesPage - 1) * RECORD_PAGE_SIZE, milestonesPage * RECORD_PAGE_SIZE).map(m => (
+                <div className="space-y-3 max-h-[480px] overflow-y-auto pr-1">
+                  {milestones.map(m => (
                     <Card key={m.id} className="p-4 flex gap-4">
                       {isReviewer && (
                         <Checkbox
@@ -517,10 +512,7 @@ export default function ProjectDetail() {
                       </div>
                     </Card>
                   ))}
-                  {milestones.length > RECORD_PAGE_SIZE && (
-                    <RecordPager total={milestones.length} page={milestonesPage} onPage={setMilestonesPage} pageSize={RECORD_PAGE_SIZE} />
-                  )}
-                </>
+                </div>
               )}
             </TabsContent>
 
@@ -536,8 +528,8 @@ export default function ProjectDetail() {
                 />
               )}
               {updates.length === 0 ? <Card className="p-8 text-center text-muted-foreground text-sm">No updates posted.</Card> : (
-                <>
-                  {updates.slice((updatesPage - 1) * RECORD_PAGE_SIZE, updatesPage * RECORD_PAGE_SIZE).map(u => (
+                <div className="space-y-3 max-h-[480px] overflow-y-auto pr-1">
+                  {updates.map(u => (
                     <Card key={u.id} className={cn('p-4', u.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
                       <div className="flex items-start gap-3">
                         {isReviewer && (
@@ -560,10 +552,7 @@ export default function ProjectDetail() {
                       </div>
                     </Card>
                   ))}
-                  {updates.length > RECORD_PAGE_SIZE && (
-                    <RecordPager total={updates.length} page={updatesPage} onPage={setUpdatesPage} pageSize={RECORD_PAGE_SIZE} />
-                  )}
-                </>
+                </div>
               )}
             </TabsContent>
 
@@ -579,8 +568,8 @@ export default function ProjectDetail() {
                 />
               )}
               {sources.length === 0 ? <Card className="p-8 text-center text-muted-foreground text-sm">No sources cited yet.</Card> : (
-                <>
-                  {sources.slice((sourcesPage - 1) * RECORD_PAGE_SIZE, sourcesPage * RECORD_PAGE_SIZE).map(s => (
+                <div className="space-y-2 max-h-[480px] overflow-y-auto pr-1">
+                  {sources.map(s => (
                     <Card key={s.id} className={cn('p-4 flex items-center gap-3', s.approval_status === 'pending' && 'border-warning/40 bg-warning/5')}>
                       {isReviewer && (
                         <Checkbox
@@ -601,10 +590,7 @@ export default function ProjectDetail() {
                       </div>
                     </Card>
                   ))}
-                  {sources.length > RECORD_PAGE_SIZE && (
-                    <RecordPager total={sources.length} page={sourcesPage} onPage={setSourcesPage} pageSize={RECORD_PAGE_SIZE} />
-                  )}
-                </>
+                </div>
               )}
             </TabsContent>
 
@@ -786,28 +772,6 @@ function RunStatsLine({ run, inFlight }: { run: any | null; inFlight: boolean })
       Last run {when} · {hits} hits · +{inserted} new{deduped ? ` · ${deduped} deduped` : ''}
       {run.status === 'failed' && <span className="text-destructive ml-1">(failed)</span>}
     </span>
-  );
-}
-
-// Compact pager shared across the three Record tabs. Visually identical to
-// the pager in ComprehensiveSections.tsx so the page-controls feel the same
-// in both sections.
-function RecordPager({ total, page, onPage, pageSize }: { total: number; page: number; onPage: (n: number) => void; pageSize: number }) {
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const start = (page - 1) * pageSize;
-  return (
-    <div className="flex items-center justify-between gap-2 pt-2 text-[11px] text-muted-foreground font-mono">
-      <span>Showing {start + 1}–{Math.min(start + pageSize, total)} of {total}</span>
-      <div className="flex items-center gap-1.5">
-        <Button size="sm" variant="ghost" className="h-7 px-2" onClick={() => onPage(Math.max(1, page - 1))} disabled={page === 1} aria-label="Previous page">
-          <ChevronLeft className="h-3.5 w-3.5" />
-        </Button>
-        <span>page {page} / {totalPages}</span>
-        <Button size="sm" variant="ghost" className="h-7 px-2" onClick={() => onPage(Math.min(totalPages, page + 1))} disabled={page === totalPages} aria-label="Next page">
-          <ChevronRight className="h-3.5 w-3.5" />
-        </Button>
-      </div>
-    </div>
   );
 }
 

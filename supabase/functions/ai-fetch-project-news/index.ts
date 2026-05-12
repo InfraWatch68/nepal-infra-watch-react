@@ -19,21 +19,24 @@ const stripFences = (s: string) =>
 // Parses TAVILY_API_KEYS (comma-separated) with fallback to TAVILY_API_KEY.
 // Tries each key in order; moves to the next on 429. Returns { response, keyIndex }
 // so callers can log which key was used or detect total exhaustion.
+// Rotate on Tavily quota/auth codes: 429 rate, 432 plan, 433 paygo, 401 unauth.
+const TAVILY_ROTATE_CODES = new Set([401, 429, 432, 433]);
 async function tavilySearch(
   keys: string[],
   payload: Record<string, unknown>,
-): Promise<{ response: Response; keyIndex: number } | { exhausted: true }> {
+): Promise<{ response: Response; keyIndex: number } | { exhausted: true; lastStatus: number }> {
+  let lastStatus = 0;
   for (let i = 0; i < keys.length; i++) {
     const res = await fetch("https://api.tavily.com/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...payload, api_key: keys[i] }),
     });
-    if (res.status !== 429) return { response: res, keyIndex: i };
-    // 429 → try next key; consume body so the connection is released
+    if (!TAVILY_ROTATE_CODES.has(res.status)) return { response: res, keyIndex: i };
+    lastStatus = res.status;
     await res.text();
   }
-  return { exhausted: true };
+  return { exhausted: true, lastStatus };
 }
 
 function parseTavilyKeys(): string[] {
@@ -157,8 +160,13 @@ serve(async (req) => {
     });
 
     if ("exhausted" in tavResult) {
+      const reason = tavResult.lastStatus === 432 ? "plan-limit"
+        : tavResult.lastStatus === 433 ? "paygo-limit"
+        : tavResult.lastStatus === 401 ? "unauthorized"
+        : tavResult.lastStatus === 429 ? "rate-limit"
+        : `HTTP ${tavResult.lastStatus}`;
       return json({
-        error: `All ${tavilyKeys.length} Tavily key(s) are rate-limited. Try again later.`,
+        error: `All ${tavilyKeys.length} Tavily key(s) exhausted (${reason}). Try again later or add more keys to TAVILY_API_KEYS.`,
       }, 429);
     }
     const { response: tav, keyIndex } = tavResult;

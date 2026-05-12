@@ -35,23 +35,34 @@ const stripFences = (s: string) =>
   s.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
 
 // Parses TAVILY_API_KEYS (comma-separated) with fallback to TAVILY_API_KEY.
-// Tries each key in order; moves to the next on 429. Returns { response, keyIndex }
-// so callers can log which key was used or detect total exhaustion.
+// Tries each key in order; moves to the next on quota/auth failures.
+// Returns { response, keyIndex } so callers can log which key was used or
+// detect total exhaustion.
+//
+// Rotation triggers (Tavily-specific status codes):
+//   429 — Rate Limit Exceeded (short-window throttle)
+//   432 — Plan Limit Exceeded (monthly subscription quota)
+//   433 — PayGo Limit Exceeded (dashboard spend cap)
+//   401 — Unauthorized (key invalid/revoked) — rotate so a single bad key
+//         in the list doesn't poison the whole sweep
+const TAVILY_ROTATE_CODES = new Set([401, 429, 432, 433]);
 async function tavilySearch(
   keys: string[],
   payload: Record<string, unknown>,
-): Promise<{ response: Response; keyIndex: number } | { exhausted: true }> {
+): Promise<{ response: Response; keyIndex: number } | { exhausted: true; lastStatus: number }> {
+  let lastStatus = 0;
   for (let i = 0; i < keys.length; i++) {
     const res = await fetch("https://api.tavily.com/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...payload, api_key: keys[i] }),
     });
-    if (res.status !== 429) return { response: res, keyIndex: i };
-    // 429 → try next key; consume body so the connection is released
+    if (!TAVILY_ROTATE_CODES.has(res.status)) return { response: res, keyIndex: i };
+    lastStatus = res.status;
+    // Quota/auth failure → try next key; consume body so the connection is released
     await res.text();
   }
-  return { exhausted: true };
+  return { exhausted: true, lastStatus };
 }
 
 function parseTavilyKeys(): string[] {
@@ -373,7 +384,12 @@ Other rules:
       });
 
       if ("exhausted" in tavResult) {
-        errors.push(`All ${tavilyKeys.length} Tavily key(s) rate-limited at sector "${search.sector ?? "topic"}"`);
+        const reason = tavResult.lastStatus === 432 ? "plan-limit"
+          : tavResult.lastStatus === 433 ? "paygo-limit"
+          : tavResult.lastStatus === 401 ? "unauthorized"
+          : tavResult.lastStatus === 429 ? "rate-limit"
+          : `HTTP ${tavResult.lastStatus}`;
+        errors.push(`All ${tavilyKeys.length} Tavily key(s) exhausted (${reason}) at sector "${search.sector ?? "topic"}"`);
         break outer;
       }
       const { response: tav, keyIndex } = tavResult;
@@ -432,15 +448,15 @@ Other rules:
             continue;
           }
 
-          // Skip if a project with this title already exists (case-insensitive exact match).
-          // Escape ILIKE wildcards so special chars in titles aren't treated as SQL patterns.
+          // Dedupe by case-insensitive exact title match. Escape ILIKE wildcards
+          // so special chars in titles aren't treated as SQL patterns.
           const safeTitle = parsed.title.trim()
             .replace(/\\/g, "\\\\")
             .replace(/%/g, "\\%")
             .replace(/_/g, "\\_");
           const { data: existingProject, error: dedupeErr } = await admin
             .from("projects")
-            .select("id")
+            .select("id, provinces, districts, municipalities")
             .ilike("title", safeTitle)
             .maybeSingle();
           if (dedupeErr) {
@@ -448,6 +464,80 @@ Other rules:
             continue;
           }
           if (existingProject) {
+            // A project re-discovered through a *different* location search is
+            // evidence the project spans both. Instead of dropping the new
+            // hit, fold the new location signals into the existing project's
+            // arrays. Sources are also appended so a reviewer can see the
+            // additional citation.
+            const mergeUnique = (existing: any, cands: (string | null | undefined)[], cap: number, valid?: (s: string) => boolean) => {
+              const cur: string[] = Array.isArray(existing) ? existing.filter((x): x is string => typeof x === "string") : [];
+              const seen = new Set(cur.map(s => s.toLowerCase()));
+              const out = [...cur];
+              for (const c of cands) {
+                if (typeof c !== "string") continue;
+                const s = c.trim();
+                if (!s) continue;
+                if (valid && !valid(s)) continue;
+                if (seen.has(s.toLowerCase())) continue;
+                seen.add(s.toLowerCase()); out.push(s);
+                if (out.length >= cap) break;
+              }
+              return out;
+            };
+            // Candidates: this sweep's geo context + whatever the AI extracted.
+            const provCands = [
+              province, parsed.province,
+              ...(Array.isArray(parsed.provinces) ? parsed.provinces : []),
+            ];
+            const distCands = [
+              district, parsed.district,
+              ...(Array.isArray(parsed.districts) ? parsed.districts : []),
+            ];
+            const munCands = [
+              municipality, parsed.municipality,
+              ...(Array.isArray(parsed.municipalities) ? parsed.municipalities : []),
+            ];
+            const mergedProvinces      = mergeUnique(existingProject.provinces, provCands, 7, p => PROVINCES.includes(p));
+            const mergedDistricts      = mergeUnique(existingProject.districts, distCands, 10);
+            const mergedMunicipalities = mergeUnique(existingProject.municipalities, munCands, 15);
+
+            // Only update if at least one array genuinely grew.
+            const grew = (a: any, b: string[]) => (Array.isArray(a) ? a.length : 0) < b.length;
+            if (grew(existingProject.provinces, mergedProvinces)
+              || grew(existingProject.districts, mergedDistricts)
+              || grew(existingProject.municipalities, mergedMunicipalities)) {
+              const { error: mergeErr } = await admin.from("projects").update({
+                provinces: mergedProvinces,
+                districts: mergedDistricts,
+                municipalities: mergedMunicipalities,
+              }).eq("id", existingProject.id);
+              if (mergeErr) errors.push(`Location merge failed: ${mergeErr.message}`);
+            }
+
+            // Best-effort: append this article to project_sources if it's not
+            // already a citation on the project. Same dedupe shape that
+            // analysis-drain uses for additional_sources.
+            try {
+              const nUrl = r.url.replace(/^https?:\/\/(www\.)?/i, "").toLowerCase();
+              const { data: existingSources } = await admin
+                .from("project_sources").select("url").eq("project_id", existingProject.id);
+              const already = (existingSources ?? []).some((s: any) =>
+                typeof s.url === "string"
+                && s.url.replace(/^https?:\/\/(www\.)?/i, "").toLowerCase() === nUrl);
+              if (!already) {
+                await admin.from("project_sources").insert({
+                  project_id: existingProject.id,
+                  added_by: null,
+                  source_type: "article",
+                  title: r.title || new URL(r.url).hostname,
+                  url: r.url,
+                  verified: false,
+                  approval_status: "pending",
+                  submitted_by_ai: true,
+                });
+              }
+            } catch { /* sources extension is best-effort */ }
+
             skipped += 1;
             continue;
           }
@@ -563,6 +653,15 @@ Other rules:
             continue;
           }
 
+          // Reuse the project-level confidence as the source-row confidence —
+          // they share evidence (the AI extracted the project from this very
+          // article), so the trust signal carries over. Auto-approve trigger
+          // promotes the source row alongside the project when ≥ threshold.
+          const projConfidence = (() => {
+            const v = typeof parsed.confidence_score === "number" ? parsed.confidence_score : null;
+            if (v == null || !Number.isFinite(v)) return null;
+            return Math.max(0, Math.min(1, Math.round(v * 100) / 100));
+          })();
           const { error: sErr } = await admin.from("project_sources").insert({
             project_id: proj.id,
             added_by: null,
@@ -572,6 +671,7 @@ Other rules:
             verified: false,
             approval_status: "pending",
             submitted_by_ai: true,
+            confidence_score: projConfidence,
           });
           if (sErr) {
             errors.push(`Insert source failed: ${sErr.message}`);

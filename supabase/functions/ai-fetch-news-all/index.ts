@@ -27,20 +27,24 @@ function parseTavilyKeys(): string[] {
   return single ? [single] : [];
 }
 
+// Rotate on Tavily quota/auth codes: 429 rate, 432 plan, 433 paygo, 401 unauth.
+const TAVILY_ROTATE_CODES = new Set([401, 429, 432, 433]);
 async function tavilySearch(
   keys: string[],
   payload: Record<string, unknown>,
-): Promise<{ response: Response; keyIndex: number } | { exhausted: true }> {
+): Promise<{ response: Response; keyIndex: number } | { exhausted: true; lastStatus: number }> {
+  let lastStatus = 0;
   for (let i = 0; i < keys.length; i++) {
     const res = await fetch("https://api.tavily.com/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...payload, api_key: keys[i] }),
     });
-    if (res.status !== 429) return { response: res, keyIndex: i };
+    if (!TAVILY_ROTATE_CODES.has(res.status)) return { response: res, keyIndex: i };
+    lastStatus = res.status;
     await res.text();
   }
-  return { exhausted: true };
+  return { exhausted: true, lastStatus };
 }
 
 type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
@@ -166,7 +170,7 @@ serve(async (req) => {
           include_answer: false,
         });
         if ("exhausted" in tavResult) {
-          errors.push(`Tavily exhausted at project "${project.title}"; aborting`);
+          errors.push(`Tavily exhausted at project "${project.title}" (last status ${tavResult.lastStatus}); aborting`);
           break;
         }
         const tav = tavResult.response;

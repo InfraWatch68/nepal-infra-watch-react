@@ -17,6 +17,11 @@ export default function Home() {
   const [recent, setRecent] = useState<any[]>([]);
   const [stats, setStats] = useState({ total: 0, inProgress: 0, completed: 0, delayed: 0 });
   const [brief, setBrief] = useState<{ headline: string; created_at: string } | null>(null);
+  // Sherlock live-discovery flag. The hero pill pulses only when this is true;
+  // otherwise we just show "Public Beta" without the misleading green dot.
+  // Updates via realtime so the indicator flips the moment an admin toggles
+  // Go Live / Stop Live (or the auto-stop guard kicks in).
+  const [liveDiscovery, setLiveDiscovery] = useState<boolean>(false);
 
   useEffect(() => {
     supabase.from('projects').select('*').eq('approval_status', 'approved')
@@ -34,6 +39,15 @@ export default function Home() {
       .then(({ data }) => {
         if (data && data.length > 0) setBrief(data[0] as any);
       });
+
+    supabase.from('sherlock_live_state').select('is_live').eq('id', 1).maybeSingle()
+      .then(({ data }) => setLiveDiscovery(!!(data as any)?.is_live));
+
+    const ch = supabase.channel('home-sherlock-live-state')
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'sherlock_live_state', filter: 'id=eq.1' },
+        (payload: any) => setLiveDiscovery(!!payload?.new?.is_live))
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
   }, []);
 
   const briefStamp = brief
@@ -49,8 +63,13 @@ export default function Home() {
         <div className="absolute inset-0 opacity-[0.04] bg-[radial-gradient(circle_at_30%_20%,white_1px,transparent_1px)] [background-size:24px_24px]" />
         <div className="container relative py-20 md:py-28 grid md:grid-cols-12 gap-10 items-center">
           <div className="md:col-span-7 space-y-6 animate-fade-in">
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-accent/15 border border-accent/30 text-accent text-xs font-mono uppercase tracking-wider">
-              <span className="h-1.5 w-1.5 rounded-full bg-accent animate-pulse" /> Live · Public Beta
+            <div className={
+              liveDiscovery
+                ? 'inline-flex items-center gap-2 px-3 py-1 rounded-full bg-accent/15 border border-accent/30 text-accent text-xs font-mono uppercase tracking-wider'
+                : 'inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary-foreground/5 border border-primary-foreground/20 text-primary-foreground/60 text-xs font-mono uppercase tracking-wider'
+            }>
+              {liveDiscovery && <span className="h-1.5 w-1.5 rounded-full bg-accent animate-pulse" />}
+              {liveDiscovery ? 'Live · Public Beta' : 'Public Beta'}
             </div>
             <h1 className="font-display text-5xl md:text-6xl lg:text-7xl font-bold leading-[1.05] text-balance">
               Every road, bridge, and rupee.<br/>
