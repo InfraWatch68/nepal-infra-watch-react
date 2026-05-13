@@ -35,6 +35,104 @@ const slugify = (s: string) =>
 const stripFences = (s: string) =>
   s.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
 
+// Tries to extract a parseable JSON object from a Mistral/Gemini response that
+// may include preamble ("Sure, here is the JSON:") or trailing prose ("Note: …").
+// We grab the substring between the first `{` and the last `}`, then attempt
+// progressively more aggressive repairs before giving up.
+function tryParseJsonObject(rawText: string): { ok: true; value: any } | { ok: false; reason: string } {
+  const stripped = stripFences(rawText);
+  if (!stripped) return { ok: false, reason: "empty" };
+  if (stripped === "null" || stripped === '"null"') return { ok: false, reason: "ai_skipped" };
+
+  // Stage 1: bracket-extract — drop any prose before the first `{` or after
+  // the last `}`. Covers the "Sure, here is the JSON: { … }" pattern that
+  // Mistral occasionally emits despite the system prompt forbidding prose.
+  const first = stripped.indexOf("{");
+  const last = stripped.lastIndexOf("}");
+  let candidate = (first >= 0 && last > first) ? stripped.slice(first, last + 1) : stripped;
+
+  const tryParse = (s: string): any | null => { try { return JSON.parse(s); } catch { return null; } };
+
+  let parsed = tryParse(candidate);
+  if (parsed) return { ok: true, value: parsed };
+
+  // Stage 2: strip trailing commas before `}` or `]` — LLM-generated JSON
+  // commonly leaves stray commas after the last field, especially when a
+  // multi-line description was truncated mid-edit.
+  const noTrailingCommas = candidate.replace(/,(\s*[}\]])/g, "$1");
+  parsed = tryParse(noTrailingCommas);
+  if (parsed) return { ok: true, value: parsed };
+
+  // Stage 3: balanced-brace truncation — token-limit cutoff can leave an
+  // unclosed JSON object. Walk forward counting braces; if more `{` than
+  // `}` were seen, append closing braces until balanced and re-parse.
+  let depth = 0;
+  let cutAt = -1;
+  for (let i = 0; i < candidate.length; i++) {
+    const c = candidate[i];
+    if (c === "{") depth++;
+    else if (c === "}") { depth--; if (depth === 0) cutAt = i + 1; }
+  }
+  if (depth > 0 && cutAt === -1) {
+    const repaired = noTrailingCommas + "}".repeat(depth);
+    parsed = tryParse(repaired);
+    if (parsed) return { ok: true, value: parsed };
+  }
+
+  return { ok: false, reason: "unparseable" };
+}
+
+// Curated list of project-news + government + funder domains for future
+// targeted-search use (e.g. a two-call mode where Tavily is first queried
+// with include_domains for precision, then fallback to open search for
+// breadth). NOT used as include_domains today — that would hard-restrict
+// the search. Kept here as a maintenance constant: when a sweep clearly
+// misses obvious projects from a known source, add it here.
+const PROJECT_NEWS_DOMAINS = [
+  // Nepali English-language news
+  "kathmandupost.com", "ekantipur.com", "nepalitimes.com", "onlinekhabar.com",
+  "myrepublica.nagariknetwork.com", "setopati.com", "himalpress.com", "en.himalpress.com",
+  "thehimalayantimes.com", "nepalnews.com", "kantipurtv.com", "nagariknews.com",
+  "baahrakhari.com", "ratopati.com", "biznews.com.np", "newbusinessage.com",
+  "nepalenergyforum.com", "nepaliheadlines.com", "deshsanchar.com", "newspolar.com",
+  "indianewsnetwork.com",
+  // Nepal government ministries + departments
+  "mof.gov.np", "mopit.gov.np", "moewri.gov.np", "mohp.gov.np", "moe.gov.np",
+  "moald.gov.np", "mocit.gov.np", "mowsi.gov.np", "mocs.gov.np", "moicrr.gov.np",
+  "moccs.gov.np", "moicrr.gov.np", "moftqc.gov.np", "moald.gov.np", "moic.gov.np",
+  "moha.gov.np", "moljpa.gov.np", "moud.gov.np", "mofald.gov.np", "moir.gov.np",
+  "moest.gov.np", "moccs.gov.np",
+  // Nepal departments + agencies
+  "npc.gov.np", "dor.gov.np", "dolidar.gov.np", "doed.gov.np", "doi.gov.np",
+  "dudbc.gov.np", "dws.gov.np", "dohs.gov.np", "dofe.gov.np", "bfin.gov.np",
+  "ppmo.gov.np", "oag.gov.np", "ciaa.gov.np", "frfo.gov.np", "bolpatra.gov.np",
+  "doft.gov.np", "ihrcsc.gov.np", "dol.gov.np",
+  // State-owned implementing entities
+  "nea.org.np", "ntc.com.np", "ncell.com.np", "noc.org.np",
+  "nrb.org.np", "necepal.org.np",
+  // International funders (project pipelines + monitoring)
+  "worldbank.org", "documents1.worldbank.org", "blogs.worldbank.org", "thedocs.worldbank.org",
+  "adb.org", "events.adb.org", "data.adb.org",
+  "jica.go.jp", "jica.org.np",
+  "undp.org", "who.int", "unicef.org", "aiib.org", "eib.org", "ifc.org",
+  "kfw.de", "usaid.gov", "np.usembassy.gov", "giz.de", "dfid.gov.uk", "dfat.gov.au",
+  "fcdo.gov.uk", "norad.no", "sdc.admin.ch",
+  // International coverage of Nepal projects
+  "reuters.com", "theguardian.com", "aljazeera.com",
+] as const;
+
+// Domains we want Tavily to EXCLUDE — observed in low-signal results during
+// remote-district sweeps. Social media, generic tooling/research portals,
+// and search aggregators that crowd out project news.
+const NOISE_DOMAINS = [
+  "facebook.com", "twitter.com", "x.com", "linkedin.com", "instagram.com",
+  "youtube.com", "reddit.com", "pinterest.com", "tiktok.com", "tumblr.com",
+  "quora.com", "medium.com",
+  "google.com", "bing.com", "duckduckgo.com",
+  "fsmtoolbox.com", "gggi.org", "uclg-aspac.org", "asiantransportobservatory.org",
+  "scribd.com", "academia.edu", "researchgate.net",
+] as const;
+
 // Parses TAVILY_API_KEYS (comma-separated) with fallback to TAVILY_API_KEY.
 // Tries each key in order; moves to the next on quota/auth failures.
 // Returns { response, keyIndex } so callers can log which key was used or
@@ -142,7 +240,11 @@ async function callChatModel(
         r = await fetchWithTimeout(endpoint, {
           method: "POST",
           headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ model, messages }),
+          // max_tokens=4096 prevents truncation on long descriptions (the
+          // schema asks for 250-500 words plus 30+ fields — Mistral's default
+          // ~1024 limit was cutting JSON mid-string, causing the parse
+          // failures observed in error logs).
+          body: JSON.stringify({ model, messages, max_tokens: 4096 }),
         }, 60_000);
       } catch (e) {
         // Timeout or network failure. Treat as transient on first attempt
@@ -316,21 +418,24 @@ serve(async (req) => {
     } else if (geoMode) {
       const targetSectors = (sectorsParam && sectorsParam.length > 0) ? sectorsParam : SECTORS;
       for (const sec of targetSectors) {
-        // Soft-infrastructure sectors (Health, Education) usually surface
-        // *programs/campaigns* (vaccination drives, disease surveillance,
-        // teacher-training initiatives) rather than hardware. Hardcoding
-        // "Nepal infrastructure {sector}" steered Tavily toward construction
-        // stories and missed the program write-ups entirely — e.g. Madhesh /
-        // Rautahat / Health returned 0/5 even though CGPP, WHO MDA, and EMS
-        // campaigns are active in that district. Dropping "infrastructure" and
-        // appending "project OR program" lets the sector keyword carry the
-        // topic for both hard and soft sectors. Tavily's advanced search
-        // still handles "Nepal Transport project" correctly for roads/bridges.
-        const parts = ["Nepal", sec, "project OR program", municipality, district, province].filter(Boolean);
+        // Project-event keyword expansion. The previous "project OR program"
+        // template was too generic — Tavily surfaced policy papers and sector
+        // overviews for remote districts (Sindhupalchok, Baglung, Rasuwa) where
+        // English news coverage is thin, leading to a 9% insertion rate.
+        // These event-anchored terms ("groundbreaking", "tender", "DPR", etc.)
+        // surface ACTIONABLE project moments rather than sector commentary.
+        // Including Nepali transliterations ("shilanyas" = groundbreaking,
+        // "udghatan" = inauguration) catches articles that quote them verbatim.
+        // Kept under ~250 chars total so Tavily's advanced search doesn't
+        // degrade on long queries.
+        const eventTerms = '("project" OR "groundbreaking" OR "shilanyas" OR "inauguration" OR "udghatan" OR "tender" OR "DPR" OR "feasibility study" OR "contract awarded" OR "foundation stone" OR "commissioning" OR "handover" OR "construction begins" OR "MoU signed")';
+        const parts = ["Nepal", sec, eventTerms, municipality, district, province].filter(Boolean);
         searches.push({ query: parts.join(" "), sector: sec });
       }
     } else {
-      const parts = ["Nepal infrastructure project", topic, region].filter(Boolean);
+      // Same event-anchored expansion for the topic/region path.
+      const eventTerms = '("project" OR "groundbreaking" OR "inauguration" OR "tender" OR "DPR" OR "feasibility study" OR "contract awarded" OR "construction begins")';
+      const parts = ["Nepal", topic ?? "infrastructure", eventTerms, region].filter(Boolean);
       searches.push({ query: parts.join(" ") });
     }
 
@@ -499,6 +604,18 @@ Other rules:
         // grab the first few and attach them to whatever project gets created
         // from this search's article hits.
         include_images: true,
+        // topic="news" softly biases Tavily toward news sources without
+        // hard-restricting (unlike include_domains). Government/funder pages
+        // still surface because they get syndicated through news outlets and
+        // because Tavily's news index includes press-release feeds.
+        topic: "news",
+        // News topic defaults to last 3 days — too narrow for project
+        // discovery (groundbreakings, tender awards may be months old but
+        // still active). 730 days = 2 years covers typical project lifecycle.
+        days: 730,
+        // Hard-exclude observed low-signal sources (social media, generic
+        // tooling sites, search aggregators). See NOISE_DOMAINS at top.
+        exclude_domains: [...NOISE_DOMAINS],
       });
 
       if ("exhausted" in tavResult) {
@@ -580,18 +697,27 @@ Other rules:
             }
             continue;
           }
-          const raw = stripFences(ai.text);
-          if (!raw || raw === "null" || raw === '"null"') {
-            skipped += 1;
+          // Robust parse: handles preamble/postamble prose, fenced code,
+          // trailing-comma typos, and brace-unbalanced truncation. The
+          // previous bare JSON.parse silently dropped articles like the
+          // indianewsnetwork.com/Baglung community-development case where
+          // Mistral wrapped its response in conversational text.
+          const parseResult = tryParseJsonObject(ai.text ?? "");
+          if (!parseResult.ok) {
+            if (parseResult.reason === "ai_skipped" || parseResult.reason === "empty") {
+              // The AI explicitly judged this article as not-a-Nepal-project,
+              // OR returned nothing (rare but possible). Count as a skip.
+              skipped += 1;
+            } else {
+              // Genuine parse failure — log a snippet of what the AI returned
+              // so we can diagnose recurring patterns (truncation? format
+              // hallucinations?) without chasing edge-function logs.
+              const snippet = (ai.text ?? "").slice(0, 240).replace(/\n+/g, " ⏎ ");
+              errors.push(`JSON parse failed for ${r.url} (${parseResult.reason}): ${snippet}…`);
+            }
             continue;
           }
-          let parsed: any;
-          try {
-            parsed = JSON.parse(raw);
-          } catch {
-            errors.push(`JSON parse failed for ${r.url}`);
-            continue;
-          }
+          const parsed = parseResult.value;
           if (!parsed || !parsed.title) {
             skipped += 1;
             continue;

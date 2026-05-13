@@ -204,15 +204,17 @@ function QueueTab() {
     refresh();
   };
 
-  // Bulk rerun — re-queue every selected job that finished with an error or
-  // was cancelled. Silently ignores rows still in flight or done-without-error.
+  // Bulk rerun — re-queue every selected job that's finished. Covers failed,
+  // cancelled, and any done job (including done-with-zero-inserts, which is
+  // the common case for re-testing after a code change to ai-discover-projects).
+  // Skips rows still in flight (queued / running) to avoid racing the drainer.
   const bulkRerun = async () => {
     if (sel.size === 0) return;
     const candidates = jobs.filter(j =>
-      sel.has(j.id) && (j.status === 'failed' || j.status === 'cancelled' || (j.status === 'done' && !!j.error_text))
+      sel.has(j.id) && (j.status === 'failed' || j.status === 'cancelled' || j.status === 'done')
     );
     if (candidates.length === 0) {
-      return toast.message('Nothing rerunnable in the selection — pick failed, cancelled, or errored jobs.');
+      return toast.message('Nothing rerunnable in the selection — pick finished jobs (done / failed / cancelled).');
     }
     if (!confirm(`Re-queue ${candidates.length} job${candidates.length === 1 ? '' : 's'}? Original rows are kept as history; fresh rows are enqueued at priority 1.`)) return;
     setBulkBusy(true);

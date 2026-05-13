@@ -5,18 +5,18 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { AdSlot } from '@/components/AdSlot';
 import { ProjectCard } from '@/components/ProjectCard';
-import { ArrowRight, Activity, MapPinned, ShieldCheck, BarChart3, Sparkles, FileSearch } from 'lucide-react';
+import { ArrowRight, Activity, MapPinned, ShieldCheck, BarChart3, FileSearch } from 'lucide-react';
 import { FlowButton } from '@/components/ui/flow-button';
 import { useEffect, useState } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/hooks/useAuth';
+import { HomeBriefCarousel } from '@/components/home/HomeBriefCarousel';
 
 export default function Home() {
   const { user } = useAuth();
   const submitHref = user ? '/dashboard/submit' : '/auth?mode=signup&next=/dashboard/submit';
   const [recent, setRecent] = useState<any[]>([]);
   const [stats, setStats] = useState({ total: 0, inProgress: 0, completed: 0, delayed: 0 });
-  const [brief, setBrief] = useState<{ headline: string; created_at: string } | null>(null);
   // Sherlock live-discovery flag. The hero pill pulses only when this is true;
   // otherwise we just show "Public Beta" without the misleading green dot.
   // Updates via realtime so the indicator flips the moment an admin toggles
@@ -34,12 +34,6 @@ export default function Home() {
         setStats({ total: count ?? 0, inProgress: c('in_progress'), completed: c('completed'), delayed: c('delayed') });
       });
 
-    supabase.from('global_briefs').select('headline, created_at')
-      .order('created_at', { ascending: false }).limit(1)
-      .then(({ data }) => {
-        if (data && data.length > 0) setBrief(data[0] as any);
-      });
-
     supabase.from('sherlock_live_state').select('is_live').eq('id', 1).maybeSingle()
       .then(({ data }) => setLiveDiscovery(!!(data as any)?.is_live));
 
@@ -49,10 +43,6 @@ export default function Home() {
       .subscribe();
     return () => { supabase.removeChannel(ch); };
   }, []);
-
-  const briefStamp = brief
-    ? new Date(brief.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }).toUpperCase()
-    : 'TODAY';
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -99,20 +89,7 @@ export default function Home() {
             </div>
           </div>
           <div className="md:col-span-5">
-            <Card className="bg-primary-glow/40 backdrop-blur border-primary-foreground/10 text-primary-foreground p-6 shadow-elegant">
-              <div className="flex items-center gap-2 mb-4">
-                <Sparkles className="h-4 w-4 text-accent" />
-                <span className="text-xs uppercase tracking-wider font-mono text-primary-foreground/70">AI Brief — {briefStamp}</span>
-              </div>
-              <p className="font-display text-xl leading-snug mb-4">
-                {brief
-                  ? `"${brief.headline}"`
-                  : 'No AI brief published yet — an admin can generate one from the Admin → AI tools panel.'}
-              </p>
-              <Link to="/analytics" className="text-sm text-accent hover:underline inline-flex items-center gap-1">
-                See the full analysis <ArrowRight className="h-3 w-3" />
-              </Link>
-            </Card>
+            <HomeBriefCarousel />
           </div>
         </div>
       </section>
