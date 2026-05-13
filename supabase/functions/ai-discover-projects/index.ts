@@ -46,21 +46,49 @@ const stripFences = (s: string) =>
 //   433 — PayGo Limit Exceeded (dashboard spend cap)
 //   401 — Unauthorized (key invalid/revoked) — rotate so a single bad key
 //         in the list doesn't poison the whole sweep
+// Fetch with an AbortController-backed timeout. Deno's fetch has no built-in
+// timeout; without this a hung upstream (Tavily slow-loris response, Mistral
+// stuck-stream) blocks the whole function past the 300s reaper threshold,
+// leaving zero diagnostics. AbortError is normalised to a regular Response-
+// shaped throw so callers can handle it as "this key failed, try next".
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 const TAVILY_ROTATE_CODES = new Set([401, 429, 432, 433]);
+const TAVILY_TIMEOUT_MS = 30_000;
 async function tavilySearch(
   keys: string[],
   payload: Record<string, unknown>,
 ): Promise<{ response: Response; keyIndex: number } | { exhausted: true; lastStatus: number }> {
   let lastStatus = 0;
   for (let i = 0; i < keys.length; i++) {
-    const res = await fetch("https://api.tavily.com/search", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...payload, api_key: keys[i] }),
-    });
+    let res: Response;
+    try {
+      res = await fetchWithTimeout("https://api.tavily.com/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...payload, api_key: keys[i] }),
+      }, TAVILY_TIMEOUT_MS);
+    } catch (e) {
+      // Treat timeout/network errors as a transient "this key failed".
+      // Synthesise a 599 so the rotate-or-bail logic upstream still works.
+      const aborted = (e as Error)?.name === "AbortError";
+      lastStatus = aborted ? 599 : 598;
+      continue;
+    }
     if (!TAVILY_ROTATE_CODES.has(res.status)) return { response: res, keyIndex: i };
     lastStatus = res.status;
-    // Quota/auth failure → try next key; consume body so the connection is released
     await res.text();
   }
   return { exhausted: true, lastStatus };
@@ -109,11 +137,20 @@ async function callChatModel(
 
   const callOnce = async (endpoint: string, apiKey: string, model: string) => {
     for (let attempt = 0; attempt < 2; attempt++) {
-      const r = await fetch(endpoint, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model, messages }),
-      });
+      let r: Response;
+      try {
+        r = await fetchWithTimeout(endpoint, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ model, messages }),
+        }, 60_000);
+      } catch (e) {
+        // Timeout or network failure. Treat as transient on first attempt
+        // (retry), error on second (let caller rotate to next key).
+        const aborted = (e as Error)?.name === "AbortError";
+        if (attempt === 0) { await new Promise(res => setTimeout(res, 1500)); continue; }
+        return { kind: "transient" as const, status: aborted ? 599 : 598, body: aborted ? "AI fetch timeout after 60s" : "AI fetch network error" };
+      }
       if (r.status === 402) return { kind: "exhausted" as const, status: 402, body: "credits exhausted" };
       if (r.status === 429) {
         const body429 = await r.text();
@@ -176,6 +213,9 @@ serve(async (req) => {
   // Hoisted so the outer catch can write `failed` back to sherlock_jobs even
   // if processing throws after the body parse.
   let jobIdForCatch: string | null = null;
+  // Hoisted so the outer catch can include the in-progress phase trail in
+  // the failed row's error_text.
+  const phases: string[] = [];
 
   try {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -298,6 +338,56 @@ serve(async (req) => {
     let inserted = 0;
     let skipped = 0;
 
+    // Wall-time guard. Supabase edge functions get hard-killed by the
+    // platform around 300s (Sherlock reaper also fires at 300s without
+    // writeback). If we keep iterating up to that ceiling we get reaped
+    // instead of returning gracefully. Bail at 240s with whatever we've
+    // collected so the row writes back as `done` with a noted truncation,
+    // not as `failed` with a reaper error_text. Saptari was hitting this
+    // cap repeatedly across Telecom / Education / Health / Agriculture.
+    const wallStartMs = Date.now();
+    const WALL_BUDGET_MS = 240_000;
+    const overBudget = () => Date.now() - wallStartMs > WALL_BUDGET_MS;
+
+    // Per-step timing trail. Pushed at each major milestone; the most
+    // recent ~20 entries get prepended to error_text whenever we bail
+    // (wall-time, AI/Tavily exhaustion, or thrown error). When a queue
+    // run hangs and gets reaped or truncated, sherlock_jobs.error_text
+    // then literally shows "stuck between phase X and phase Y" — way
+    // faster than chasing Supabase function logs. `phases` itself is
+    // hoisted to the outer scope so the catch block can include it.
+    const mark = (label: string) => {
+      const ms = Date.now() - wallStartMs;
+      phases.push(`${String(ms).padStart(6, ' ')}ms ${label}`);
+      // Keep the trail bounded so a long run doesn't bloat the column.
+      if (phases.length > 40) phases.splice(0, phases.length - 40);
+    };
+    const phaseTrail = (note: string) =>
+      `${note}\nphase trail (last ${Math.min(phases.length, 20)}):\n${phases.slice(-20).join('\n')}`;
+
+    // Heartbeat: writes the last_diagnostic column on sherlock_jobs after
+    // each major phase. Reaper trigger doesn't touch last_diagnostic, so if
+    // the function gets hard-killed the row still shows "last seen at
+    // phase X, about to call URL Y, elapsed Zms" — which tells us whether
+    // a hang is in Tavily, AI, or somewhere else. Fire-and-forget so a
+    // slow Supabase write doesn't add latency to the hot path.
+    const heartbeat = (label: string) => {
+      if (!jobId) return;
+      admin.from("sherlock_jobs").update({
+        last_diagnostic: {
+          ts: new Date().toISOString(),
+          label,
+          phases: phases.slice(-15),
+          elapsed_ms: Date.now() - wallStartMs,
+        },
+      }).eq("id", jobId).then(
+        () => { /* ok */ },
+        () => { /* swallow; this is best-effort */ },
+      );
+    };
+    mark('start');
+    heartbeat('start');
+
     const sysPrompt = `You extract a single Nepal public-sector project record from a news article and write a thorough public-facing entry.
 
 A "project" includes both physical infrastructure (roads, bridges, hydropower, hospitals, schools, irrigation works) AND named public-service programs / campaigns / initiatives with concrete scope and a reportable identity. Examples of qualifying soft-infrastructure entries:
@@ -384,11 +474,20 @@ Other rules:
 
     // Outer loop: one Tavily search per `searches` entry. Geo mode runs once
     // per sector; topic mode runs once total.
+    mark(`searches built (${searches.length})`);
     outer: for (let sIdx = 0; sIdx < searches.length; sIdx++) {
+      if (overBudget()) {
+        errors.push(phaseTrail(`Wall-time budget (${WALL_BUDGET_MS / 1000}s) reached before sector "${searches[sIdx].sector ?? "topic"}" — returning partial results.`));
+        break outer;
+      }
       const search = searches[sIdx];
 
       // Pace between Tavily calls in geo mode to be polite to upstream.
-      if (sIdx > 0) await new Promise(res => setTimeout(res, 1500));
+      // Cut from 1500ms → 1000ms; 1s is still safely within Tavily rate
+      // limits but reclaims meaningful wall-time on multi-search runs.
+      if (sIdx > 0) await new Promise(res => setTimeout(res, 1000));
+      mark(`tavily-start sector=${search.sector ?? 'topic'}`);
+      heartbeat(`tavily-start sector=${search.sector ?? 'topic'}`);
 
       const tavResult = await tavilySearch(tavilyKeys, {
         query: search.query,
@@ -426,6 +525,8 @@ Other rules:
 
       const tavJson = await tav.json();
       const results: any[] = tavJson.results ?? [];
+      mark(`tavily-done sector=${search.sector ?? 'topic'} results=${results.length}`);
+      heartbeat(`tavily-done sector=${search.sector ?? 'topic'} results=${results.length}`);
       // Deduped image URLs from this Tavily search. Up to 6 per search.
       // Reused for every project we extract from this search's articles —
       // not perfect (one search can yield multiple projects) but cheap.
@@ -440,8 +541,20 @@ Other rules:
       }
 
       for (let idx = 0; idx < results.length; idx++) {
+        if (overBudget()) {
+          errors.push(phaseTrail(`Wall-time budget (${WALL_BUDGET_MS / 1000}s) reached mid-sector "${search.sector ?? "topic"}" after ${inserted} insert(s), ${skipped} skip(s).`));
+          break outer;
+        }
         const r = results[idx];
-        if (idx > 0 || sIdx > 0) await new Promise(res => setTimeout(res, 2500)); // pace under 30 RPM free tier
+        // Pace between AI calls. Cut from 2500ms → 1200ms — still under the
+        // 30 RPM free-tier ceiling (≈ 2000ms minimum) with key rotation
+        // sharing the budget across multiple keys.
+        if (idx > 0 || sIdx > 0) await new Promise(res => setTimeout(res, 1200));
+        const urlShort = (() => {
+          try { return new URL(r?.url ?? '').hostname; } catch { return 'no-url'; }
+        })();
+        mark(`ai-start sec=${search.sector ?? 'topic'} idx=${idx} ${urlShort}`);
+        heartbeat(`ai-start sec=${search.sector ?? 'topic'} idx=${idx} ${urlShort}`);
         if (!r?.content || r.content.length < 50) {
           skipped += 1;
           continue;
@@ -451,10 +564,13 @@ Other rules:
             { role: "system", content: sysPrompt },
             { role: "user", content: `Title: ${r.title}\nURL: ${r.url}\n\nArticle:\n${r.content.slice(0, 4000)}` },
           ]);
+          mark(`ai-done sec=${search.sector ?? 'topic'} idx=${idx} ok=${ai.ok}`);
+          heartbeat(`ai-done sec=${search.sector ?? 'topic'} idx=${idx} ok=${ai.ok}`);
           if (!ai.ok) {
             errors.push(`AI ${ai.status}: ${ai.error}`);
             if (ai.status === 429 || ai.status === 402) {
               // Mistral / fallback providers all exhausted. Alert + bail.
+              errors.push(phaseTrail(`AI exhausted at sector "${search.sector ?? "topic"}" idx ${idx}.`));
               sendAlert(admin, "mistral_exhausted",
                 `AI provider keys exhausted (HTTP ${ai.status})`,
                 `Status: ${ai.status}\nDetail: ${ai.error}\nSector: ${search.sector ?? "topic"}`,
@@ -719,32 +835,47 @@ Other rules:
       }
     }
 
+    mark(`loop-done inserted=${inserted} skipped=${skipped} errors=${errors.length}`);
     // If invoked from sherlock_drain_queue_once(), close out the job row so
-    // the admin UI sees it transition queued → running → done.
+    // the admin UI sees it transition queued → running → done. If we
+    // accumulated any errors OR the loop bailed early, prepend a phase
+    // trail so reaped/truncated rows show where time went.
     if (jobId) {
+      let errorText: string | null = null;
+      if (errors.length > 0) {
+        errorText = errors.slice(0, 10).join("\n").slice(0, 2000);
+      } else if (Date.now() - wallStartMs > WALL_BUDGET_MS - 5000) {
+        // Edge case: under-budget but very close. Include trail anyway.
+        errorText = phaseTrail(`Completed near wall-time budget.`).slice(0, 2000);
+      }
       const { error: jobUpdateErr } = await admin.from("sherlock_jobs").update({
         status: "done",
         inserted,
         skipped,
-        error_text: errors.length ? errors.slice(0, 10).join("\n").slice(0, 2000) : null,
+        error_text: errorText,
         finished_at: new Date().toISOString(),
       }).eq("id", jobId);
       if (jobUpdateErr) console.error("Failed to update sherlock_jobs:", jobUpdateErr);
     }
 
-    return json({ inserted, skipped, errors });
+    return json({ inserted, skipped, errors, phases });
   } catch (e) {
     console.error("ai-discover-projects error:", e);
     // Best-effort: if this run came from the queue drain, mark the job failed.
+    // Include the phase trail if we have it — tells us where the throw fired.
     if (jobIdForCatch) {
       try {
         const adminClient = createClient(
           Deno.env.get("SUPABASE_URL")!,
           Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
         );
+        const baseMsg = e instanceof Error ? e.message : String(e);
+        const withTrail = phases.length > 0
+          ? `${baseMsg}\nphase trail (last ${Math.min(phases.length, 20)}):\n${phases.slice(-20).join('\n')}`
+          : baseMsg;
         await adminClient.from("sherlock_jobs").update({
           status: "failed",
-          error_text: (e instanceof Error ? e.message : String(e)).slice(0, 2000),
+          error_text: withTrail.slice(0, 2000),
           finished_at: new Date().toISOString(),
         }).eq("id", jobIdForCatch);
       } catch { /* nothing further we can do */ }
