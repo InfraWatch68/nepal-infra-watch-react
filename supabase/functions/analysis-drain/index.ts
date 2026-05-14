@@ -26,6 +26,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { getKeys, markExhausted, markSucceeded } from "../_shared/api_keys.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -37,16 +38,12 @@ const stripFences = (s: string) =>
   s.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
 
 // ─── Tavily ──────────────────────────────────────────────────────────────────
-function parseTavilyKeys(): string[] {
-  const multi = (Deno.env.get("TAVILY_API_KEYS") ?? "").split(",").map(k => k.trim()).filter(Boolean);
-  if (multi.length > 0) return multi;
-  const single = Deno.env.get("TAVILY_API_KEY") ?? "";
-  return single ? [single] : [];
-}
-// Rotate to next key on Tavily's quota/auth codes:
-//   429 rate limit, 432 plan limit, 433 paygo limit, 401 invalid key
+// Keys now come from the api_keys table (via _shared/api_keys.ts) which
+// persists exhaustion state across invocations. parseTavilyKeys() removed —
+// getKeys(admin, 'tavily') replaces it.
 const TAVILY_ROTATE_CODES = new Set([401, 429, 432, 433]);
-async function tavily(keys: string[], payload: Record<string, unknown>) {
+// deno-lint-ignore no-explicit-any
+async function tavily(admin: any, keys: string[], payload: Record<string, unknown>) {
   let lastStatus = 0;
   for (let i = 0; i < keys.length; i++) {
     const res = await fetch("https://api.tavily.com/search", {
@@ -54,7 +51,16 @@ async function tavily(keys: string[], payload: Record<string, unknown>) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...payload, api_key: keys[i] }),
     });
-    if (!TAVILY_ROTATE_CODES.has(res.status)) return { res, keyIndex: i };
+    if (!TAVILY_ROTATE_CODES.has(res.status)) {
+      markSucceeded(admin, 'tavily', keys[i]).catch(() => {});
+      return { res, keyIndex: i };
+    }
+    const reason = res.status === 432 ? '432 plan-limit'
+      : res.status === 433 ? '433 paygo-limit'
+      : res.status === 401 ? '401 unauthorized'
+      : res.status === 429 ? '429 rate-limit'
+      : `HTTP ${res.status}`;
+    markExhausted(admin, 'tavily', keys[i], reason).catch(() => {});
     lastStatus = res.status;
     await res.text();
   }
@@ -64,23 +70,10 @@ async function tavily(keys: string[], payload: Record<string, unknown>) {
 // ─── Chat (Mistral keys with rotation > Google > Lovable) ────────────────────
 type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
 
-function parseMistralKeys(): string[] {
-  // Merge MISTRAL_API_KEY (single, primary) with MISTRAL_API_KEYS
-  // (comma-separated, additional). Adding a fallback just needs the new key
-  // appended to MISTRAL_API_KEYS — the existing single key keeps working.
-  const out: string[] = [];
-  const seen = new Set<string>();
-  const single = (Deno.env.get("MISTRAL_API_KEY") ?? "").trim();
-  if (single) { out.push(single); seen.add(single); }
-  const multi = (Deno.env.get("MISTRAL_API_KEYS") ?? "").split(",").map(k => k.trim()).filter(Boolean);
-  for (const k of multi) if (!seen.has(k)) { out.push(k); seen.add(k); }
-  return out;
-}
-
-async function callChat(messages: ChatMessage[]):
+// deno-lint-ignore no-explicit-any
+async function callChat(admin: any, mistralKeys: string[], messages: ChatMessage[]):
   Promise<{ ok: true; text: string } | { ok: false; status: number; error: string }>
 {
-  const mistralKeys = parseMistralKeys();
   const google = Deno.env.get("GOOGLE_AI_API_KEY");
   const lovable = Deno.env.get("LOVABLE_API_KEY");
   if (mistralKeys.length === 0 && !google && !lovable) {
@@ -117,10 +110,12 @@ async function callChat(messages: ChatMessage[]):
     const res = await callOnce("https://api.mistral.ai/v1/chat/completions", mistralKeys[i], "mistral-small-latest");
     if (res.kind === "ok") {
       if (mistralKeys.length > 1) console.log(`Mistral: used key index ${i} of ${mistralKeys.length}`);
+      markSucceeded(admin, 'mistral', mistralKeys[i]).catch(() => {});
       return { ok: true, text: res.text };
     }
     if (res.kind === "exhausted") {
       console.log(`Mistral key index ${i} exhausted (${res.status}); rolling to next`);
+      markExhausted(admin, 'mistral', mistralKeys[i], `${res.status} ${res.body.slice(0, 100)}`).catch(() => {});
       continue;
     }
     console.log(`Mistral key index ${i} returned ${res.status}: ${res.body}`);
@@ -220,7 +215,7 @@ async function patchBucketStatus(admin: any, runId: string, name: string, patch:
 // Returns both article hits AND image hits (Tavily's separate images stream).
 async function runBucket(admin: any, runId: string, keys: string[], b: BucketDef): Promise<{ hits: Hit[]; images: ImageHit[] }> {
   await patchBucketStatus(admin, runId, b.name, { state: "running", started_at: new Date().toISOString() });
-  const r = await tavily(keys, b.payload);
+  const r = await tavily(admin, keys, b.payload);
   if ("exhausted" in r) {
     const reason = r.lastStatus === 432 ? "plan-limit"
       : r.lastStatus === 433 ? "paygo-limit"
@@ -968,10 +963,14 @@ serve(async (req) => {
     projectId = Number.isFinite(Number(body.projectId)) ? Number(body.projectId) : null;
     if (!jobId || !runId || !projectId) return json({ error: "jobId, runId, projectId required" }, 400);
 
-    const tavilyKeys = parseTavilyKeys();
-    if (tavilyKeys.length === 0) throw new Error("No Tavily API keys configured");
-    if (!Deno.env.get("MISTRAL_API_KEY") && !Deno.env.get("LOVABLE_API_KEY") && !Deno.env.get("GOOGLE_AI_API_KEY")) {
-      throw new Error("No AI key configured");
+    // Keys come from api_keys table (rotated, exhaustion persisted) or fall
+    // back to env. tavily()/callChat() use these and write back exhaustion
+    // state via the shared helper.
+    const tavilyKeys = await getKeys(admin, 'tavily');
+    const mistralKeys = await getKeys(admin, 'mistral');
+    if (tavilyKeys.length === 0) throw new Error("No Tavily API keys configured (add via Admin → API Keys)");
+    if (mistralKeys.length === 0 && !Deno.env.get("LOVABLE_API_KEY") && !Deno.env.get("GOOGLE_AI_API_KEY")) {
+      throw new Error("No AI key configured (add Mistral via Admin → API Keys or set GOOGLE/LOVABLE env)");
     }
 
     const { data: project, error: pErr } = await admin
@@ -1034,7 +1033,7 @@ serve(async (req) => {
         return `### [${i + 1}] (${h.bucket}${datePart}) ${h.title}\nURL: ${h.url}\n${h.content}`;
       }).join("\n\n");
 
-    const ai = await callChat([
+    const ai = await callChat(admin, mistralKeys, [
       { role: "system", content: EXTRACTION_SYSTEM },
       { role: "user", content: ctx },
     ]);

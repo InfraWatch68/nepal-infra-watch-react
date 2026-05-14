@@ -3,6 +3,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { NATIONAL_PRIDE_PROJECTS, matchNationalPride } from "../_shared/national_pride.ts";
 import { sendAlert } from "../_shared/notify.ts";
+import { getKeys, markExhausted, markSucceeded } from "../_shared/api_keys.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -110,9 +111,15 @@ const PROJECT_NEWS_DOMAINS = [
   // State-owned implementing entities
   "nea.org.np", "ntc.com.np", "ncell.com.np", "noc.org.np",
   "nrb.org.np", "necepal.org.np",
-  // International funders (project pipelines + monitoring)
-  "worldbank.org", "documents1.worldbank.org", "blogs.worldbank.org", "thedocs.worldbank.org",
-  "adb.org", "events.adb.org", "data.adb.org",
+  // International funders (project pipelines + monitoring).
+  // NOTE: documents1.worldbank.org + thedocs.worldbank.org REMOVED — those are
+  // doc archives full of 100-page program PDFs that the AI correctly rejects
+  // (no single named project). They were dominating Tavily results and
+  // pushing actual project news off the top-5 list. blogs.worldbank.org and
+  // the editorial worldbank.org pages stay — they're typically about
+  // specific projects.
+  "worldbank.org", "blogs.worldbank.org",
+  "adb.org", "events.adb.org",
   "jica.go.jp", "jica.org.np",
   "undp.org", "who.int", "unicef.org", "aiib.org", "eib.org", "ifc.org",
   "kfw.de", "usaid.gov", "np.usembassy.gov", "giz.de", "dfid.gov.uk", "dfat.gov.au",
@@ -157,10 +164,15 @@ async function fetchWithTimeout(
 
 const TAVILY_ROTATE_CODES = new Set([401, 429, 432, 433]);
 const TAVILY_TIMEOUT_MS = 30_000;
+// admin client is passed so that exhausted keys can be persisted (moved to
+// the bottom of the rotation in the api_keys table). Falls silent if a key
+// isn't in the table (env-fallback path).
+// deno-lint-ignore no-explicit-any
 async function tavilySearch(
+  admin: any,
   keys: string[],
   payload: Record<string, unknown>,
-): Promise<{ response: Response; keyIndex: number } | { exhausted: true; lastStatus: number }> {
+): Promise<{ response: Response; keyIndex: number; usedKey: string } | { exhausted: true; lastStatus: number }> {
   let lastStatus = 0;
   for (let i = 0; i < keys.length; i++) {
     let res: Response;
@@ -171,58 +183,44 @@ async function tavilySearch(
         body: JSON.stringify({ ...payload, api_key: keys[i] }),
       }, TAVILY_TIMEOUT_MS);
     } catch (e) {
-      // Treat timeout/network errors as a transient "this key failed".
-      // Synthesise a 599 so the rotate-or-bail logic upstream still works.
       const aborted = (e as Error)?.name === "AbortError";
       lastStatus = aborted ? 599 : 598;
       continue;
     }
-    if (!TAVILY_ROTATE_CODES.has(res.status)) return { response: res, keyIndex: i };
+    if (!TAVILY_ROTATE_CODES.has(res.status)) {
+      markSucceeded(admin, 'tavily', keys[i]).catch(() => {});
+      return { response: res, keyIndex: i, usedKey: keys[i] };
+    }
+    // Persist exhaustion — key sinks to bottom for future invocations.
+    const reason = res.status === 432 ? '432 plan-limit'
+      : res.status === 433 ? '433 paygo-limit'
+      : res.status === 401 ? '401 unauthorized'
+      : res.status === 429 ? '429 rate-limit'
+      : `HTTP ${res.status}`;
+    markExhausted(admin, 'tavily', keys[i], reason).catch(() => {});
     lastStatus = res.status;
     await res.text();
   }
   return { exhausted: true, lastStatus };
 }
 
-function parseTavilyKeys(): string[] {
-  // TAVILY_API_KEYS takes priority (comma-separated list for rotation).
-  // Falls back to the legacy TAVILY_API_KEY single-key secret.
-  const multi = Deno.env.get("TAVILY_API_KEYS") ?? "";
-  const keys = multi.split(",").map((k) => k.trim()).filter(Boolean);
-  if (keys.length > 0) return keys;
-  const single = Deno.env.get("TAVILY_API_KEY") ?? "";
-  return single ? [single] : [];
-}
-
 type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
-
-// Multi-key Mistral parser. Merges MISTRAL_API_KEY (single, primary) with
-// MISTRAL_API_KEYS (comma-separated, additional). Lets operators add fallback
-// keys via MISTRAL_API_KEYS without needing to know/touch the existing
-// primary key. Deduped — same key in both vars is fine.
-function parseMistralKeys(): string[] {
-  const out: string[] = [];
-  const seen = new Set<string>();
-  const single = (Deno.env.get("MISTRAL_API_KEY") ?? "").trim();
-  if (single) { out.push(single); seen.add(single); }
-  const multi = (Deno.env.get("MISTRAL_API_KEYS") ?? "").split(",").map(k => k.trim()).filter(Boolean);
-  for (const k of multi) if (!seen.has(k)) { out.push(k); seen.add(k); }
-  return out;
-}
 
 // Triple-provider chat with Mistral key rotation, then Google/Lovable fallback.
 // Each Mistral key gets one retry on transient 429; quota-exhausted (402 or
 // 429 with free_tier/resource_exhausted body) → roll over to next key
 // immediately. After all Mistral keys exhaust, fall through to Google then
 // Lovable.
+// deno-lint-ignore no-explicit-any
 async function callChatModel(
+  admin: any,
+  mistralKeys: string[],
   messages: ChatMessage[],
 ): Promise<{ ok: true; text: string } | { ok: false; status: number; error: string }> {
-  const mistralKeys = parseMistralKeys();
   const google = Deno.env.get("GOOGLE_AI_API_KEY");
   const lovable = Deno.env.get("LOVABLE_API_KEY");
   if (mistralKeys.length === 0 && !google && !lovable) {
-    return { ok: false, status: 500, error: "No AI key configured (set MISTRAL_API_KEY/MISTRAL_API_KEYS, GOOGLE_AI_API_KEY, or LOVABLE_API_KEY)" };
+    return { ok: false, status: 500, error: "No AI key configured (add Mistral keys via Admin → API Keys, or set MISTRAL_API_KEY/GOOGLE_AI_API_KEY/LOVABLE_API_KEY env)" };
   }
 
   const callOnce = async (endpoint: string, apiKey: string, model: string) => {
@@ -264,20 +262,20 @@ async function callChatModel(
     return { kind: "error" as const, status: 500, body: "exhausted retries" };
   };
 
-  // 1. Try each Mistral key in order. Roll over on exhaustion.
+  // 1. Try each Mistral key in order. Roll over on exhaustion, persist
+  // the exhausted state so the next invocation tries fresh keys first.
   for (let i = 0; i < mistralKeys.length; i++) {
     const res = await callOnce("https://api.mistral.ai/v1/chat/completions", mistralKeys[i], "mistral-small-latest");
     if (res.kind === "ok") {
       if (mistralKeys.length > 1) console.log(`Mistral: used key index ${i} of ${mistralKeys.length}`);
+      markSucceeded(admin, 'mistral', mistralKeys[i]).catch(() => {});
       return { ok: true, text: res.text };
     }
     if (res.kind === "exhausted") {
       console.log(`Mistral key index ${i} exhausted (${res.status}); rolling to next`);
+      markExhausted(admin, 'mistral', mistralKeys[i], `${res.status} ${res.body.slice(0, 100)}`).catch(() => {});
       continue;
     }
-    // transient (after retry) or other provider error → surface but don't roll
-    // through remaining Mistral keys (the issue is likely transient and other
-    // keys share the same problem). Drop to Google fallback below.
     console.log(`Mistral key index ${i} returned ${res.status}: ${res.body}`);
     break;
   }
@@ -315,11 +313,19 @@ serve(async (req) => {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
     const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
     const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    // Admin client (service role, bypasses RLS) — needed early so we can
+    // pull the rotated key list from the api_keys table before any auth
+    // or upstream provider work.
+    const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-    const tavilyKeys = parseTavilyKeys();
-    if (tavilyKeys.length === 0) return json({ error: "No Tavily API keys configured" }, 500);
-    if (!Deno.env.get("MISTRAL_API_KEY") && !Deno.env.get("LOVABLE_API_KEY") && !Deno.env.get("GOOGLE_AI_API_KEY")) {
-      return json({ error: "No AI key configured (set MISTRAL_API_KEY, LOVABLE_API_KEY, or GOOGLE_AI_API_KEY)" }, 500);
+    // Keys pulled from the api_keys table when populated, else from env.
+    // tavilySearch + callChatModel use these and persist exhaustion state
+    // back to the table so the next invocation tries the freshest first.
+    const tavilyKeys = await getKeys(admin, 'tavily');
+    const mistralKeys = await getKeys(admin, 'mistral');
+    if (tavilyKeys.length === 0) return json({ error: "No Tavily API keys configured (add via Admin → API Keys or TAVILY_API_KEYS env)" }, 500);
+    if (mistralKeys.length === 0 && !Deno.env.get("LOVABLE_API_KEY") && !Deno.env.get("GOOGLE_AI_API_KEY")) {
+      return json({ error: "No AI key configured (add Mistral via Admin → API Keys or set LOVABLE/GOOGLE env)" }, 500);
     }
 
     // Auth gate: accept either (a) an admin/coadmin/reviewer user JWT, or
@@ -380,7 +386,7 @@ serve(async (req) => {
     // fuzzy match (which is a belt-and-braces fallback).
     const nationalPrideMode: boolean = body.nationalPride === true;
 
-    const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    // (admin client already created at the top of the handler — reused here.)
 
     // Build the list of (query, sector?) tuples to run.
     // - National Pride mode: pick one of the 24 names per "sector" the caller
@@ -626,7 +632,7 @@ Other rules:
       mark(`tavily-start sector=${search.sector ?? 'topic'}`);
       heartbeat(`tavily-start sector=${search.sector ?? 'topic'}`);
 
-      const tavResult = await tavilySearch(tavilyKeys, {
+      const tavResult = await tavilySearch(admin, tavilyKeys, {
         query: search.query,
         search_depth: "advanced",
         max_results: maxResults,
@@ -709,7 +715,7 @@ Other rules:
           continue;
         }
         try {
-          const ai = await callChatModel([
+          const ai = await callChatModel(admin, mistralKeys, [
             { role: "system", content: sysPrompt },
             { role: "user", content: `Title: ${r.title}\nURL: ${r.url}\n\nArticle:\n${r.content.slice(0, 4000)}` },
           ]);

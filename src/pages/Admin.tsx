@@ -29,6 +29,7 @@ import { ProjectModerationTab } from '@/components/admin/ProjectModerationTab';
 import { ActivityDashboardTab } from '@/components/admin/ActivityDashboardTab';
 import { AdminRemovalPanel } from '@/components/admin/AdminRemovalPanel';
 import { ReviewHistoryIcon } from '@/components/ReviewHistoryIcon';
+import { ApiKeysPanel } from '@/components/admin/ApiKeysPanel';
 
 const APPROVAL_COLORS: Record<string, string> = {
   pending: 'bg-warning/15 text-warning',
@@ -484,6 +485,8 @@ export default function Admin() {
             </div>
           </div>
         </Card>
+
+        <ApiKeysPanel />
 
         <Tabs defaultValue="queue">
           <TabsList>
