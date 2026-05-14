@@ -15,6 +15,7 @@ import ProjectRatings from "./pages/ProjectRatings";
 import Dashboard from "./pages/Dashboard";
 import SubmitProject from "./pages/SubmitProject";
 import Admin from "./pages/Admin";
+import AdminGuide from "./pages/AdminGuide";
 import NotFound from "./pages/NotFound.tsx";
 
 const queryClient = new QueryClient();
@@ -38,6 +39,7 @@ const App = () => (
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/dashboard/submit" element={<SubmitProject />} />
             <Route path="/admin" element={<Admin />} />
+            <Route path="/admin/guide" element={<AdminGuide />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </AuthProvider>

@@ -20,7 +20,7 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Checkbox } from '@/components/ui/checkbox';
 import { toast } from 'sonner';
-import { Shield, Megaphone, Sparkles, Loader2, ExternalLink, Users as UsersIcon } from 'lucide-react';
+import { Shield, Megaphone, Sparkles, Loader2, ExternalLink, Users as UsersIcon, BookOpen } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { SECTORS, PROVINCES, districtsFor } from '@/lib/constants';
 import { VerifyDialog } from '@/components/admin/VerifyDialog';
@@ -403,11 +403,20 @@ export default function Admin() {
     <div className="min-h-screen flex flex-col">
       <SiteHeader />
       <section className="border-b bg-primary text-primary-foreground">
-        <div className="container py-8">
-          <p className="text-xs uppercase tracking-[0.2em] font-mono text-accent mb-2">Internal</p>
-          <h1 className="font-display text-4xl font-bold flex items-center gap-3">
-            <Shield className="h-8 w-8 text-accent" /> {isAdmin ? 'Admin' : isCoadmin ? 'Co-admin' : 'Reviewer'} console
-          </h1>
+        <div className="container py-8 flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <p className="text-xs uppercase tracking-[0.2em] font-mono text-accent mb-2">Internal</p>
+            <h1 className="font-display text-3xl sm:text-4xl font-bold flex items-center gap-3">
+              <Shield className="h-7 w-7 sm:h-8 sm:w-8 text-accent" /> {isAdmin ? 'Admin' : isCoadmin ? 'Co-admin' : 'Reviewer'} console
+            </h1>
+          </div>
+          <Link
+            to="/admin/guide"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-mono border border-primary-foreground/20 bg-primary-foreground/5 hover:bg-primary-foreground/10 text-primary-foreground/90 hover:text-primary-foreground transition-colors"
+            title="New here? Full reference for every admin capability."
+          >
+            <BookOpen className="h-3.5 w-3.5" /> Admin guide
+          </Link>
         </div>
       </section>
 

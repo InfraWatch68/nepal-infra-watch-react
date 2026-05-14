@@ -16,7 +16,8 @@
 ## Table of contents
 
 1. [Console overview](#console-overview)
-2. [AI Tools — Global Brief](#ai-tools--global-brief)
+2. [Admin Guide page (this page)](#admin-guide-page-this-page)
+3. [AI Tools — Global Brief](#ai-tools--global-brief)
 3. [AI Tools — Daily Briefs (5 AM NPT cron)](#ai-tools--daily-briefs-5-am-npt-cron)
 4. [AI Tools — Auto-approve threshold](#ai-tools--auto-approve-threshold)
 5. [AI Tools — Refresh stale projects](#ai-tools--refresh-stale-projects)
@@ -46,13 +47,34 @@ The `/admin` route is the central console. It loads only for users whose `user_r
 ### Previous
 - One AI tools Card containing Global brief generator + Auto-approve settings + Sherlock manager + Refresh stale projects
 - Bottom: 6-tab structure (Review queue / All projects / Activity / Moderation status / Pending updates / Pending sources)
+- Below the AI tools card sits a separate API Keys panel (two columns: Tavily / Mistral). See [API Keys panel](#api-keys-panel).
+- A second button "Run daily briefs now" sits next to "Generate global brief" — triggers the daily-briefs orchestrator manually.
 
 ### Current
-- Same Card structure, same tabs, BUT:
-- **+** Below the AI tools card sits a separate **API Keys panel** (two columns: Tavily / Mistral). See [API Keys panel](#api-keys-panel).
-- **+** A second button "Run daily briefs now" sits next to "Generate global brief" — triggers the daily-briefs orchestrator manually.
+- Same layout, same tabs, same AI tools card + API Keys panel
+- **+ (added 2026-05-14)** Hero strip now has an **"Admin guide"** button on the right side that opens the in-app guide at `/admin/guide`. See [Admin Guide page](#admin-guide-page-this-page).
+- **+** Hero typography scales down on mobile (`text-3xl` instead of `text-4xl` below `sm:` breakpoint) so the title + guide button fit on narrow screens.
 
-**Fix / Change:** API keys are no longer hidden in env secrets; the panel surfaces them with status badges + credit balance + per-key Check/Delete. Adds discoverability for a previously invisible operational area.
+**Fix / Change:** New admins now have a discoverable entry point to documentation directly from the console header. The button reads "Admin guide" with a BookOpen icon; clicking opens the comprehensive reference in-app (no need to find the file on GitHub or in the repo).
+
+---
+
+## Admin Guide page (this page)
+
+The in-app rendering of this guide, served at `/admin/guide`.
+
+### Previous
+_(did not exist — the guide lived only as `docs/ADMIN_GUIDE.md` in the repo, viewable via GitHub or local clone)_
+
+### Current
+- Route: `/admin/guide` (no auth gate — public read; discoverable via the "Admin guide" button on `/admin`).
+- Rendered from the same `docs/ADMIN_GUIDE.md` source via Vite `?raw` import + `react-markdown` (with `remark-gfm` for GFM tables and `rehype-slug` for heading anchors). The markdown file is the single source of truth — the rendered page automatically reflects the latest content on every deploy.
+- Layout: SiteHeader → hero strip with breadcrumb back to `/admin`, page title, intro, "View on GitHub" external link → markdown article with prose typography (`@tailwindcss/typography` plugin's `prose` class with custom overrides for headings, tables, code blocks, links).
+- Mobile-friendly: `prose-sm` on small viewports → `prose-base` on `sm:` and up; tables flow naturally because GFM tables render as scrollable HTML; long line-length capped to `max-w-4xl`.
+- Heading anchors (e.g. `/admin/guide#api-keys-panel`) work because `rehype-slug` adds `id` attributes to every heading.
+- Includes a footer-level GitHub link so admins who prefer the raw markdown view can jump to the repo.
+
+**Fix / Change:** The guide is now usable inside the website without needing repo access. Admins can read on a phone, click section anchors from the TOC, and stay in the admin context throughout.
 
 ---
 
@@ -472,4 +494,4 @@ This file is updated by Claude Code after every git commit that touches admin be
 
 This way, an admin reading the file can see (a) the full current capabilities, (b) the recent evolution of every area, and (c) what's about to change because the "Fix / Change:" lines double as a per-section changelog.
 
-> Last updated: 2026-05-14 (commit `4d8a85a` — daily AI briefs cron + carousel rebuild).
+> Last updated: 2026-05-14 (in-app guide page at /admin/guide).
