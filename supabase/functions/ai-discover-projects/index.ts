@@ -121,17 +121,9 @@ const PROJECT_NEWS_DOMAINS = [
   "reuters.com", "theguardian.com", "aljazeera.com",
 ] as const;
 
-// Domains we want Tavily to EXCLUDE — observed in low-signal results during
-// remote-district sweeps. Social media, generic tooling/research portals,
-// and search aggregators that crowd out project news.
-const NOISE_DOMAINS = [
-  "facebook.com", "twitter.com", "x.com", "linkedin.com", "instagram.com",
-  "youtube.com", "reddit.com", "pinterest.com", "tiktok.com", "tumblr.com",
-  "quora.com", "medium.com",
-  "google.com", "bing.com", "duckduckgo.com",
-  "fsmtoolbox.com", "gggi.org", "uclg-aspac.org", "asiantransportobservatory.org",
-  "scribd.com", "academia.edu", "researchgate.net",
-] as const;
+// (Previous NOISE_DOMAINS const removed — now obsolete because we use
+// include_domains as a whitelist; anything not in PROJECT_NEWS_DOMAINS is
+// already excluded. Kept commented in git history for reference.)
 
 // Parses TAVILY_API_KEYS (comma-separated) with fallback to TAVILY_API_KEY.
 // Tries each key in order; moves to the next on quota/auth failures.
@@ -418,24 +410,18 @@ serve(async (req) => {
     } else if (geoMode) {
       const targetSectors = (sectorsParam && sectorsParam.length > 0) ? sectorsParam : SECTORS;
       for (const sec of targetSectors) {
-        // Project-event keyword expansion. The previous "project OR program"
-        // template was too generic — Tavily surfaced policy papers and sector
-        // overviews for remote districts (Sindhupalchok, Baglung, Rasuwa) where
-        // English news coverage is thin, leading to a 9% insertion rate.
-        // These event-anchored terms ("groundbreaking", "tender", "DPR", etc.)
-        // surface ACTIONABLE project moments rather than sector commentary.
-        // Including Nepali transliterations ("shilanyas" = groundbreaking,
-        // "udghatan" = inauguration) catches articles that quote them verbatim.
-        // Kept under ~250 chars total so Tavily's advanced search doesn't
-        // degrade on long queries.
-        const eventTerms = '("project" OR "groundbreaking" OR "shilanyas" OR "inauguration" OR "udghatan" OR "tender" OR "DPR" OR "feasibility study" OR "contract awarded" OR "foundation stone" OR "commissioning" OR "handover" OR "construction begins" OR "MoU signed")';
-        const parts = ["Nepal", sec, eventTerms, municipality, district, province].filter(Boolean);
+        // Simple query — empirically validated to perform best when paired
+        // with include_domains. The earlier event-keyword OR cluster + topic
+        // news combination pulled in Indian regional press dominantly
+        // (propnewstime, swarajyamag, deccanchronicle, 5dariyanews etc.) and
+        // burned Tavily quota on articles the AI correctly rejected. With
+        // include_domains narrowing to Nepali + funder + gov sources,
+        // a short factual query gets the cleanest signal.
+        const parts = ["Nepal", sec, "project", municipality, district, province].filter(Boolean);
         searches.push({ query: parts.join(" "), sector: sec });
       }
     } else {
-      // Same event-anchored expansion for the topic/region path.
-      const eventTerms = '("project" OR "groundbreaking" OR "inauguration" OR "tender" OR "DPR" OR "feasibility study" OR "contract awarded" OR "construction begins")';
-      const parts = ["Nepal", topic ?? "infrastructure", eventTerms, region].filter(Boolean);
+      const parts = ["Nepal", topic ?? "infrastructure project", region].filter(Boolean);
       searches.push({ query: parts.join(" ") });
     }
 
@@ -591,6 +577,52 @@ Other rules:
       // Cut from 1500ms → 1000ms; 1s is still safely within Tavily rate
       // limits but reclaims meaningful wall-time on multi-search runs.
       if (sIdx > 0) await new Promise(res => setTimeout(res, 1000));
+
+      // ─── Dry-cell guard ───────────────────────────────────────────────
+      // Skip Tavily entirely if the last 3 runs on this exact (province,
+      // district, sector) cell all returned 0 inserts. Saves API quota on
+      // cells where Tavily reliably returns content but the AI rejects all
+      // of it (typically remote districts with no English-language news
+      // coverage of specific projects). Force a re-test by setting
+      // forceDryRecheck=true in the job params (rerun handler in
+      // SherlockManager injects this automatically).
+      if (search.sector && province && !nationalPrideMode && !body.forceDryRecheck) {
+        // Pull a small window of recent same-province geo runs, then filter
+        // for exact district+sector match client-side. Client filter is
+        // more robust than relying on PostgREST JSONB-contains syntax for
+        // the sectors array. Also exclude prior dry-skip rows so the guard
+        // can't perpetuate itself — only REAL Tavily runs that returned 0
+        // inserts count toward the dry streak.
+        const { data: recentRuns } = await admin
+          .from("sherlock_jobs")
+          .select("inserted, params, error_text, finished_at")
+          .eq("kind", "geo")
+          .eq("status", "done")
+          .filter("params->>province", "eq", province)
+          .order("finished_at", { ascending: false })
+          .limit(20);
+        const cellRuns = (recentRuns ?? []).filter((j: any) => {
+          // Don't let a prior dry-skip row count as a "Tavily returned 0"
+          // — those rows DIDN'T call Tavily. Without this exclusion the
+          // guard self-perpetuates: once dry, always dry, even after code
+          // changes (e.g. this include_domains switch) that would fix it.
+          if (j.error_text && j.error_text.startsWith("Dry cell skipped")) return false;
+          const p = j.params ?? {};
+          if (district) { if (p.district !== district) return false; }
+          else          { if (p.district)              return false; }
+          const sectors = Array.isArray(p.sectors) ? p.sectors : [];
+          return sectors.includes(search.sector);
+        }).slice(0, 3);
+        const allDry = cellRuns.length >= 3 && cellRuns.every((j: any) => (j.inserted ?? 0) === 0);
+        if (allDry) {
+          const cellLabel = [province, district, search.sector].filter(Boolean).join("/");
+          mark(`dry-skip sector=${search.sector}`);
+          heartbeat(`dry-skip sector=${search.sector}`);
+          errors.push(`Dry cell skipped: ${cellLabel} — last 3 geo runs all returned 0 inserts; Tavily call suppressed to conserve quota. Force a recheck by manually rerunning this job.`);
+          continue;
+        }
+      }
+
       mark(`tavily-start sector=${search.sector ?? 'topic'}`);
       heartbeat(`tavily-start sector=${search.sector ?? 'topic'}`);
 
@@ -599,23 +631,23 @@ Other rules:
         search_depth: "advanced",
         max_results: maxResults,
         include_answer: false,
-        // Capture images so we can populate cover_image_url + image_urls when
-        // we insert the project. Images are scoped per Tavily search so we
-        // grab the first few and attach them to whatever project gets created
-        // from this search's article hits.
         include_images: true,
-        // topic="news" softly biases Tavily toward news sources without
-        // hard-restricting (unlike include_domains). Government/funder pages
-        // still surface because they get syndicated through news outlets and
-        // because Tavily's news index includes press-release feeds.
-        topic: "news",
-        // News topic defaults to last 3 days — too narrow for project
-        // discovery (groundbreakings, tender awards may be months old but
-        // still active). 730 days = 2 years covers typical project lifecycle.
+        // 2-year recency window: project events (DPR approval, tender
+        // awards, groundbreakings, contract signings) often pre-date a few
+        // months; keeping 730 lets us catch them while filtering out very
+        // old historical articles.
         days: 730,
-        // Hard-exclude observed low-signal sources (social media, generic
-        // tooling sites, search aggregators). See NOISE_DOMAINS at top.
-        exclude_domains: [...NOISE_DOMAINS],
+        // include_domains: empirically validated whitelist of Nepali news +
+        // gov.np ministries + funders. Side-by-side tests showed open-web
+        // search returned predominantly Indian wire copy (propnewstime,
+        // swarajyamag, deccanchronicle) for "Nepal <sector> project
+        // <district>" queries, because south-Asia search results are
+        // dominated by Indian regional press. include_domains restores
+        // signal at the cost of locking out non-listed sources — the
+        // PROJECT_NEWS_DOMAINS list is curated to be comprehensive across
+        // Nepali news, government ministries/departments, state-owned
+        // entities, and international funders.
+        include_domains: [...PROJECT_NEWS_DOMAINS],
       });
 
       if ("exhausted" in tavResult) {

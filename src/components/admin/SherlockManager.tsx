@@ -192,9 +192,12 @@ function QueueTab() {
   // bumped to 1 so reruns drain ahead of fresh sweep_child cells.
   const rerunOne = async (j: Job) => {
     setRerunBusy(j.id);
+    // Inject forceDryRecheck=true so the edge function's dry-cell guard
+    // doesn't suppress this manual rerun (user explicitly wants to retest).
+    const params = { ...(j.params as Record<string, unknown>), forceDryRecheck: true };
     const { error } = await supabase.from('sherlock_jobs').insert({
       kind: j.kind,
-      params: j.params,
+      params,
       priority: 1,
       enqueued_by: user?.id ?? null,
     });
@@ -220,7 +223,9 @@ function QueueTab() {
     setBulkBusy(true);
     const rows = candidates.map(j => ({
       kind: j.kind,
-      params: j.params,
+      // Inject forceDryRecheck=true so the edge function's dry-cell guard
+      // doesn't suppress these manual reruns.
+      params: { ...(j.params as Record<string, unknown>), forceDryRecheck: true },
       priority: 1,
       enqueued_by: user?.id ?? null,
     }));

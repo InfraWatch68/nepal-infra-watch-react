@@ -11,6 +11,7 @@ import ProjectDetail from "./pages/ProjectDetail";
 import MapPage from "./pages/MapPage";
 import Compare from "./pages/Compare";
 import Analytics from "./pages/Analytics";
+import ProjectRatings from "./pages/ProjectRatings";
 import Dashboard from "./pages/Dashboard";
 import SubmitProject from "./pages/SubmitProject";
 import Admin from "./pages/Admin";
@@ -33,6 +34,7 @@ const App = () => (
             <Route path="/map" element={<MapPage />} />
             <Route path="/compare" element={<Compare />} />
             <Route path="/analytics" element={<Analytics />} />
+            <Route path="/analytics/ratings" element={<ProjectRatings />} />
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/dashboard/submit" element={<SubmitProject />} />
             <Route path="/admin" element={<Admin />} />

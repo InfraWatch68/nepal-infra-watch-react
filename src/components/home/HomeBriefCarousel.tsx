@@ -143,8 +143,8 @@ export function HomeBriefCarousel() {
     today: {
       kicker: "TODAY'S PULSE",
       Icon: Plus,
-      href: '/projects',
-      cta: 'Browse projects',
+      href: '/analytics#activity',
+      cta: 'See 30-day activity',
       render: () => (
         <div>
           <div className="font-display text-5xl md:text-6xl font-bold leading-none">
@@ -175,8 +175,8 @@ export function HomeBriefCarousel() {
     risk: {
       kicker: 'RISK RADAR',
       Icon: AlertTriangle,
-      href: '/projects',
-      cta: 'Inspect projects',
+      href: '/analytics#slips',
+      cta: 'See worst slips',
       render: () => (
         <div>
           <div className="font-display text-5xl md:text-6xl font-bold leading-none">
@@ -191,8 +191,8 @@ export function HomeBriefCarousel() {
     fresh: {
       kicker: 'FRESHNESS',
       Icon: Activity,
-      href: '/projects',
-      cta: 'See active projects',
+      href: '/analytics#stalest',
+      cta: 'See stalest data',
       render: () => (
         <div>
           <div className="font-display text-5xl md:text-6xl font-bold leading-none">
