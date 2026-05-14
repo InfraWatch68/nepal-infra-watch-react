@@ -19,7 +19,8 @@
 2. [Admin Guide page (this page)](#admin-guide-page-this-page)
 3. [AI Tools — Global Brief](#ai-tools--global-brief)
 3. [AI Tools — Daily Briefs (5 AM NPT cron)](#ai-tools--daily-briefs-5-am-npt-cron)
-4. [AI Tools — Auto-approve threshold](#ai-tools--auto-approve-threshold)
+3. [AI Tools — Local AI tools panel](#ai-tools--local-ai-tools-panel)
+4. [AI Tools — Auto-approve & Auto-analysis](#ai-tools--auto-approve--auto-analysis)
 5. [AI Tools — Refresh stale projects](#ai-tools--refresh-stale-projects)
 6. [API Keys panel](#api-keys-panel)
 7. [Sherlock — Queue tab](#sherlock--queue-tab)
@@ -55,6 +56,9 @@ Where to find it: `/admin` (this is the whole page).
 ### Current
 - Same layout, same tabs, same AI tools card + API Keys panel
 - **+ (added 2026-05-14)** Hero strip now has an **"Admin guide"** button on the right side that opens the in-app guide at `/admin/guide`. See [Admin Guide page](#admin-guide-page-this-page).
+- **+ (added 2026-05-15)** New **Local AI tools** card sits between API Keys and the bottom tabs — collapsed by default, click to expand. Runs the website's seven AI workflows in the moderator's own Claude.ai / ChatGPT subscription instead of the server's Tavily+Mistral. See [AI Tools — Local AI tools panel](#ai-tools--local-ai-tools-panel).
+- **+ (added 2026-05-15)** "All projects" tab now paginates at 20 rows per page (was infinite scroll). Filter chips (approved / changes-requested / pending / rejected) above the list reset to page 1 on switch.
+- **+ (added 2026-05-15)** Two AI-tools-card buttons (`Generate global brief` + `Run daily briefs now`) collapsed into a single **`Generate AI briefs`** button that always fans out across all 8 scopes — no per-scope dropdowns. See [Daily Briefs](#ai-tools--daily-briefs-5-am-npt-cron).
 - **+** Hero typography scales down on mobile (`text-3xl` instead of `text-4xl` below `sm:` breakpoint) so the title + guide button fit on narrow screens.
 
 **Fix / Change:** New admins now have a discoverable entry point to documentation directly from the console header. The button reads "Admin guide" with a BookOpen icon; clicking opens the comprehensive reference in-app (no need to find the file on GitHub or in the repo).
@@ -84,68 +88,119 @@ _(did not exist — the guide lived only as `docs/ADMIN_GUIDE.md` in the repo, v
 
 ## AI Tools — Global Brief
 
-Manually generate an aggregate AI brief from approved projects. Writes to `global_briefs` table; appears on home page carousel.
+Manually generate aggregate AI briefs from approved projects. Writes to `global_briefs` table; appears on home page carousel.
 
-Where to find it: `/admin` → "AI tools" card (red-tinted, near top of page) → "Global brief" section.
+Where to find it: `/admin` → "AI tools" card (red-tinted, near top of page).
 
 ### Previous
-- Scope dropdown: All projects / By province / By sector
-- Province or Sector secondary dropdown when scope is not "All"
-- "Generate global brief" button → invokes `ai-generate-global-brief` edge function
-- Persisted with `headline + body + sources + scope + scope_province? + scope_sector?`
-- Retention: keeps 10 most-recent per scope
+- "Global brief" sub-section with scope dropdown (All projects / By province / By sector) and a Generate button
+- Each click produced ONE brief for the selected scope
+- AI scored `importance` 0.00–1.00 per brief; home carousel picked top 5 across scopes by importance
+- Retention: keeps 5 most-recent per scope
+- Two separate buttons: `Generate global brief` + `Run daily briefs now`
 
 ### Current
-- Same scope/province/sector controls
-- Same Generate global brief button
-- **+** AI now also scores `importance` 0.00–1.00 per brief (rubric: 0.90+ flagship slip / audit finding, 0.30 filler day). Score persisted to `global_briefs.importance`.
-- **+** Retention reduced **from 10 → 5** per scope (the daily cron writes 8 briefs/day; keeping a tight week-of-each-scope archive is enough context without bloating).
-- **+** Edge function accepts three auth modes: moderator JWT (admin button), service-role JWT (cron), or `X-Internal-Token` header (alternate cron path).
-- **+** Migration `20260510180000_global_briefs_scope_columns.sql` was applied to live DB on 2026-05-13, so structured `scope_province` and `scope_sector` columns now persist alongside the legacy `scope` text column.
+- **Per-scope dropdown removed.** Single `Generate AI briefs` button always fans across all 8 scopes (national + 7 provinces).
+- **Each scope now produces a BATCH of 3–10 distinct briefs** instead of one. AI is prompted for "different angles" (sector-wide delay pattern / single flagship slip / funding-commitment shift / status churn / critical-risk cluster / audit finding / completion milestone / geographic concentration / contractor concentration). Each brief in the batch gets its own importance score.
+- **`global_briefs` gained `batch_id` (UUID) + `display_eligible` (boolean).** Threshold for display: importance ≥ 0.65. Anything below is archived but invisible.
+- **New batch demotes the prior batch's `display_eligible=true` rows for the same scope to false** — the carousel always reflects the latest run, no manual cleanup needed.
+- **Retention bumped from 5 → 30 per scope.** With 3–10 briefs per run × 8 scopes × daily cron, the previous limit of 5 wiped a day's worth in hours.
+- Migrations: `20260514150000_global_briefs_batch.sql` (adds the columns).
+- Multi-brief prompt asks the AI to be honest about scores — most "quiet day in a small province" briefs land at 0.20–0.35 and stay invisible, which is fine.
 
-**Fix / Change:** Adds a single ranking signal (importance) used by the home carousel to pick the top 5 most-newsworthy briefs across all scopes. Eliminates the previous "always the latest scope='global' brief" behaviour.
+**Fix / Change:** Old flow produced one brief per click → carousel was thin. New flow produces a diverse batch per scope, importance-filters to display, so the homepage carousel has real content variety every day.
 
 ---
 
 ## AI Tools — Daily Briefs (5 AM NPT cron)
 
-Brand-new automated daily fan-out. Generates 1 national + 7 provincial briefs every morning at 5:00 NPT, then emails a digest.
+Automated daily fan-out. Generates batches of 3–10 briefs per scope across 1 national + 7 provincial = 8 scopes every morning at 5:00 NPT, then emails a digest.
 
-Where to find it: `/admin` → "AI tools" card → "Run daily briefs now" button (next to "Generate global brief"). Cron triggers automatically every day at 05:00 NPT regardless.
+Where to find it: `/admin` → "AI tools" card → **`Generate AI briefs`** button. Cron triggers automatically every day at 05:00 NPT regardless.
 
 ### Previous
-_(did not exist — brief generation was 100% manual)_
+- Cron `daily-briefs-5am-nepal` (15 23 * * * UTC = 05:00 NPT) → `/functions/v1/generate-daily-briefs`
+- Orchestrator iterated 8 scopes sequentially with 4s pacing
+- Each scope produced **ONE** brief
+- Digest email sorted by importance DESC, sent via Resend to `ALERT_EMAIL`
+- Subject: `Nepal Infra Watch — Daily briefs YYYY-MM-DD (8/8 generated, top 0.94 Bagmati)`
+- Two admin buttons: `Generate global brief` (per-scope, dropdowns) and `Run daily briefs now` (all 8 scopes)
 
 ### Current
-- pg_cron job `daily-briefs-5am-nepal` fires at `15 23 * * *` UTC (= 05:00 NPT).
-- The cron calls `run_daily_briefs_now()` SECURITY DEFINER function → `net.http_post()` → `/functions/v1/generate-daily-briefs`.
-- Orchestrator iterates 8 scopes sequentially: `global` + 7 provinces. 4-second pacing between calls to stay under Mistral's free-tier RPM.
-- Each scope calls `ai-generate-global-brief` which writes the brief with `importance` scored by the AI.
-- Once all 8 attempted, builds a digest email: per-brief headline + body (truncated) sorted by importance DESC. Sent via Resend to `ALERT_EMAIL` (default `infrawatch068@gmail.com`).
-- Email subject: `Nepal Infra Watch — Daily briefs YYYY-MM-DD (8/8 generated, top 0.94 Bagmati)`
-- **Admin trigger:** `/admin` AI tools card has a **"Run daily briefs now"** button — invokes the same orchestrator with your moderator JWT for ad-hoc testing without waiting for the 05:00 cron. Returns `{generated, failed, email_sent}` and toasts a summary.
+- Same cron, same orchestrator, same email
+- **+** Each scope now produces a **batch of 3–10 distinct briefs** instead of one (see [Global Brief](#ai-tools--global-brief)). 8 scopes × ~5 briefs ≈ 40 briefs/day total.
+- **+** Orchestrator generates a single `batch_id` UUID at the start and threads it through every child `ai-generate-global-brief` call. The whole day's run is grouped.
+- **+** Digest email subject reformatted: `Nepal Infra Watch — AI briefs YYYY-MM-DD (N display-eligible of M across S/8 scopes)`. Body shows per-scope counts + top 3 headlines per scope (★ marker on the display-eligible ones).
+- **+** Two admin buttons collapsed into one **`Generate AI briefs`** button — no per-scope dropdowns. Always fans across all 8 scopes; matches the cron's behaviour 1:1.
+- **+** Toast on click reports `Generated N briefs across X/8 scopes · M display-eligible`.
 
-**Fix / Change:** Eliminates the manual cadence problem. The home carousel now always has a fresh ranked set to display each morning.
+**Fix / Change:** Old flow gave a thin home carousel (8 briefs/day, only ones above threshold visible — often only 2–3 made it). New flow gives a diverse batch per scope; carousel shows up to 12 display-eligible briefs at a time.
 
 ---
 
-## AI Tools — Auto-approve threshold
+## AI Tools — Local AI tools panel
 
-Controls whether AI-discovered projects get automatically promoted from `approval_status='pending'` to `'approved'` based on the AI's `confidence_score`.
+Run the website's AI workflows in the moderator's own Claude.ai / ChatGPT subscription instead of the server's Tavily + Mistral quota. Designed for when Tavily / Mistral free-tier credits are exhausted, or when the moderator wants higher-quality output (Claude > Mistral) for stakes work.
 
-Where to find it: `/admin` → "AI tools" card → "Auto-approve high-confidence AI submissions" panel (green-bordered when ON, with toggle + threshold slider).
+Where to find it: `/admin` → scroll past API Keys → **`Local AI tools`** card (collapsed by default; click to expand).
 
 ### Previous
-- Toggle switch (enabled / disabled), with green border highlight when enabled
+_(did not exist — every AI workflow burned server-side Tavily + Mistral credits)_
+
+### Current
+- New collapsible card, closed by default to keep the admin page light.
+- **Service-role key setup** at top — paste the **JWT-format `eyJ...` service_role key** from Supabase Dashboard → API. The newer `sb_secret_` keys are rejected by PostgREST (401 "Forbidden use of secret API key in browser") when called from Claude.ai / ChatGPT / subagent runtimes; panel shows a red banner if a `sb_secret_` key is saved. Key persists in browser localStorage (per-browser, never bundled with the SPA).
+- **Seven workflow rows**, each generates a self-contained prompt the admin copies into their AI tool:
+  - **Tool menu** — AI replies with the list of supported tasks. Start here if unsure.
+  - **Discover projects** — single-cell web search → extract → insert. Mirrors `ai-discover-projects`.
+  - **Go Live (multi-cell sweep)** — walks a (province × sector) grid running Discover for each cell. Replaces the server-side Sherlock Live cron — the heaviest consumer of Tavily + Mistral credits.
+  - **Analyze projects (deep)** — multi-select project picker with filter (All / Approved only / Unanalyzed / Stale >2d, stalest first). Loops over selected projects; each gets the full Run-AI-Analysis + Trace-History pipeline (5-bucket research, 7 detail tables, 3 timeline tables, narrative summary + gaps).
+  - **Live Check (on-approval analysis)** — polls Supabase every 60s for newly-approved projects (`reviewed_at > session_start AND last_comprehensive_analysis_at IS NULL`) and runs Analyze on each. Mirrors the server-side `queue_analysis_on_approval` trigger.
+  - **Generate briefs** — multi-brief batch over approved projects in a scope. Mirrors the new multi-brief flow.
+  - **Fetch news** — recent news for one project → `project_updates` + `project_sources`.
+  - **Verify project** — read-only audit; returns a JSON report; no DB writes.
+- **Multi-prompt detection** is baked into every prompt — paste two prompts together into Claude Code and it auto-spawns one subagent per prompt (parallel); paste into ChatGPT / plain Claude.ai and it tells you to use separate windows.
+- **Per-workflow mutex** (not panel-wide): Go Live and Live Check can run in parallel because they claim separate session columns (`sherlock_live_state.golive_session_id` vs `livecheck_session_id`). Same-workflow second-starts are locked. Discover / Analyze (one-shot) / Brief / Fetch news / Verify never claim a session and never lock.
+- **Kill switch:** Stop button next to each running session. Sets the corresponding session column to null; the AI's pre-cell/pre-cycle GET sees the change and exits gracefully (~5–60s latency depending on what step it's on).
+- **Heartbeat-based stale detection:** if the AI dies externally (terminal kill, tab close, host crash) and never reaches its release step, the panel detects heartbeat-older-than-5min and auto-clears the claim with a toast.
+- **Embedded Go Live log** — mirrors the Sherlock Queue tab UI (status badge / kind / params summary / +inserted/skipped / heartbeat trail / errors) filtered to local-golive rows, with a "local only" toggle to optionally also show server cron rows. Updates in realtime.
+- **Cross-mode integration with Sherlock Live Discovery:** local Go Live and server Sherlock Live share the same cursor on `sherlock_live_state` so resume hands off cleanly between modes. Banners on both cards show "last advanced by [server/local] · X ago" + warn when the other mode has an active session.
+- **Resume from checkpoint:** Go Live row shows a green banner "Will resume from cursor at Gandaki / Urban Development · 294 cells processed this run" — pulled from shared `sherlock_live_state`. Toggle "Start fresh" to ignore the cursor.
+- **Batch rollback:** every Copy-prompt click records a `claude-local-<8hex>` batch id in localStorage with timestamp. The "Recent batches" section at the bottom of the panel shows the last 20 with one-click Rollback per batch. Rollback bulk-rejects every row across all 12 AI-writeable tables (projects + 7 detail + 3 timeline + global_briefs) tagged with that batch, deletes the corresponding `sherlock_jobs` rows, and (for Go Live batches) restores the pre-session `sherlock_live_state` cursor snapshot captured at copy time.
+- **Paste-back fallback:** for hosts without HTTPS-capability (free ChatGPT, restricted Claude.ai), the AI can emit JSON and the admin pastes it into a textarea at the bottom of the panel — the website inserts using the moderator session.
+- **Sherlock Queue tab parity:** Local AI runs write to `sherlock_jobs` with `params.ai_source = "claude-local-<workflow>-<batch>"` so they appear alongside Tavily+Mistral runs in the regular Sherlock Queue. A `local` badge differentiates.
+
+**Backing tables / migrations:**
+- `20260514170000_sherlock_live_state_shared.sql` — adds `last_advanced_by`, `last_advanced_at`
+- `20260514180000_per_workflow_session.sql` — adds `golive_session_id`, `livecheck_session_id` + started_at columns
+- `20260514190000_local_ai_heartbeat.sql` — adds `golive_heartbeat_at`, `livecheck_heartbeat_at`
+- `20260514200000_ai_tag_on_detail_tables.sql` — adds `ai_tag` to all 10 detail/timeline tables for rollback queries
+
+**Fix / Change:** Previously every AI feature cost Tavily + Mistral credits. With this panel, moderators can spend their own Claude.ai / ChatGPT quota for the same result, freeing the server-side budget for autonomous Sherlock sweeps. Output quality is also better — Claude doesn't produce the date hallucinations (`2026-03-00`) or JSON-parse failures that Mistral occasionally does.
+
+---
+
+## AI Tools — Auto-approve & Auto-analysis
+
+Two related toggles. **Auto-approve** promotes high-confidence AI submissions from `pending` to `approved`. **Auto-analysis** fires a comprehensive analysis the moment a project becomes approved (cascades through the analysis-drain pipeline that burns Tavily + Mistral). The pair lets moderators opt all the way out of automated AI spend.
+
+Where to find it: `/admin` → "AI tools" card → "Auto-approve high-confidence AI submissions" panel + the **Auto-analysis on approval** toggle inside the Local AI panel.
+
+### Previous
+- One toggle: Auto-approve high-confidence AI submissions (enabled / disabled), green border when ON
 - Threshold slider 70–100% (default 85%)
 - On toggle ON or threshold change → toast count of rows auto-approved retroactively
 - Backend: writes to `site_settings.auto_approve_enabled` + `auto_approve_threshold`; invokes RPC `sweep_auto_approve_now()` after changes
+- Auto-analysis on approval was **unconditional** — the `queue_analysis_on_approval()` trigger always fired when a project transitioned to approved, regardless of admin intent
 
 ### Current
-- Same toggle, same slider, same retroactive sweep
-- _(no recent changes to this area)_
+- Auto-approve toggle + threshold unchanged
+- **+ New `Auto-analysis on approval` toggle** in the Local AI panel (default ON to preserve existing behaviour). Writes to `site_settings.auto_analysis_on_approval_enabled`. The `queue_analysis_on_approval()` trigger now checks this column before enqueueing — when OFF, approvals no longer auto-fire `analysis-drain`.
+- Use case: flip auto-analysis OFF → run **Local AI → Live Check** instead → moderator's Claude.ai handles the analysis. Frees up server Mistral quota.
+- Migration `20260514160000_auto_analysis_toggle.sql` adds the column + patches the trigger function.
+- **+ Confidence rubric harmonisation:** server (`ai-discover-projects`) and local-AI prompts now share the same per-article rubric (`0.95–1.00: budget + agency + dates + location all stated · 0.80–0.94: clear name + 3+ concrete fields · ...`). Earlier the local-AI rubric demanded multi-source corroboration (capping single-article runs at 0.79); now both modes score the same way, so the same threshold applies cleanly to both.
 
-**Fix / Change:** —
+**Fix / Change:** Moderators can now fully opt out of server-side AI spend without disabling auto-approval. Old setup forced approve+analyze as one cascade.
 
 ---
 
@@ -179,25 +234,23 @@ Where to find it: `/admin` → scroll below the "AI tools" card → "API Keys" p
 ### Previous
 _(did not exist — keys lived only as Supabase platform secrets; admins had no way to see or rotate them through the UI)_
 
-### Current
-- New section below the AI tools card in `/admin`.
-- **Two-column layout:** Tavily (left, accent-coloured) / Mistral (right, info-coloured).
-- Per-column header shows `N alive · M exhausted` count.
-- Per-column controls: **"+ Add key"** modal + **"Check all"** button (probes every key in the column sequentially via `check-api-key`).
-- **Per-key row** shows:
-  - Masked key: `tvly-dev-4ROA**********` (first 12 chars + asterisks)
-  - Label (click to inline-edit) + position number
-  - Status badge: **active** (green) or **exhausted** (red)
-  - Credits progress bar `X/1000` with colour: success (<70%), warning (70-90%), destructive (>90%)
-  - Last-ok and last-fail timestamps
-  - Per-row **Check** button (probes provider, updates credits, can revive an exhausted key) + **Delete** button
-  - Exhausted reason shown inline (e.g. `432 plan-limit (observed 2026-05-13)`)
-- Backed by the `api_keys` table (migration `20260514100000_api_keys.sql`). Edge functions read from this table first, fall back to env vars if empty.
-- **Auto-rotation:** when a key hits an exhaustion code (Tavily 401/429/432/433; Mistral 402 / free-tier 429), the edge function flips `is_exhausted=true` and bumps `position` to (current max + 1000) — sinks it to the bottom. Per project policy: no auto-revive; manually click Check after the quota cycle resets.
-- New keys go to the bottom (max+1) by default.
-- Tavily keys pre-seeded with `credits_total=1000` (free plan ceiling) so the bar shows the right denominator before the first Check.
+### Previous
+- Section below the AI tools card with two-column layout (Tavily / Mistral)
+- Per-column: `N alive · M exhausted`, `+ Add key` modal, `Check all` button
+- Per-row: masked key, label, position, status badge, credits progress bar **`X/1000`**, last-ok / last-fail timestamps, Check / Delete buttons, exhausted reason inline
+- Backed by `api_keys` table (`20260514100000_api_keys.sql`); edge functions read this first, fall back to env vars
+- Auto-rotation: exhaustion code flips `is_exhausted=true`, sinks position to `max+1000`
+- New keys land at bottom; Tavily seeded with `credits_total=1000`
+- **Bug:** Credits always showed `0/1000` for every Tavily key. Cause: `check-api-key` was POSTing to Tavily's `/usage` endpoint with body-based `api_key` (Tavily replies 405 Method Not Allowed), so the credit fetch silently failed and rows kept their seeded defaults forever.
 
-**Fix / Change:** Replaces the invisible env-only key rotation. Adds visibility (credit balance per key) + control (manual add/check/delete) + persistent rotation state (exhausted keys stay flagged across cron ticks).
+### Current
+- Same two-column layout, same controls, same rotation logic
+- **+ Real credits display.** `check-api-key` now does GET `/usage` with `Authorization: Bearer <key>` (Tavily's documented contract). Parses `account.plan_usage` + `account.plan_limit` from the response. Live data finally surfaces.
+- **+ Display reformatted from `X/1000` → `N used · M left · P plan`.** Same data, three numbers shown explicitly. The Check button's success toast uses the same format. Exhausted keys naturally read e.g. `1000 used · 0 left · 1000 plan`.
+- **+ Column caps at `max-h-[480px]` with internal vertical scroll** (mirrors the Sherlock queue list pattern). Adding the 8th–10th Tavily key no longer pushes the Mistral column off-screen — only the rows inside scroll.
+- **Note on key format:** the table accepts both legacy JWT-format keys (`eyJ...`) and new `sb_secret_` keys. For server-side use (edge functions, drainer) both work. **For Local AI panel use**, the JWT-format is required — see [Local AI tools panel](#ai-tools--local-ai-tools-panel) for the reason.
+
+**Fix / Change:** Credits visibility was load-bearing for "is this key actually about to run out?" planning. Old display ratio was always 0%, masking the real state. Now `N used · M left · P plan` reflects the actual Tavily/Mistral account state in real time after each Check.
 
 ---
 
@@ -305,10 +358,15 @@ Where to find it: `/admin` → "Sherlock" panel → "Scheduled Sweeps" tab → s
 - Sends Slack/email alert via `send-alert` (`go_live_on` / `go_live_off`) on each toggle
 
 ### Current
-- Same controls, same alerts, same auto-stop
-- _(no recent changes to this area)_
+- Same Go Live / Stop controls, same alerts, same auto-stop guard, same cursor display
+- **+ Cross-mode integration with Local AI Go Live.** `sherlock_live_state` now has shared columns `last_advanced_by` ('server' | 'local') + `last_advanced_at` so both modes write to the same cursor row.
+- **+** Resume banner now shows a `last advanced by [server/local] · timestamp` pill — orange-tinted for server, blue-tinted for local. You can tell which mode last touched the cursor at a glance.
+- **+ Two new banners directly above the Go Live button:**
+  - **Loud blue** (with spinner) when `golive_session_id` is set on the state row → a local Go Live session is in flight. Server cron would collide with it; the banner explicitly warns "Don't click Go Live until it releases".
+  - **Quiet grey** when `livecheck_session_id` is set → a local Live Check is running in parallel. Informational only; Live Check doesn't write to the cursor so no conflict with server Go Live.
+- Migrations: `20260514170000_sherlock_live_state_shared.sql`, `20260514180000_per_workflow_session.sql`.
 
-**Fix / Change:** —
+**Fix / Change:** Server Sherlock Live and local Go Live now share state instead of running blind to each other. Switching between modes (because Tavily ran out / Claude.ai is preferred / etc.) preserves progress.
 
 ---
 
@@ -325,10 +383,13 @@ Where to find it: `/admin` → bottom of page → tab bar → "Review queue" tab
 - Per-row link to `/projects/<slug>` for full detail review
 
 ### Current
-- Same display, same buttons, same flow
-- _(no recent changes to this area)_
+- Same display, same buttons, same flow on individual rows
+- **+ Pagination on the All Projects tab.** Was infinite scroll on the full list (~500 rows); now renders 20 per page with a prev / `1 2 3 … N` / next pager at the bottom. Pinned-first-and-last with ±2 around current page; ellipses fill the gaps.
+- **+ Status filter chips** above the list (Approved / Reviewed / Pending / Rejected) reset to page 1 on switch; counts shown on each chip.
+- **+ Clamping logic** — if the underlying list shrinks past the current page (filter change, bulk-delete), the visible slice and pager both clamp to page 1 without crashing.
+- Review queue tab itself (pending / changes_requested only) inherits the same pagination but typically fits on a single page.
 
-**Fix / Change:** Note: the historic rejected-project data shows 54 of 56 rejections had no `review_notes` written. New rejection workflow improvements are out-of-scope but a fix to require notes is a known follow-up.
+**Fix / Change:** Old infinite scroll was unusable on the All Projects tab with 200+ rows — dialog children inflated render time. Pagination caps initial render and keeps the page responsive. Historic note (54 of 56 rejections had no `review_notes`) still applies; that fix remains an open follow-up.
 
 ---
 
@@ -345,8 +406,9 @@ Where to find it: `/admin` → tab bar → "Pending updates (N)" and "Pending so
 - Counts shown in tab labels: `Pending updates (N)`
 
 ### Current
-- Same display, same buttons
-- _(no recent changes to this area)_
+- Same Approve / Reject buttons, same fetch (joins to `projects(title, slug)`)
+- **+ Project name promoted to the top of each pending-sources row.** Previously the project title sat in 12px muted text below the status badges and was easy to miss when scanning. Now each row leads with `FOR PROJECT → <linked title>` in bold accent colour; if `projects.slug` is null (orphan row), shows `(orphan — project_id <N>)` in muted italic so the broken FK is visible instead of just showing "—".
+- Source's own title moves below the badges (status / AI / type / created date) — same data, clearer hierarchy.
 
 **Fix / Change:** —
 
