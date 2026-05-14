@@ -44,6 +44,8 @@
 
 The `/admin` route is the central console. It loads only for users whose `user_roles.role` is admin, coadmin, or reviewer. Layout: hero strip + AI tools card + API Keys panel + Sherlock manager + tabs (Review queue, All projects, Activity, Moderation status, Pending updates, Pending sources).
 
+Where to find it: `/admin` (this is the whole page).
+
 ### Previous
 - One AI tools Card containing Global brief generator + Auto-approve settings + Sherlock manager + Refresh stale projects
 - Bottom: 6-tab structure (Review queue / All projects / Activity / Moderation status / Pending updates / Pending sources)
@@ -63,6 +65,8 @@ The `/admin` route is the central console. It loads only for users whose `user_r
 
 The in-app rendering of this guide, served at `/admin/guide`.
 
+Where to find it: `/admin` → top-right of the hero strip → "Admin guide" button. Or direct URL `/admin/guide`.
+
 ### Previous
 _(did not exist — the guide lived only as `docs/ADMIN_GUIDE.md` in the repo, viewable via GitHub or local clone)_
 
@@ -81,6 +85,8 @@ _(did not exist — the guide lived only as `docs/ADMIN_GUIDE.md` in the repo, v
 ## AI Tools — Global Brief
 
 Manually generate an aggregate AI brief from approved projects. Writes to `global_briefs` table; appears on home page carousel.
+
+Where to find it: `/admin` → "AI tools" card (red-tinted, near top of page) → "Global brief" section.
 
 ### Previous
 - Scope dropdown: All projects / By province / By sector
@@ -105,6 +111,8 @@ Manually generate an aggregate AI brief from approved projects. Writes to `globa
 
 Brand-new automated daily fan-out. Generates 1 national + 7 provincial briefs every morning at 5:00 NPT, then emails a digest.
 
+Where to find it: `/admin` → "AI tools" card → "Run daily briefs now" button (next to "Generate global brief"). Cron triggers automatically every day at 05:00 NPT regardless.
+
 ### Previous
 _(did not exist — brief generation was 100% manual)_
 
@@ -125,6 +133,8 @@ _(did not exist — brief generation was 100% manual)_
 
 Controls whether AI-discovered projects get automatically promoted from `approval_status='pending'` to `'approved'` based on the AI's `confidence_score`.
 
+Where to find it: `/admin` → "AI tools" card → "Auto-approve high-confidence AI submissions" panel (green-bordered when ON, with toggle + threshold slider).
+
 ### Previous
 - Toggle switch (enabled / disabled), with green border highlight when enabled
 - Threshold slider 70–100% (default 85%)
@@ -142,6 +152,8 @@ Controls whether AI-discovered projects get automatically promoted from `approva
 ## AI Tools — Refresh stale projects
 
 Batch trigger for the comprehensive-analysis pipeline on approved projects that haven't been analysed in 30+ days.
+
+Where to find it: `/admin` → "AI tools" card → bottom of the card → "Refresh stale approved projects" button (with a "Stale count" badge alongside).
 
 ### Previous
 - Scans `projects` WHERE `approval_status='approved'` AND (`last_comprehensive_analysis_at IS NULL` OR older than 30d)
@@ -161,6 +173,8 @@ Batch trigger for the comprehensive-analysis pipeline on approved projects that 
 ## API Keys panel
 
 Manage Tavily + Mistral API keys with rotation, exhaustion tracking, and credit visibility.
+
+Where to find it: `/admin` → scroll below the "AI tools" card → "API Keys" panel with two columns (Tavily on the left, Mistral on the right).
 
 ### Previous
 _(did not exist — keys lived only as Supabase platform secrets; admins had no way to see or rotate them through the UI)_
@@ -191,6 +205,8 @@ _(did not exist — keys lived only as Supabase platform secrets; admins had no 
 
 The discovery job queue. Each row is one `sherlock_jobs` entry.
 
+Where to find it: `/admin` → scroll past API Keys → "Sherlock — autonomous discovery" panel → "Queue" tab (default tab).
+
 ### Previous
 - Live polling every 5s while any job is `queued` or `running`
 - Per-job display: status badge, params (province/district/sectors[0]), inserted/skipped counts, finished timestamp
@@ -215,6 +231,8 @@ The discovery job queue. Each row is one `sherlock_jobs` entry.
 
 Geo-seeded discovery: enqueue one job per selected sector for a chosen Province / District / Municipality.
 
+Where to find it: `/admin` → "Sherlock" panel → "Discover by Location" tab.
+
 ### Previous
 - Province dropdown (required) → District (optional, cascades) → Municipality (optional, cascades)
 - Sectors: 9 checkboxes, all selected by default
@@ -235,6 +253,8 @@ Geo-seeded discovery: enqueue one job per selected sector for a chosen Province 
 
 Saved presets for topic-based (non-geo) discovery.
 
+Where to find it: `/admin` → "Sherlock" panel → "Topic Filters" tab.
+
 ### Previous
 - CRUD interface for `sherlock_filters` rows: Label + Topic + Region + Max results + Active toggle
 - Per-filter Run button → enqueues one `sherlock_jobs` row with `kind='topic', priority=5`
@@ -253,6 +273,8 @@ Saved presets for topic-based (non-geo) discovery.
 
 Recurring sweeps configured per-row; pg_cron drives them.
 
+Where to find it: `/admin` → "Sherlock" panel → "Scheduled Sweeps" tab → top half of the tab is the sweep table.
+
 ### Previous
 - CRUD for `sherlock_sweeps` rows: Label + Cadence (5 presets or custom cron) + Provinces (multi-select) + Sectors (multi-select) + Per-query max + District-comprehensive toggle + National Pride mode toggle
 - "Run now" per-row → invokes RPC `sherlock_run_sweep_now()` (enqueues sweep_child jobs)
@@ -270,6 +292,8 @@ Recurring sweeps configured per-row; pg_cron drives them.
 ## Sherlock — Live Discovery
 
 Continuous Sherlock mode — pg_cron tick every minute pulls one cell and enqueues a sweep_child job.
+
+Where to find it: `/admin` → "Sherlock" panel → "Scheduled Sweeps" tab → scroll down to the "Live Discovery" section (red-bordered when running, with the Go Live / Stop Live toggle).
 
 ### Previous
 - "Go Live" button (visible when stopped) → flips `sherlock_live_state.is_live=true`, sets started_at, started_by
@@ -292,6 +316,8 @@ Continuous Sherlock mode — pg_cron tick every minute pulls one cell and enqueu
 
 Pending project moderation. The default tab when opening `/admin`.
 
+Where to find it: `/admin` → bottom of page → tab bar → "Review queue" tab (first tab, with pending count badge).
+
 ### Previous
 - Shows projects where `approval_status IN ('pending', 'changes_requested')`
 - Per-row Approve / Reject buttons; reject opens a modal asking for `review_notes`
@@ -309,6 +335,8 @@ Pending project moderation. The default tab when opening `/admin`.
 ## Moderation — Pending updates / sources
 
 Two separate tabs for moderating AI-discovered child rows.
+
+Where to find it: `/admin` → tab bar → "Pending updates (N)" and "Pending sources (N)" tabs (rightmost in the tab bar, each with a count badge).
 
 ### Previous
 - "Pending updates" tab: rows from `project_updates` where `approval_status='pending'` and `submitted_by_ai=true`
@@ -328,6 +356,8 @@ Two separate tabs for moderating AI-discovered child rows.
 
 Tab showing platform activity over time.
 
+Where to find it: `/admin` → tab bar → "Activity" tab (middle of the tab row).
+
 ### Previous
 - Reads `daily_project_metrics` table (computed nightly at 00:05 UTC by `compute_daily_project_metrics()` RPC)
 - Columns: new_projects, new_updates, new_detail_rows, sherlock_jobs_run, sherlock_inserted, sherlock_errors, analysis_runs, approvals, rejections
@@ -344,6 +374,8 @@ Tab showing platform activity over time.
 ## Browse page (admin perspective)
 
 The public `/projects` page surfaces extra controls when you're signed in as a moderator.
+
+Where to find it: `/projects` (public URL). When signed in as moderator, the approval_status filter dropdown appears in the filter bar; AI-discovered projects show "Sherlock" / "AI" pills; pending projects show inline Approve/Reject buttons.
 
 ### Previous
 - Status filter pill bar shows all 6 statuses (proposed / approved / in_progress / delayed / completed / cancelled)
@@ -363,6 +395,8 @@ The public `/projects` page surfaces extra controls when you're signed in as a m
 ## Project Detail page (admin perspective)
 
 `/projects/:slug` — public view augmented for moderators.
+
+Where to find it: `/projects/<slug>` for any project. Admin-only controls appear in the header (Approve / Reject / Edit / Run analysis) and inline on each child-row in the detail tabs (Funding / Documents / Risks / etc.).
 
 ### Previous
 - Public sees: title, hero image, description, status badge, sector, province, district, budget, dates, contractor, agency, location map, tabs for funding/documents/stakeholders/risks/impact/procurement/compliance/updates/sources/milestones
@@ -384,6 +418,8 @@ The public `/projects` page surfaces extra controls when you're signed in as a m
 ## Analytics & Ratings
 
 `/analytics` is public, but admins use it as the editorial dashboard.
+
+Where to find it: `/analytics` (main page with auto-lede, leaderboards, charts) → "View all →" on the rating card → `/analytics/ratings` (full sortable / filterable table).
 
 ### Previous
 - 4 KPI cards (Tracked / Total budget / Avg progress / Provinces covered)
@@ -411,6 +447,8 @@ The public `/projects` page surfaces extra controls when you're signed in as a m
 
 Admins see the same home page as the public — the carousel's behaviour affects how briefs surface.
 
+Where to find it: `/` (home) → hero strip → right column on desktop, full-width on mobile → swipable card with dots indicator at top.
+
 ### Previous
 - Single AI brief slide showing the latest `global_briefs` row with `scope='global'`
 - 4 live-stat slides: Today's Pulse / Budget Flow / Risk Radar / Freshness
@@ -433,6 +471,8 @@ Admins see the same home page as the public — the carousel's behaviour affects
 
 Manage which users have admin / coadmin / reviewer roles.
 
+Where to find it: `/admin` → tab bar → "Activity" tab → scroll to the bottom (admin-only; coadmin sees read-only view; reviewer doesn't see it at all).
+
 ### Previous
 - Lists all users with non-null role
 - Per-row "Remove role" button (admin-only — coadmin can't remove other admins)
@@ -449,6 +489,8 @@ Manage which users have admin / coadmin / reviewer roles.
 ## Dashboard / Submit (admin can submit too)
 
 `/dashboard` is for contributors but admins can also submit projects directly.
+
+Where to find it: header nav → "Dashboard" link → opens `/dashboard`. From there, "Submit project" button → multi-step form at `/dashboard/submit`.
 
 ### Previous
 - `/dashboard/submit` form: title, sector, province, district, description, budget, dates, contractor, agency, source URLs, image upload
