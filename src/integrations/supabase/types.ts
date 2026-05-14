@@ -1,4 +1,4 @@
-export type Json =
+﻿export type Json =
   | string
   | number
   | boolean
@@ -219,6 +219,60 @@ export type Database = {
           },
         ]
       }
+      api_keys: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          credits_checked_at: string | null
+          credits_total: number | null
+          credits_used: number | null
+          exhausted_reason: string | null
+          id: string
+          is_exhausted: boolean
+          key_value: string
+          label: string | null
+          last_exhausted_at: string | null
+          last_succeeded_at: string | null
+          position: number
+          provider: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          credits_checked_at?: string | null
+          credits_total?: number | null
+          credits_used?: number | null
+          exhausted_reason?: string | null
+          id?: string
+          is_exhausted?: boolean
+          key_value: string
+          label?: string | null
+          last_exhausted_at?: string | null
+          last_succeeded_at?: string | null
+          position?: number
+          provider: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          credits_checked_at?: string | null
+          credits_total?: number | null
+          credits_used?: number | null
+          exhausted_reason?: string | null
+          id?: string
+          is_exhausted?: boolean
+          key_value?: string
+          label?: string | null
+          last_exhausted_at?: string | null
+          last_succeeded_at?: string | null
+          position?: number
+          provider?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       daily_project_metrics: {
         Row: {
           analysis_runs: number
@@ -263,31 +317,67 @@ export type Database = {
       }
       global_briefs: {
         Row: {
+          ai_tag: string | null
+          batch_id: string | null
           body: string
           created_at: string
           created_by: string | null
+          display_eligible: boolean
           headline: string
           id: string
+          importance: number | null
           scope: string
+          scope_province: string | null
+          scope_sector: string | null
           sources: Json | null
         }
         Insert: {
+          ai_tag?: string | null
+          batch_id?: string | null
           body: string
           created_at?: string
           created_by?: string | null
+          display_eligible?: boolean
           headline: string
           id?: string
+          importance?: number | null
           scope?: string
+          scope_province?: string | null
+          scope_sector?: string | null
           sources?: Json | null
         }
         Update: {
+          ai_tag?: string | null
+          batch_id?: string | null
           body?: string
           created_at?: string
           created_by?: string | null
+          display_eligible?: boolean
           headline?: string
           id?: string
+          importance?: number | null
           scope?: string
+          scope_province?: string | null
+          scope_sector?: string | null
           sources?: Json | null
+        }
+        Relationships: []
+      }
+      internal_notifier_config: {
+        Row: {
+          id: number
+          internal_token: string | null
+          send_alert_url: string | null
+        }
+        Insert: {
+          id?: number
+          internal_token?: string | null
+          send_alert_url?: string | null
+        }
+        Update: {
+          id?: number
+          internal_token?: string | null
+          send_alert_url?: string | null
         }
         Relationships: []
       }
@@ -312,6 +402,27 @@ export type Database = {
           kind?: string
           name?: string
           province?: string
+        }
+        Relationships: []
+      }
+      notification_log: {
+        Row: {
+          details: Json
+          id: number
+          kind: string
+          sent_at: string
+        }
+        Insert: {
+          details?: Json
+          id?: number
+          kind: string
+          sent_at?: string
+        }
+        Update: {
+          details?: Json
+          id?: number
+          kind?: string
+          sent_at?: string
         }
         Relationships: []
       }
@@ -350,6 +461,7 @@ export type Database = {
       }
       project_analysis_runs: {
         Row: {
+          ai_tag: string | null
           bucket_status: Json
           deduped_per_table: Json
           errors: string[]
@@ -364,6 +476,7 @@ export type Database = {
           status: string
         }
         Insert: {
+          ai_tag?: string | null
           bucket_status?: Json
           deduped_per_table?: Json
           errors?: string[]
@@ -378,6 +491,7 @@ export type Database = {
           status?: string
         }
         Update: {
+          ai_tag?: string | null
           bucket_status?: Json
           deduped_per_table?: Json
           errors?: string[]
@@ -403,6 +517,7 @@ export type Database = {
       }
       project_compliance: {
         Row: {
+          ai_tag: string | null
           approval_status: string
           authority: string | null
           confidence_score: number | null
@@ -425,6 +540,7 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          ai_tag?: string | null
           approval_status?: string
           authority?: string | null
           confidence_score?: number | null
@@ -447,6 +563,7 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          ai_tag?: string | null
           approval_status?: string
           authority?: string | null
           confidence_score?: number | null
@@ -480,6 +597,7 @@ export type Database = {
       }
       project_documents: {
         Row: {
+          ai_tag: string | null
           approval_status: string
           confidence_score: number | null
           created_at: string
@@ -501,6 +619,7 @@ export type Database = {
           url: string
         }
         Insert: {
+          ai_tag?: string | null
           approval_status?: string
           confidence_score?: number | null
           created_at?: string
@@ -522,6 +641,7 @@ export type Database = {
           url: string
         }
         Update: {
+          ai_tag?: string | null
           approval_status?: string
           confidence_score?: number | null
           created_at?: string
@@ -554,6 +674,7 @@ export type Database = {
       }
       project_funding: {
         Row: {
+          ai_tag: string | null
           amount_npr: number | null
           amount_usd: number | null
           approval_status: string
@@ -578,6 +699,7 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          ai_tag?: string | null
           amount_npr?: number | null
           amount_usd?: number | null
           approval_status?: string
@@ -602,6 +724,7 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          ai_tag?: string | null
           amount_npr?: number | null
           amount_usd?: number | null
           approval_status?: string
@@ -637,6 +760,7 @@ export type Database = {
       }
       project_impact: {
         Row: {
+          ai_tag: string | null
           approval_status: string
           baseline_value: number | null
           confidence_score: number | null
@@ -660,6 +784,7 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          ai_tag?: string | null
           approval_status?: string
           baseline_value?: number | null
           confidence_score?: number | null
@@ -683,6 +808,7 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          ai_tag?: string | null
           approval_status?: string
           baseline_value?: number | null
           confidence_score?: number | null
@@ -717,6 +843,7 @@ export type Database = {
       }
       project_milestones: {
         Row: {
+          ai_tag: string | null
           approval_status: string
           completed_date: string | null
           confidence_score: number | null
@@ -735,6 +862,7 @@ export type Database = {
           title: string
         }
         Insert: {
+          ai_tag?: string | null
           approval_status?: string
           completed_date?: string | null
           confidence_score?: number | null
@@ -753,6 +881,7 @@ export type Database = {
           title: string
         }
         Update: {
+          ai_tag?: string | null
           approval_status?: string
           completed_date?: string | null
           confidence_score?: number | null
@@ -782,6 +911,7 @@ export type Database = {
       }
       project_procurement: {
         Row: {
+          ai_tag: string | null
           approval_status: string
           awardee_id: string | null
           awardee_name: string | null
@@ -810,6 +940,7 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          ai_tag?: string | null
           approval_status?: string
           awardee_id?: string | null
           awardee_name?: string | null
@@ -838,6 +969,7 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          ai_tag?: string | null
           approval_status?: string
           awardee_id?: string | null
           awardee_name?: string | null
@@ -913,6 +1045,7 @@ export type Database = {
       }
       project_risks: {
         Row: {
+          ai_tag: string | null
           approval_status: string
           category: string
           confidence_score: number | null
@@ -935,6 +1068,7 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          ai_tag?: string | null
           approval_status?: string
           category: string
           confidence_score?: number | null
@@ -957,6 +1091,7 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          ai_tag?: string | null
           approval_status?: string
           category?: string
           confidence_score?: number | null
@@ -991,6 +1126,7 @@ export type Database = {
       project_sources: {
         Row: {
           added_by: string | null
+          ai_tag: string | null
           approval_status: string
           confidence_score: number | null
           created_at: string | null
@@ -1008,6 +1144,7 @@ export type Database = {
         }
         Insert: {
           added_by?: string | null
+          ai_tag?: string | null
           approval_status?: string
           confidence_score?: number | null
           created_at?: string | null
@@ -1025,6 +1162,7 @@ export type Database = {
         }
         Update: {
           added_by?: string | null
+          ai_tag?: string | null
           approval_status?: string
           confidence_score?: number | null
           created_at?: string | null
@@ -1052,6 +1190,7 @@ export type Database = {
       }
       project_stakeholders: {
         Row: {
+          ai_tag: string | null
           approval_status: string
           confidence_score: number | null
           contact_email: string | null
@@ -1075,6 +1214,7 @@ export type Database = {
           website: string | null
         }
         Insert: {
+          ai_tag?: string | null
           approval_status?: string
           confidence_score?: number | null
           contact_email?: string | null
@@ -1098,6 +1238,7 @@ export type Database = {
           website?: string | null
         }
         Update: {
+          ai_tag?: string | null
           approval_status?: string
           confidence_score?: number | null
           contact_email?: string | null
@@ -1132,6 +1273,7 @@ export type Database = {
       }
       project_updates: {
         Row: {
+          ai_tag: string | null
           approval_status: string
           author_id: string | null
           confidence_score: number | null
@@ -1152,6 +1294,7 @@ export type Database = {
           update_type: string | null
         }
         Insert: {
+          ai_tag?: string | null
           approval_status?: string
           author_id?: string | null
           confidence_score?: number | null
@@ -1172,6 +1315,7 @@ export type Database = {
           update_type?: string | null
         }
         Update: {
+          ai_tag?: string | null
           approval_status?: string
           author_id?: string | null
           confidence_score?: number | null
@@ -1506,6 +1650,7 @@ export type Database = {
           id: string
           inserted: number | null
           kind: string
+          last_diagnostic: Json | null
           params: Json
           priority: number
           skipped: number | null
@@ -1521,6 +1666,7 @@ export type Database = {
           id?: string
           inserted?: number | null
           kind: string
+          last_diagnostic?: Json | null
           params?: Json
           priority?: number
           skipped?: number | null
@@ -1536,6 +1682,7 @@ export type Database = {
           id?: string
           inserted?: number | null
           kind?: string
+          last_diagnostic?: Json | null
           params?: Json
           priority?: number
           skipped?: number | null
@@ -1548,13 +1695,23 @@ export type Database = {
       sherlock_live_state: {
         Row: {
           enqueued_count: number
+          golive_heartbeat_at: string | null
+          golive_session_id: string | null
+          golive_started_at: string | null
           id: number
           include_districts: boolean
           is_live: boolean
+          last_advanced_at: string | null
+          last_advanced_by: string | null
           last_district: string | null
           last_province: string | null
           last_sector: string | null
           last_stopped_reason: string | null
+          livecheck_heartbeat_at: string | null
+          livecheck_session_id: string | null
+          livecheck_started_at: string | null
+          local_session_id: string | null
+          local_started_at: string | null
           national_pride: boolean
           per_query_max: number
           provinces: string[]
@@ -1566,13 +1723,23 @@ export type Database = {
         }
         Insert: {
           enqueued_count?: number
+          golive_heartbeat_at?: string | null
+          golive_session_id?: string | null
+          golive_started_at?: string | null
           id?: number
           include_districts?: boolean
           is_live?: boolean
+          last_advanced_at?: string | null
+          last_advanced_by?: string | null
           last_district?: string | null
           last_province?: string | null
           last_sector?: string | null
           last_stopped_reason?: string | null
+          livecheck_heartbeat_at?: string | null
+          livecheck_session_id?: string | null
+          livecheck_started_at?: string | null
+          local_session_id?: string | null
+          local_started_at?: string | null
           national_pride?: boolean
           per_query_max?: number
           provinces?: string[]
@@ -1584,13 +1751,23 @@ export type Database = {
         }
         Update: {
           enqueued_count?: number
+          golive_heartbeat_at?: string | null
+          golive_session_id?: string | null
+          golive_started_at?: string | null
           id?: number
           include_districts?: boolean
           is_live?: boolean
+          last_advanced_at?: string | null
+          last_advanced_by?: string | null
           last_district?: string | null
           last_province?: string | null
           last_sector?: string | null
           last_stopped_reason?: string | null
+          livecheck_heartbeat_at?: string | null
+          livecheck_session_id?: string | null
+          livecheck_started_at?: string | null
+          local_session_id?: string | null
+          local_started_at?: string | null
           national_pride?: boolean
           per_query_max?: number
           provinces?: string[]
@@ -1676,6 +1853,7 @@ export type Database = {
       }
       site_settings: {
         Row: {
+          auto_analysis_on_approval_enabled: boolean
           auto_approve_enabled: boolean
           auto_approve_threshold: number
           id: number
@@ -1683,6 +1861,7 @@ export type Database = {
           updated_by: string | null
         }
         Insert: {
+          auto_analysis_on_approval_enabled?: boolean
           auto_approve_enabled?: boolean
           auto_approve_threshold?: number
           id?: number
@@ -1690,6 +1869,7 @@ export type Database = {
           updated_by?: string | null
         }
         Update: {
+          auto_analysis_on_approval_enabled?: boolean
           auto_approve_enabled?: boolean
           auto_approve_threshold?: number
           id?: number
@@ -1786,6 +1966,7 @@ export type Database = {
         Args: { p_from: string; p_to: string }
         Returns: number
       }
+      run_daily_briefs_now: { Args: never; Returns: Json }
       sherlock_drain_queue_once: { Args: never; Returns: Json }
       sherlock_enqueue_sweep: { Args: { p_sweep_id: string }; Returns: Json }
       sherlock_live_feed_tick: { Args: never; Returns: Json }
@@ -1795,6 +1976,7 @@ export type Database = {
       }
       sherlock_run_all_active: { Args: never; Returns: Json }
       sherlock_run_sweep_now: { Args: { p_sweep_id: string }; Returns: Json }
+      sweep_auto_approve_now: { Args: never; Returns: Json }
       user_contribution_count: { Args: { _user_id: string }; Returns: number }
     }
     Enums: {
@@ -1960,4 +2142,10 @@ export const Constants = {
     },
   },
 } as const
-<claude-code-hint v="1" type="plugin" value="supabase@claude-plugins-official" />
+npx : <claude-code-hint v="1" type="plugin" value="supabase@claude-plugins-official" />
+At line:13 char:1
++ npx supabase gen types typescript --project-id vlioybqqswbohdhpnjym 2 ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (<claude-code-hi...ns-official" />:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 

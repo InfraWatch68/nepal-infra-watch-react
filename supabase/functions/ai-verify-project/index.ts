@@ -6,6 +6,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { tryParseJsonObject } from "../_shared/json_repair.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -13,8 +14,6 @@ const corsHeaders = {
 };
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-const stripFences = (s: string) =>
-  s.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
 
 function parseTavilyKeys(): string[] {
   const multi = (Deno.env.get("TAVILY_API_KEYS") ?? "").split(",").map(k => k.trim()).filter(Boolean);
@@ -163,9 +162,11 @@ ${hits.map((h, i) => `### [${i + 1}] (${h.bucket}) ${h.title}\nURL: ${h.url}\n${
       { role: "user", content: ctx },
     ]);
     if (!ai.ok) return json({ error: ai.error, warnings }, ai.status);
-    let parsed: any;
-    try { parsed = JSON.parse(stripFences(ai.text)); }
-    catch { return json({ error: "AI returned non-JSON", raw: ai.text.slice(0, 500), warnings }, 502); }
+    const parseResult = tryParseJsonObject<any>(ai.text ?? "");
+    if (!parseResult.ok) {
+      return json({ error: `AI returned non-JSON (${parseResult.reason})`, raw: (ai.text ?? "").slice(0, 500), warnings }, 502);
+    }
+    const parsed = parseResult.value;
 
     return json({
       ok: true,

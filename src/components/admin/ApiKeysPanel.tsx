@@ -77,7 +77,7 @@ export function ApiKeysPanel() {
     const result = data as { status: string; detail?: string; credits_used?: number; credits_total?: number };
     if (result.status === 'ok') {
       const credits = result.credits_total
-        ? `${result.credits_used ?? 0}/${result.credits_total} credits used`
+        ? `${result.credits_used ?? 0} used · ${Math.max(0, (result.credits_total ?? 0) - (result.credits_used ?? 0))} left · ${result.credits_total} plan`
         : 'alive (provider doesn\'t expose credit balance)';
       toast.success(`${row.provider} ${row.label ?? ''}: ${credits}`);
     } else {
@@ -211,7 +211,11 @@ function ProviderColumn(p: ColumnProps) {
           No {p.provider} keys yet. Click "Add key" to register one. Edge functions fall back to env until you do.
         </div>
       ) : (
-        <div className="space-y-2">
+        // Mirrors the Sherlock queue list (max-h-[400px] overflow-y-auto in
+        // SherlockManager.QueueTab). Caps each column so adding the 8th /
+        // 9th / 10th Tavily key doesn't push the Mistral column off-screen
+        // — only the rows inside the column scroll.
+        <div className="space-y-2 max-h-[480px] overflow-y-auto pr-1">
           {p.rows.map(row => <KeyRow key={row.id} row={row} checkingId={p.checkingId} onCheck={p.onCheck} onDelete={p.onDelete} />)}
         </div>
       )}
@@ -261,24 +265,42 @@ function KeyRow({ row, checkingId, onCheck, onDelete }: {
         </Badge>
       </div>
 
-      {row.credits_total ? (
-        <div>
-          <div className="flex items-baseline justify-between text-[11px] font-mono">
-            <span className="text-muted-foreground">credits</span>
-            <span>{row.credits_used ?? 0}<span className="text-muted-foreground">/{row.credits_total}</span></span>
+      {row.credits_total ? (() => {
+        // Three-number display: used · remaining · total. Tavily reports
+        // both per-key and account-level counters; we store account-level
+        // (the pool every key on the same Tavily account shares), so all
+        // alive keys for a given account read the same numbers after a
+        // Check. Exhausted keys still show real numbers — if the account
+        // hit its 1000-credit cap, every key reads as `1000 · 0 · 1000`.
+        const used = row.credits_used ?? 0;
+        const total = row.credits_total ?? 0;
+        const remaining = Math.max(0, total - used);
+        return (
+          <div>
+            <div className="flex items-baseline justify-between text-[11px] font-mono gap-2">
+              <span className="text-muted-foreground">credits</span>
+              <span className="tabular-nums">
+                {used}
+                <span className="text-muted-foreground"> used · </span>
+                {remaining}
+                <span className="text-muted-foreground"> left · </span>
+                {total}
+                <span className="text-muted-foreground"> plan</span>
+              </span>
+            </div>
+            <div className="w-full h-1.5 bg-muted rounded-full mt-0.5 overflow-hidden">
+              <div
+                className={cn(
+                  'h-full transition-all',
+                  (creditPct ?? 0) > 90 ? 'bg-destructive'
+                    : (creditPct ?? 0) > 70 ? 'bg-warning' : 'bg-success'
+                )}
+                style={{ width: `${creditPct ?? 0}%` }}
+              />
+            </div>
           </div>
-          <div className="w-full h-1.5 bg-muted rounded-full mt-0.5 overflow-hidden">
-            <div
-              className={cn(
-                'h-full transition-all',
-                (creditPct ?? 0) > 90 ? 'bg-destructive'
-                  : (creditPct ?? 0) > 70 ? 'bg-warning' : 'bg-success'
-              )}
-              style={{ width: `${creditPct ?? 0}%` }}
-            />
-          </div>
-        </div>
-      ) : null}
+        );
+      })() : null}
 
       {row.exhausted_reason && (
         <div className="text-[10px] text-destructive font-mono truncate" title={row.exhausted_reason}>

@@ -1,6 +1,7 @@
 // TODO: extract auth gate + brief prompt to _shared if a third caller appears.
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { tryParseJsonObject } from "../_shared/json_repair.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -46,7 +47,14 @@ async function callChatModel(
     const r = await fetch(endpoint, {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, messages }),
+      // response_format=json_object forces valid JSON; max_tokens=2000 fits a
+      // headline + 1-3 short paragraphs with headroom.
+      body: JSON.stringify({
+        model,
+        messages,
+        max_tokens: 2000,
+        response_format: { type: "json_object" },
+      }),
     });
     if (r.status === 402) return { ok: false, status: 402, error: "AI credits exhausted" };
     if (r.status === 429) {
@@ -133,14 +141,11 @@ Return ONLY a JSON object (no prose, no markdown, no code fence):
       { role: "user", content: projectBlock },
     ]);
     if (!ai.ok) return json({ error: ai.error }, ai.status);
-    const raw = ai.text.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
-    if (!raw) return json({ error: "Empty AI response" }, 500);
-    let parsed: { headline?: string; body?: string };
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return json({ error: "AI returned non-JSON output" }, 500);
+    const parseResult = tryParseJsonObject<{ headline?: string; body?: string }>(ai.text ?? "");
+    if (!parseResult.ok) {
+      return json({ error: `AI returned non-JSON output (${parseResult.reason})`, raw: (ai.text ?? "").slice(0, 300) }, 500);
     }
+    const parsed = parseResult.value;
     const headline = (parsed.headline ?? "").toString().trim().slice(0, 200);
     const bodyText = (parsed.body ?? "").toString().trim();
     if (!headline || !bodyText) return json({ error: "AI response missing headline or body" }, 500);

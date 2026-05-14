@@ -658,6 +658,17 @@ type LiveState = {
   // run of consecutive failed jobs. Null if the operator stopped manually or
   // live mode has never auto-stopped on this row.
   last_stopped_reason: string | null;
+  // Cross-mode integration. Local AI Go Live writes these on the same
+  // singleton row so the server card can show handoff state and the local
+  // panel can resume from the server cron's cursor.
+  last_advanced_by: "server" | "local" | null;
+  last_advanced_at: string | null;
+  // Per-workflow claims (migration 20260514180000_per_workflow_session) —
+  // Go Live and Live Check use different columns so they coexist.
+  golive_session_id: string | null;
+  golive_started_at: string | null;
+  livecheck_session_id: string | null;
+  livecheck_started_at: string | null;
 };
 
 function SweepsTab() {
@@ -1120,6 +1131,32 @@ function LiveDiscoveryCard({ userId }: { userId: string | null }) {
         </div>
       )}
 
+      {/* Local Go Live in-flight banner — set by the admin's Local AI panel
+          when its Go Live workflow is mid-sweep. Starting the server cron
+          while a local Go Live is writing to the cursor would cause both
+          to fight over the same row, so we surface a visible warning. A
+          parallel local Live Check (different column, different table set)
+          is harmless and shown separately. */}
+      {state?.golive_session_id && (
+        <div className="mt-2.5 text-[11px] bg-info/10 border-2 border-info rounded px-2 py-1.5 flex items-center gap-2 font-mono">
+          <Loader2 className="h-3 w-3 animate-spin text-info shrink-0" />
+          <span>
+            Local AI Go Live session <span className="font-semibold">{state.golive_session_id}</span> is currently writing to this cursor
+            {state.golive_started_at && <> (started {new Date(state.golive_started_at).toLocaleString()})</>}.
+            Don't click Go Live until it releases the session — otherwise both modes will race.
+          </span>
+        </div>
+      )}
+      {state?.livecheck_session_id && (
+        <div className="mt-2.5 text-[11px] bg-muted/40 border border-muted-foreground/20 rounded px-2 py-1.5 flex items-center gap-2 font-mono">
+          <span className="text-muted-foreground">
+            Local Live Check session <span className="font-semibold">{state.livecheck_session_id}</span> is running in parallel
+            {state.livecheck_started_at && <> (started {new Date(state.livecheck_started_at).toLocaleString()})</>}.
+            Doesn't affect server Go Live — Live Check only writes to detail / timeline tables.
+          </span>
+        </div>
+      )}
+
       {(() => {
         // Show the "will resume from cursor" hint when stopped, NP mode isn't
         // about to be (re-)toggled, and the saved cursor is meaningful.
@@ -1131,6 +1168,18 @@ function LiveDiscoveryCard({ userId }: { userId: string | null }) {
         return (
           <div className="mt-2.5 text-[11px] text-success bg-success/10 border border-success/30 rounded px-2 py-1.5 font-mono break-words">
             ↻ Will resume from cursor at <span className="font-semibold">{cur}</span> · {state?.enqueued_count ?? 0} cells already processed this run
+            {state?.last_advanced_by && (
+              <span className="ml-1.5 text-[10px] text-muted-foreground">
+                · last advanced by{" "}
+                <span className={cn(
+                  "font-semibold px-1 rounded",
+                  state.last_advanced_by === "local" ? "bg-info/20 text-info" : "bg-accent/20 text-accent",
+                )}>
+                  {state.last_advanced_by}
+                </span>
+                {state.last_advanced_at && <> · {new Date(state.last_advanced_at).toLocaleString()}</>}
+              </span>
+            )}
           </div>
         );
       })()}

@@ -4,6 +4,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { tryParseJsonObject } from "../_shared/json_repair.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -15,9 +16,6 @@ const json = (body: unknown, status = 200) =>
     status,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
-
-const stripFences = (s: string) =>
-  s.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
 
 function parseTavilyKeys(): string[] {
   const multi = Deno.env.get("TAVILY_API_KEYS") ?? "";
@@ -78,7 +76,14 @@ async function callChatModel(
     const r = await fetch(endpoint, {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, messages }),
+      // response_format=json_object forces valid JSON; max_tokens=2000 fits
+      // a short 1-2 paragraph update plus the Sources footnote with headroom.
+      body: JSON.stringify({
+        model,
+        messages,
+        max_tokens: 2000,
+        response_format: { type: "json_object" },
+      }),
     });
     if (r.status === 402) return { ok: false, status: 402, error: "AI credits exhausted" };
     if (r.status === 429) {
@@ -205,14 +210,14 @@ Use only facts from the article. Do NOT invent.`;
             if (ai.status === 429 || ai.status === 402) { aiAborted = true; break; }
             continue;
           }
-          const raw = stripFences(ai.text);
-          let parsed: any;
-          try {
-            parsed = JSON.parse(raw);
-          } catch {
-            errors.push(`JSON parse failed for ${r.url}`);
+          const parseResult = tryParseJsonObject<{ title?: string; content?: string }>(ai.text ?? "");
+          if (!parseResult.ok) {
+            if (parseResult.reason === "ai_skipped" || parseResult.reason === "empty") continue;
+            const snippet = (ai.text ?? "").slice(0, 240).replace(/\n+/g, " ⏎ ");
+            errors.push(`JSON parse failed for ${r.url} (${parseResult.reason}): ${snippet}…`);
             continue;
           }
+          const parsed = parseResult.value;
           if (!parsed?.title || !parsed?.content) continue;
 
           const { error: uErr } = await admin.from("project_updates").insert({

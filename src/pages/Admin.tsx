@@ -20,7 +20,7 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Checkbox } from '@/components/ui/checkbox';
 import { toast } from 'sonner';
-import { Shield, Megaphone, Sparkles, Loader2, ExternalLink, Users as UsersIcon, BookOpen } from 'lucide-react';
+import { Shield, Megaphone, Sparkles, Loader2, ExternalLink, Users as UsersIcon, BookOpen, ChevronLeft, ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { SECTORS, PROVINCES, districtsFor } from '@/lib/constants';
 import { VerifyDialog } from '@/components/admin/VerifyDialog';
@@ -30,6 +30,7 @@ import { ActivityDashboardTab } from '@/components/admin/ActivityDashboardTab';
 import { AdminRemovalPanel } from '@/components/admin/AdminRemovalPanel';
 import { ReviewHistoryIcon } from '@/components/ReviewHistoryIcon';
 import { ApiKeysPanel } from '@/components/admin/ApiKeysPanel';
+import { LocalAIPanel } from '@/components/admin/LocalAIPanel';
 
 const APPROVAL_COLORS: Record<string, string> = {
   pending: 'bg-warning/15 text-warning',
@@ -114,9 +115,6 @@ export default function Admin() {
   const [users, setUsers] = useState<any[]>([]);
   const [stats, setStats] = useState({ pending: 0, approved: 0, total: 0, aiInserted: 0, aiApproved: 0 });
   const [busyRow, setBusyRow] = useState<string | null>(null);
-  const [globalScope, setGlobalScope] = useState<'all' | 'province' | 'sector'>('all');
-  const [globalProvince, setGlobalProvince] = useState<string>('');
-  const [globalSector, setGlobalSector] = useState<string>('');
   const [busyGlobal, setBusyGlobal] = useState<string | null>(null);
   const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number; current?: string } | null>(null);
   // Status filter for the All-projects tab. Null = show everything.
@@ -330,34 +328,24 @@ export default function Admin() {
     refresh();
   };
 
-  const runGlobalBrief = async () => {
-    const body: any = {};
-    if (globalScope === 'province') {
-      if (!globalProvince) return toast.error('Pick a province');
-      body.province = globalProvince;
-    } else if (globalScope === 'sector') {
-      if (!globalSector) return toast.error('Pick a sector');
-      body.sector = globalSector;
-    }
-    setBusyGlobal('brief');
-    const { data, error } = await supabase.functions.invoke('ai-generate-global-brief', { body });
-    setBusyGlobal(null);
-    if (error) return toast.error(await extractFnError(error));
-    toast.success(`Global brief published (${data?.scope ?? 'global'})`);
-  };
-
-  // Trigger the daily-briefs orchestrator manually — fans out to all 8 scopes
-  // (1 national + 7 provincial) and emails the digest. Useful for testing the
-  // pipeline without waiting for the 05:00 NPT cron tick.
+  // Single-button brief generation: fans out across the 8 scopes (national +
+  // 7 provinces), asks the AI for a batch of 3-10 briefs per scope, and marks
+  // those scoring >= 0.65 importance as display_eligible so they show on the
+  // homepage carousel. The 05:00 NPT cron fires the same function.
   const runDailyBriefs = async () => {
     setBusyGlobal('daily-briefs');
     const { data, error } = await supabase.functions.invoke('generate-daily-briefs', { body: {} });
     setBusyGlobal(null);
     if (error) return toast.error(await extractFnError(error));
-    const generated = (data as any)?.generated ?? 0;
-    const failed = (data as any)?.failed ?? 0;
-    const emailSent = (data as any)?.email_sent ? 'email sent' : `email not sent (${(data as any)?.email_reason ?? '?'})`;
-    toast.success(`Daily briefs: ${generated} generated, ${failed} failed · ${emailSent}`);
+    const totalGenerated = (data as any)?.total_generated ?? 0;
+    const totalDisplay = (data as any)?.total_display_eligible ?? 0;
+    const okScopes = (data as any)?.scopes_ok ?? 0;
+    const totalScopes = (data as any)?.scopes_total ?? 0;
+    const failedScopes = (data as any)?.scopes_failed ?? 0;
+    const failBit = failedScopes > 0 ? `, ${failedScopes} scope(s) failed` : '';
+    toast.success(
+      `Generated ${totalGenerated} briefs across ${okScopes}/${totalScopes} scopes · ${totalDisplay} display-eligible${failBit}`,
+    );
   };
 
   const runBulkComprehensive = async () => {
@@ -445,40 +433,17 @@ export default function Admin() {
 
           <div className="space-y-2">
             <p className="text-xs text-muted-foreground">
-              <span className="font-semibold text-foreground">Global brief.</span>{' '}
-              Aggregates approved projects into a single brief shown on the homepage hero. Optionally narrow by province or sector.
+              <span className="font-semibold text-foreground">AI briefs.</span>{' '}
+              One click generates a fresh batch of briefs across the national scope and all 7 provinces. The AI decides how many briefs each scope warrants (3–10) and scores each on importance; briefs scoring 0.65+ are marked display-eligible and slide on the homepage carousel. The 05:00 NPT cron runs the same job daily.
             </p>
             <div className="flex gap-2 flex-wrap items-center">
-              <Select value={globalScope} onValueChange={v => setGlobalScope(v as any)}>
-                <SelectTrigger className="max-w-[180px]"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All projects</SelectItem>
-                  <SelectItem value="province">By province</SelectItem>
-                  <SelectItem value="sector">By sector</SelectItem>
-                </SelectContent>
-              </Select>
-              {globalScope === 'province' && (
-                <Select value={globalProvince} onValueChange={setGlobalProvince}>
-                  <SelectTrigger className="max-w-[180px]"><SelectValue placeholder="Province" /></SelectTrigger>
-                  <SelectContent>{PROVINCES.map(p => <SelectItem key={p} value={p}>{p}</SelectItem>)}</SelectContent>
-                </Select>
-              )}
-              {globalScope === 'sector' && (
-                <Select value={globalSector} onValueChange={setGlobalSector}>
-                  <SelectTrigger className="max-w-[200px]"><SelectValue placeholder="Sector" /></SelectTrigger>
-                  <SelectContent>{SECTORS.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent>
-                </Select>
-              )}
-              <Button disabled={busyGlobal === 'brief'} onClick={runGlobalBrief} variant="outline">
-                {busyGlobal === 'brief' ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Generate global brief'}
-              </Button>
               <Button
                 disabled={busyGlobal === 'daily-briefs'}
                 onClick={runDailyBriefs}
                 variant="outline"
-                title="Generate all 8 scopes (1 national + 7 provincial) + email the digest. The cron does this at 05:00 NPT daily; this button is for ad-hoc testing."
+                title="Generates briefs for national + all 7 provinces. Replaces the prior batch's display-eligible briefs on the homepage."
               >
-                {busyGlobal === 'daily-briefs' ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Run daily briefs now'}
+                {busyGlobal === 'daily-briefs' ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Generate AI briefs'}
               </Button>
             </div>
           </div>
@@ -518,6 +483,8 @@ export default function Admin() {
         </Card>
 
         <ApiKeysPanel />
+
+        <LocalAIPanel />
 
         <Tabs defaultValue="queue">
           <TabsList>
@@ -646,8 +613,14 @@ function StatusFilterRow({
   );
 }
 
+// Page size for the All-projects / Queue list. 20 rows per page keeps the
+// initial render under ~500ms even with dialog children and avoids the
+// doom-scroll where 200+ rows render into one continuous list.
+const PROJECTS_PAGE_SIZE = 20;
+
 function ProjectList({ projects, onReview, onFetchNews, onGenerateBrief, onPushNow, busyRow, canPushNow, refresh }: any) {
   const [sel, setSel] = useState<Set<string>>(new Set());
+  const [page, setPage] = useState(1);
   // Every project is selectable now, regardless of approval_status. The
   // "All projects" tab needs bulk-actions on approved rows too (e.g. mass
   // reject a batch that turned out to be junk after publication). The bulk
@@ -658,6 +631,16 @@ function ProjectList({ projects, onReview, onFetchNews, onGenerateBrief, onPushN
   const all = allIds.length > 0 && allIds.every((id: string) => sel.has(id));
   const toggle = (id: string) => setSel(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
   const toggleAll = (v: boolean) => setSel(v ? new Set(allIds) : new Set());
+
+  const totalPages = Math.max(1, Math.ceil(projects.length / PROJECTS_PAGE_SIZE));
+  // Reset to page 1 whenever the underlying list shrinks past the current
+  // page (filter change or bulk-delete). useMemo over [page, totalPages]
+  // would also work; this is cheaper since the list ref changes on every
+  // refresh anyway.
+  const safePage = Math.min(page, totalPages);
+  const start = (safePage - 1) * PROJECTS_PAGE_SIZE;
+  const visible = projects.slice(start, start + PROJECTS_PAGE_SIZE);
+
   if (projects.length === 0) return <Card className="p-12 text-center text-muted-foreground">Queue empty.</Card>;
   return (
     <Card>
@@ -671,7 +654,7 @@ function ProjectList({ projects, onReview, onFetchNews, onGenerateBrief, onPushN
         afterAction={() => { setSel(new Set()); refresh && refresh(); }}
       />
       <div className="divide-y">
-        {projects.map((p: any) => {
+        {visible.map((p: any) => {
           const isApproved = p.approval_status === 'approved';
           const scheduled = p.published_at && new Date(p.published_at) > new Date();
           const selectable = true;
@@ -723,7 +706,91 @@ function ProjectList({ projects, onReview, onFetchNews, onGenerateBrief, onPushN
           );
         })}
       </div>
+      {totalPages > 1 && (
+        <ProjectListPager
+          page={safePage}
+          totalPages={totalPages}
+          rangeStart={start + 1}
+          rangeEnd={Math.min(start + PROJECTS_PAGE_SIZE, projects.length)}
+          totalCount={projects.length}
+          onPageChange={setPage}
+        />
+      )}
     </Card>
+  );
+}
+
+// Pagination footer for ProjectList. Shows "Showing 21-40 of 137" on the
+// left + a compact prev/page/next control on the right. For >7 pages we
+// elide the middle with `…` so the footer stays one line on mobile.
+function ProjectListPager({
+  page, totalPages, rangeStart, rangeEnd, totalCount, onPageChange,
+}: {
+  page: number;
+  totalPages: number;
+  rangeStart: number;
+  rangeEnd: number;
+  totalCount: number;
+  onPageChange: (next: number) => void;
+}) {
+  // Build the list of page numbers to render. Keep ends pinned (1 and N)
+  // plus a window of 2 either side of the current page. Anything skipped
+  // becomes an ellipsis. Examples for currentPage=5 of 12:
+  //   [1] … [3] [4] [5] [6] [7] … [12]
+  const pages: (number | 'ellipsis')[] = [];
+  const push = (n: number | 'ellipsis') => {
+    if (n === 'ellipsis') { pages.push(n); return; }
+    if (n < 1 || n > totalPages) return;
+    if (pages[pages.length - 1] === n) return;
+    pages.push(n);
+  };
+  push(1);
+  if (page - 2 > 2) push('ellipsis');
+  for (let n = Math.max(2, page - 2); n <= Math.min(totalPages - 1, page + 2); n++) push(n);
+  if (page + 2 < totalPages - 1) push('ellipsis');
+  if (totalPages > 1) push(totalPages);
+
+  return (
+    <div className="flex items-center justify-between gap-2 flex-wrap p-3 border-t">
+      <div className="text-xs text-muted-foreground font-mono">
+        Showing <span className="tabular-nums">{rangeStart}–{rangeEnd}</span> of <span className="tabular-nums">{totalCount}</span>
+        <span className="ml-2 opacity-70">· page {page} of {totalPages}</span>
+      </div>
+      <div className="flex items-center gap-1">
+        <Button
+          variant="ghost" size="sm" className="h-8 px-2"
+          disabled={page <= 1}
+          onClick={() => onPageChange(page - 1)}
+          aria-label="Previous page"
+        >
+          <ChevronLeft className="h-4 w-4" />
+        </Button>
+        {pages.map((p, i) =>
+          p === 'ellipsis' ? (
+            <span key={`e${i}`} className="px-1 text-xs text-muted-foreground select-none">…</span>
+          ) : (
+            <Button
+              key={p}
+              variant={p === page ? 'outline' : 'ghost'}
+              size="sm"
+              className="h-8 w-8 px-0 text-xs tabular-nums"
+              onClick={() => onPageChange(p)}
+              aria-current={p === page ? 'page' : undefined}
+            >
+              {p}
+            </Button>
+          ),
+        )}
+        <Button
+          variant="ghost" size="sm" className="h-8 px-2"
+          disabled={page >= totalPages}
+          onClick={() => onPageChange(page + 1)}
+          aria-label="Next page"
+        >
+          <ChevronRight className="h-4 w-4" />
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -1157,16 +1224,23 @@ function PendingSourcesList({ items, onReview, refresh }: any) {
             <div className="flex items-start gap-3 min-w-0 flex-1">
               <Checkbox checked={sel.has(String(s.id))} onCheckedChange={() => toggle(String(s.id))} className="mt-1" aria-label="Select source" />
               <div className="min-w-0 flex-1">
+                {/* Project the source belongs to — promoted to the top of the
+                    row so moderators can group/scan by project at a glance.
+                    Before this, the project name sat in 12px muted text below
+                    the status badges and was easy to miss. */}
+                <div className="flex items-center gap-1.5 mb-1.5 text-xs flex-wrap">
+                  <span className="text-[10px] uppercase tracking-wider font-mono text-muted-foreground">for project</span>
+                  {s.projects?.slug
+                    ? <Link to={`/projects/${s.projects.slug}`} className="font-semibold text-accent hover:underline truncate">{s.projects?.title ?? `id ${s.project_id ?? '—'}`}</Link>
+                    : <span className="font-semibold text-muted-foreground italic">{s.projects?.title ?? `(orphan — project_id ${s.project_id ?? 'null'})`}</span>}
+                </div>
                 <div className="flex items-center gap-2 mb-1 flex-wrap">
                   <Badge className={cn("text-[10px] uppercase tracking-wider font-mono", APPROVAL_COLORS[s.approval_status])}>{s.approval_status.replace('_', ' ')}</Badge>
                   {s.submitted_by_ai && <AiBadge />}
                   <span className="text-xs text-muted-foreground font-mono uppercase tracking-wider">{s.source_type}</span>
                   <span className="text-xs text-muted-foreground">· {new Date(s.created_at).toLocaleDateString()}</span>
                 </div>
-                {s.projects?.slug
-                  ? <Link to={`/projects/${s.projects.slug}`} className="text-xs text-accent hover:underline">{s.projects?.title ?? '—'}</Link>
-                  : <span className="text-xs text-muted-foreground">{s.projects?.title ?? '—'}</span>}
-                <div className="font-semibold mt-1 truncate">{s.title}</div>
+                <div className="font-semibold truncate">{s.title}</div>
                 <a href={s.url} target="_blank" rel="noreferrer" className="text-xs text-accent hover:underline inline-flex items-center gap-1 mt-1 truncate max-w-full">
                   {s.url} <ExternalLink className="h-3 w-3" />
                 </a>

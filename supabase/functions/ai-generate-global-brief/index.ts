@@ -4,6 +4,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { tryParseJsonObject } from "../_shared/json_repair.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -15,9 +16,6 @@ const json = (body: unknown, status = 200) =>
     status,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
-
-const stripFences = (s: string) =>
-  s.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
 
 type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
 
@@ -50,7 +48,15 @@ async function callChatModel(
     const r = await fetch(endpoint, {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, messages }),
+      // response_format=json_object forces valid JSON; max_tokens=8000 fits
+      // the multi-brief payload — up to 10 briefs × 2-4 paragraphs each plus
+      // headline/importance, with comfortable headroom for the JSON wrapper.
+      body: JSON.stringify({
+        model,
+        messages,
+        max_tokens: 8000,
+        response_format: { type: "json_object" },
+      }),
     });
     if (r.status === 402) return { ok: false, status: 402, error: "AI credits exhausted" };
     if (r.status === 429) {
@@ -126,6 +132,19 @@ serve(async (req) => {
     const province: string | undefined = body.province?.toString().trim() || undefined;
     const sector: string | undefined = body.sector?.toString().trim() || undefined;
     const maxProjects = Math.min(Math.max(Number(body.maxProjects) || 30, 1), 60);
+    // Optional batch id from the orchestrator. When generate-daily-briefs
+    // fans out across 8 scopes it threads the same UUID through every child
+    // call so admins can group "everything from this run" in one query.
+    const batchId: string | null = (() => {
+      const raw = typeof body.batchId === "string" ? body.batchId.trim() : "";
+      return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw) ? raw : null;
+    })();
+    // Display-eligibility threshold. Briefs scoring at or above this go on the
+    // homepage carousel; below this they're archived but invisible. 0.65 puts
+    // the cut at the bottom of the "notable shift" band in the rubric below —
+    // enough to filter out filler ("quiet day in a small province" → 0.25)
+    // without demanding every slide be a 0.90+ flagship-slip headline.
+    const DISPLAY_THRESHOLD = 0.65;
 
     let scope = "global";
     if (province) scope = `province:${province}`;
@@ -163,25 +182,43 @@ serve(async (req) => {
         ? `the ${sector} sector`
         : "all tracked Nepal infrastructure projects";
 
-    const systemPrompt = `You are an analyst writing a single aggregate brief over ${scopeLabel}.
-STRICT RULES: Use ONLY the structured data provided below — ${projects.length} project record(s). Do NOT invent or import outside knowledge. Treat titles as opaque labels. If the data is too sparse, say so plainly.
+    // Multi-brief mode: ask the AI for a SET of distinct briefs covering
+    // different angles, each self-scored on importance. The caller filters
+    // by `display_eligible` (importance >= DISPLAY_THRESHOLD) to decide
+    // which appear on the homepage carousel.
+    const systemPrompt = `You are an analyst writing a BATCH of distinct aggregate briefs over ${scopeLabel}.
+STRICT RULES: Use ONLY the structured data provided below — ${projects.length} project record(s). Do NOT invent or import outside knowledge. Treat titles as opaque labels.
 
-Aim for an at-a-glance read suitable for a homepage hero card. The headline should be one short, factual observation that an editor would put above the fold.
+Produce BETWEEN 3 AND 10 briefs. Each brief must cover a DIFFERENT angle: do not repeat headlines, do not paraphrase the same observation, do not cluster around the same project unless several different facts about it actually warrant it. Examples of distinct angles:
+  - sector-wide delay pattern (e.g. "4 of 6 hydropower projects past expected completion")
+  - single flagship slip with stated budget impact
+  - funding-commitment shift (a large new disbursement, or a fall-off)
+  - status churn (multiple projects moving from in_progress → delayed in one province)
+  - critical-risk cluster
+  - audit/compliance finding
+  - completion milestone
+  - geographic concentration (e.g. "all 3 new approvals in the last quarter are in Bagmati")
+  - contractor concentration ("Agency X holds 60% of in-progress projects in this scope")
+Pick angles the data ACTUALLY supports. If only 3 distinct stories exist, return 3 — do not pad to hit 10.
 
-You must also score the brief's IMPORTANCE — how newsworthy is the underlying data right now?
-
-IMPORTANCE RUBRIC — required, 0.00-1.00:
+Each brief gets its own IMPORTANCE score, 0.00-1.00:
 - 0.90-1.00: high-stakes news — a flagship project just slipped, a major audit finding landed, a large budget commitment changed, a critical risk opened, or completion of a National Pride Project.
 - 0.70-0.89: notable shift — a sector saw multiple project status changes, several delays clustered in one province, a funder disbursement milestone.
 - 0.50-0.69: moderate signal — sector overview with one or two meaningful new facts, baseline updates.
 - 0.30-0.49: low signal — mostly summary of stable data, few changes.
-- Below 0.30: filler — nothing newsworthy. Score honestly even if data is sparse; do NOT inflate to make the brief feel important. A quiet day in a small province should score 0.20-0.35; that's fine.
+- Below 0.30: filler — only emit if the angle is genuinely thin but still distinct.
+Score honestly. Do NOT inflate to push briefs over the display threshold; the homepage will simply show fewer slides, which is fine.
 
 Return ONLY a JSON object (no prose, no markdown, no code fence):
 {
-  "headline":   string,         // <=140 chars, one factual observation, no surrounding quotes
-  "body":       string,         // 2-4 short paragraphs, plain prose, no markdown headings
-  "importance": number          // 0.00-1.00 per rubric above
+  "briefs": [
+    {
+      "headline":   string,   // <=140 chars, one factual observation, no surrounding quotes
+      "body":       string,   // 2-4 short paragraphs, plain prose, no markdown headings, no bullet lists
+      "importance": number    // 0.00-1.00 per rubric above
+    },
+    ...
+  ]
 }`;
 
     const ai = await callChatModel([
@@ -189,53 +226,100 @@ Return ONLY a JSON object (no prose, no markdown, no code fence):
       { role: "user", content: blocks },
     ]);
     if (!ai.ok) return json({ error: ai.error }, ai.status);
-    const raw = stripFences(ai.text);
-    if (!raw) return json({ error: "Empty AI response" }, 500);
-    let parsed: { headline?: string; body?: string; importance?: number };
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return json({ error: "AI returned non-JSON output" }, 500);
+    const parseResult = tryParseJsonObject<{ briefs?: Array<{ headline?: string; body?: string; importance?: number }> }>(ai.text ?? "");
+    if (!parseResult.ok) {
+      return json({ error: `AI returned non-JSON output (${parseResult.reason})`, raw: (ai.text ?? "").slice(0, 300) }, 500);
     }
-    const headline = (parsed.headline ?? "").toString().trim().slice(0, 220);
-    const bodyText = (parsed.body ?? "").toString().trim();
-    if (!headline || !bodyText) return json({ error: "AI response missing headline or body" }, 500);
-    // Clamp importance to [0,1]; default to 0.5 if AI omitted it (older Mistral
-    // calls or schema-deviant responses). Round to 2dp for clean display.
-    const importanceRaw = Number(parsed.importance);
-    const importance = Number.isFinite(importanceRaw)
-      ? Math.max(0, Math.min(1, Math.round(importanceRaw * 100) / 100))
-      : 0.5;
+    const rawBriefs = Array.isArray(parseResult.value?.briefs) ? parseResult.value.briefs : [];
+    if (rawBriefs.length === 0) {
+      return json({ error: "AI returned no briefs", raw: (ai.text ?? "").slice(0, 300) }, 500);
+    }
 
     const sources = projects.map((p: any) => ({ id: p.id, title: p.title, slug: p.slug }));
+    const effectiveBatchId = batchId ?? crypto.randomUUID();
 
-    const { data: ins, error: iErr } = await admin.from("global_briefs").insert({
+    // Normalise + cap to 10. Each brief gets a clamped importance and a
+    // display_eligible flag derived from the threshold.
+    type Normalised = { headline: string; body: string; importance: number; display_eligible: boolean };
+    const seen = new Set<string>();
+    const normalised: Normalised[] = [];
+    for (const b of rawBriefs.slice(0, 10)) {
+      const headline = String(b?.headline ?? "").trim().slice(0, 220);
+      const bodyText = String(b?.body ?? "").trim();
+      if (!headline || !bodyText) continue;
+      // De-dupe by case-insensitive headline within this batch — the AI
+      // occasionally repeats an angle despite the prompt.
+      const key = headline.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const importanceRaw = Number(b?.importance);
+      const importance = Number.isFinite(importanceRaw)
+        ? Math.max(0, Math.min(1, Math.round(importanceRaw * 100) / 100))
+        : 0.5;
+      normalised.push({
+        headline,
+        body: bodyText,
+        importance,
+        display_eligible: importance >= DISPLAY_THRESHOLD,
+      });
+    }
+    if (normalised.length === 0) {
+      return json({ error: "All AI-returned briefs missing headline or body" }, 500);
+    }
+
+    // Atomically swap the display set for this scope: demote everything from
+    // earlier batches BEFORE inserting the new ones. The homepage carousel
+    // queries `display_eligible = true`, so if the demote step fails the worst
+    // case is one batch of overlap (acceptable). If insert then fails we re-
+    // promote nothing — the homepage just shows fewer briefs until the next
+    // run, which is also acceptable.
+    const { error: demoteErr } = await admin
+      .from("global_briefs")
+      .update({ display_eligible: false })
+      .eq("scope", scope)
+      .eq("display_eligible", true);
+    if (demoteErr) console.warn(`demote prior display rows failed for scope=${scope}:`, demoteErr.message);
+
+    const inserts = normalised.map(n => ({
       scope,
       scope_province: province ?? null,
       scope_sector: sector ?? null,
-      headline,
-      body: bodyText,
+      headline: n.headline,
+      body: n.body,
       sources,
-      importance,
+      importance: n.importance,
+      display_eligible: n.display_eligible,
+      batch_id: effectiveBatchId,
       created_by: createdByUserId,
-    }).select("id").single();
+    }));
+    const { data: insRows, error: iErr } = await admin
+      .from("global_briefs")
+      .insert(inserts)
+      .select("id, headline, importance, display_eligible");
     if (iErr) return json({ error: iErr.message }, 500);
 
-    // Retention: keep the 5 most recent briefs per scope. Earlier the function
-    // kept 10; reduced to 5 because the new daily cron produces 8 rows/day
-    // (1 national + 7 provincial) and we want a tighter archive — last week
-    // of national + last week of each province is enough context.
+    // Retention: keep the last 30 briefs per scope. With 3-10 per run and the
+    // daily cron, that's roughly the last 3-5 batches — enough history for
+    // admins to compare runs without unbounded growth.
     const { data: toDelete } = await admin
       .from("global_briefs")
       .select("id")
       .eq("scope", scope)
       .order("created_at", { ascending: false })
-      .range(5, 100);
+      .range(30, 500);
     if (toDelete && toDelete.length > 0) {
       await admin.from("global_briefs").delete().in("id", toDelete.map((r: any) => r.id));
     }
 
-    return json({ id: ins.id, scope, headline, body: bodyText, importance, sourceCount: sources.length });
+    const displayCount = normalised.filter(n => n.display_eligible).length;
+    return json({
+      scope,
+      batchId: effectiveBatchId,
+      generated: normalised.length,
+      displayEligible: displayCount,
+      briefs: insRows ?? [],
+      sourceCount: sources.length,
+    });
   } catch (e) {
     console.error("ai-generate-global-brief error:", e);
     return json({ error: e instanceof Error ? e.message : "Unknown error" }, 500);

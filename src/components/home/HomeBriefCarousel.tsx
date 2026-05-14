@@ -23,14 +23,20 @@ type BriefRow = {
 };
 
 // Slide kinds:
-//   - dynamic brief slides keyed by `brief-<idx>` (up to 5 from global_briefs
-//     ranked by importance DESC, created_at DESC)
+//   - dynamic brief slides keyed by `brief-<idx>` — up to MAX_BRIEFS from
+//     global_briefs where display_eligible = true, ordered by importance
+//     DESC then created_at DESC. Replaces the prior "top N regardless of
+//     eligibility" rule: now the AI's importance score + the
+//     display_eligible flag (set by the edge function on insert when
+//     importance >= 0.65) decide what slides.
 //   - 4 fixed live-stat slides keyed by 'today' / 'budget' / 'risk' / 'fresh'
 type SlideKey = string;
 const STAT_KEYS: SlideKey[] = ['today', 'budget', 'risk', 'fresh'];
 
 const ROTATE_MS = 6000;
-const MAX_BRIEFS = 5;
+// Headroom for ~8 scopes × ~2-3 important briefs each. Anything beyond is
+// archived but invisible. If the AI floods one run, the carousel still caps.
+const MAX_BRIEFS = 12;
 
 const npr = new Intl.NumberFormat('en-IN', { notation: 'compact', maximumFractionDigits: 1 });
 
@@ -44,16 +50,16 @@ function bigNum(n: number | null) {
   return n.toLocaleString();
 }
 
-// Derive the display label for a brief slide header.
-//   global → "National"
-//   province:Bagmati → "Bagmati"
-//   scope_province set → use it
-function scopeLabel(brief: BriefRow): string {
-  if (brief.scope === 'global') return 'National';
-  if (brief.scope_province) return brief.scope_province;
-  if (brief.scope.startsWith('province:')) return brief.scope.slice('province:'.length);
-  if (brief.scope.startsWith('sector:')) return brief.scope.slice('sector:'.length);
-  return brief.scope;
+// Derive the display kicker for a brief slide header.
+//   global             → "AI BRIEF — NATIONAL"
+//   province:Bagmati   → "AI BRIEF — PROVINCE: BAGMATI"
+//   sector:Hydropower  → "AI BRIEF — SECTOR: HYDROPOWER"
+function scopeKicker(brief: BriefRow): string {
+  if (brief.scope === 'global') return 'AI BRIEF — NATIONAL';
+  const province = brief.scope_province ?? (brief.scope.startsWith('province:') ? brief.scope.slice('province:'.length) : null);
+  if (province) return `AI BRIEF — PROVINCE: ${province.toUpperCase()}`;
+  if (brief.scope.startsWith('sector:')) return `AI BRIEF — SECTOR: ${brief.scope.slice('sector:'.length).toUpperCase()}`;
+  return `AI BRIEF — ${brief.scope.toUpperCase()}`;
 }
 
 export function HomeBriefCarousel() {
@@ -81,13 +87,15 @@ export function HomeBriefCarousel() {
     const todayStartISO = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00Z').toISOString();
 
     Promise.all([
-      // Top 5 briefs across ALL scopes by importance. The new daily cron
-      // (5 AM NPT) writes 8 briefs/day (1 national + 7 provincial), each
-      // scored 0-1 by the AI. NULL importance rows (pre-importance-column
-      // legacy briefs) sort last via nullsFirst:false.
+      // Display-eligible briefs across ALL scopes, by importance. The
+      // ai-generate-global-brief edge function marks display_eligible=true
+      // on insert when importance >= 0.65, and demotes the prior batch's
+      // display rows for the same scope at the same time — so this query
+      // naturally reflects the most recent run.
       supabase
         .from('global_briefs')
         .select('id, headline, body, scope, scope_province, importance, created_at')
+        .eq('display_eligible', true)
         .order('importance', { ascending: false, nullsFirst: false })
         .order('created_at', { ascending: false })
         .limit(MAX_BRIEFS),
@@ -163,9 +171,8 @@ export function HomeBriefCarousel() {
       const idx = parseInt(key.slice(6), 10);
       const brief = briefs[idx];
       if (!brief) return null;
-      const label = scopeLabel(brief).toUpperCase();
       return {
-        kicker: `AI BRIEF — ${label} · ${formatStamp(brief.created_at)}`,
+        kicker: `${scopeKicker(brief)} · ${formatStamp(brief.created_at)}`,
         Icon: Sparkles,
         href: '/analytics',
         cta: 'See the full analysis',

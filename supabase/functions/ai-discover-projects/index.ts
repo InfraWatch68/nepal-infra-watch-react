@@ -4,6 +4,8 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { NATIONAL_PRIDE_PROJECTS, matchNationalPride } from "../_shared/national_pride.ts";
 import { sendAlert } from "../_shared/notify.ts";
 import { getKeys, markExhausted, markSucceeded } from "../_shared/api_keys.ts";
+import { tryParseJsonObject } from "../_shared/json_repair.ts";
+import { safeIsoDate } from "../_shared/dates.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -33,55 +35,9 @@ const json = (body: unknown, status = 200) =>
 const slugify = (s: string) =>
   s.toLowerCase().normalize("NFKD").replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "-").slice(0, 80);
 
-const stripFences = (s: string) =>
-  s.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
-
-// Tries to extract a parseable JSON object from a Mistral/Gemini response that
-// may include preamble ("Sure, here is the JSON:") or trailing prose ("Note: …").
-// We grab the substring between the first `{` and the last `}`, then attempt
-// progressively more aggressive repairs before giving up.
-function tryParseJsonObject(rawText: string): { ok: true; value: any } | { ok: false; reason: string } {
-  const stripped = stripFences(rawText);
-  if (!stripped) return { ok: false, reason: "empty" };
-  if (stripped === "null" || stripped === '"null"') return { ok: false, reason: "ai_skipped" };
-
-  // Stage 1: bracket-extract — drop any prose before the first `{` or after
-  // the last `}`. Covers the "Sure, here is the JSON: { … }" pattern that
-  // Mistral occasionally emits despite the system prompt forbidding prose.
-  const first = stripped.indexOf("{");
-  const last = stripped.lastIndexOf("}");
-  let candidate = (first >= 0 && last > first) ? stripped.slice(first, last + 1) : stripped;
-
-  const tryParse = (s: string): any | null => { try { return JSON.parse(s); } catch { return null; } };
-
-  let parsed = tryParse(candidate);
-  if (parsed) return { ok: true, value: parsed };
-
-  // Stage 2: strip trailing commas before `}` or `]` — LLM-generated JSON
-  // commonly leaves stray commas after the last field, especially when a
-  // multi-line description was truncated mid-edit.
-  const noTrailingCommas = candidate.replace(/,(\s*[}\]])/g, "$1");
-  parsed = tryParse(noTrailingCommas);
-  if (parsed) return { ok: true, value: parsed };
-
-  // Stage 3: balanced-brace truncation — token-limit cutoff can leave an
-  // unclosed JSON object. Walk forward counting braces; if more `{` than
-  // `}` were seen, append closing braces until balanced and re-parse.
-  let depth = 0;
-  let cutAt = -1;
-  for (let i = 0; i < candidate.length; i++) {
-    const c = candidate[i];
-    if (c === "{") depth++;
-    else if (c === "}") { depth--; if (depth === 0) cutAt = i + 1; }
-  }
-  if (depth > 0 && cutAt === -1) {
-    const repaired = noTrailingCommas + "}".repeat(depth);
-    parsed = tryParse(repaired);
-    if (parsed) return { ok: true, value: parsed };
-  }
-
-  return { ok: false, reason: "unparseable" };
-}
+// JSON repair (handles prose preamble, fenced code, trailing commas, and
+// brace/bracket-unbalanced truncation including mid-string and mid-array)
+// is shared with ai-fetch-* and ai-generate-* via _shared/json_repair.ts.
 
 // Curated list of project-news + government + funder domains for future
 // targeted-search use (e.g. a two-call mode where Tavily is first queried
@@ -126,6 +82,24 @@ const PROJECT_NEWS_DOMAINS = [
   "fcdo.gov.uk", "norad.no", "sdc.admin.ch",
   // International coverage of Nepal projects
   "reuters.com", "theguardian.com", "aljazeera.com",
+  // Independent monitoring + thematic coverage. Added 2026-05-15 after a
+  // local-AI Analyze batch on 8 Nepal projects found these as the strongest
+  // sources for angles the mainstream + .gov.np channels miss:
+  //   mongabay.com / mongabay.org — environmental / land / forest stories.
+  //     Carried the Pathibhara Cable Car rhododendron-clearance + Supreme
+  //     Court interim-stay coverage when Nepali papers were thinner.
+  //   globalvoices.org — Indigenous-rights + protest reporting. Pathibhara
+  //     Limbu/Yakthung protest casualties surfaced here first.
+  //   rightsindevelopment.org — independent ADB/World Bank monitoring.
+  //     Surfaced the FWRUDP TA status when SASEC and ADB's own pages
+  //     contradicted each other.
+  //   rss.com.np — Nepal's national wire service (Rashtriya Samachar
+  //     Samiti). Authoritative breaking-news for events lacking deeper
+  //     coverage; complements Kathmandu Post / Republica.
+  "mongabay.com", "mongabay.org",
+  "globalvoices.org",
+  "rightsindevelopment.org",
+  "rss.com.np",
 ] as const;
 
 // (Previous NOISE_DOMAINS const removed — now obsolete because we use
@@ -230,11 +204,20 @@ async function callChatModel(
         r = await fetchWithTimeout(endpoint, {
           method: "POST",
           headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-          // max_tokens=4096 prevents truncation on long descriptions (the
-          // schema asks for 250-500 words plus 30+ fields — Mistral's default
-          // ~1024 limit was cutting JSON mid-string, causing the parse
-          // failures observed in error logs).
-          body: JSON.stringify({ model, messages, max_tokens: 4096 }),
+          // - response_format=json_object forces the provider to emit valid
+          //   JSON. Mistral, OpenAI-compatible Google, and Lovable all accept
+          //   the OpenAI-style field; providers that ignore it still return
+          //   their normal output, which the json_repair helper salvages.
+          // - max_tokens=8000 doubles the previous 4096 ceiling. The schema
+          //   asks for 250-500 words plus 30+ fields; a 4-paragraph
+          //   description in Mistral-tokens is ~1.5k, leaving headroom for
+          //   the array fields without truncating mid-string.
+          body: JSON.stringify({
+            model,
+            messages,
+            max_tokens: 8000,
+            response_format: { type: "json_object" },
+          }),
         }, 60_000);
       } catch (e) {
         // Timeout or network failure. Treat as transient on first attempt
@@ -934,8 +917,11 @@ Other rules:
               estimated_beneficiaries: typeof parsed.estimated_beneficiaries === "number" ? parsed.estimated_beneficiaries : null,
               procurement_method: parsed.procurement_method ?? null,
               esia_status: esia,
-              start_date: parsed.start_date ?? null,
-              expected_completion: parsed.expected_completion ?? null,
+              // safeIsoDate rejects "2026-03-00" / "2026-02-30" / "2026-13-05"
+              // and similar AI hallucinations that pass the regex shape check
+              // but fail Postgres's actual calendar validation.
+              start_date: safeIsoDate(parsed.start_date),
+              expected_completion: safeIsoDate(parsed.expected_completion),
               status,
               approval_status: "pending",
               submitted_by: null,

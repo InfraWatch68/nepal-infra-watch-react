@@ -24,44 +24,69 @@ type CheckResult = {
   credits_total?: number;
 };
 
-// Tavily: hit /usage to read credit balance. Returns ok + credits info.
-// On 401: unauthorized. On 432/433/429: exhausted. Else: error.
+// Tavily: hit /usage to read credit balance. Probes auth + plan health in
+// a single call that doesn't burn search credits.
+//
+// Endpoint shape (verified against the live API):
+//   GET https://api.tavily.com/usage
+//   Authorization: Bearer <key>
+//   →
+//   {
+//     "key":     { "usage": <int>, "limit": <int|null>, ... per-method counters },
+//     "account": { "plan_usage": <int>, "plan_limit": <int>,
+//                  "paygo_usage": <int>, "paygo_limit": <int|null>, ... }
+//   }
+//
+// On Researcher / paid plans `key.limit` is null (no per-key cap; the
+// account-level plan pool is shared across all keys). We surface the
+// account-level numbers because those are what actually matter for "do I
+// have credits left." On a future paygo plan, `paygo_*` would be the cap
+// once `plan_*` is exhausted.
+//
+// HTTP semantics: 401 = invalid/revoked, 432/433 = plan/paygo limit hit,
+// 429 = rate-limited (treated as exhausted so the rotator moves on).
 async function checkTavily(key: string): Promise<CheckResult> {
   try {
-    // Tavily exposes credit info via response on a minimal /search call.
-    // POST /search with max_results=1 against a no-op query, then read
-    // the response headers / body for any credit data.
-    const r = await fetch("https://api.tavily.com/search", {
+    const u = await fetch("https://api.tavily.com/usage", {
+      method: "GET",
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    if (u.status === 401) return { status: 'unauthorized', detail: '401 invalid/revoked key' };
+    if (u.status === 432) return { status: 'exhausted', detail: '432 plan-limit reached' };
+    if (u.status === 433) return { status: 'exhausted', detail: '433 paygo-limit reached' };
+    if (u.status === 429) return { status: 'exhausted', detail: '429 rate-limited' };
+    if (u.ok) {
+      const data = await u.json();
+      const account = (data && typeof data === 'object' ? data.account : null) ?? {};
+      const planUsage = Number(account.plan_usage);
+      const planLimit = Number(account.plan_limit);
+      // Fall back to the per-key counters if account-level isn't populated.
+      const keyData = (data && typeof data === 'object' ? data.key : null) ?? {};
+      const keyUsage = Number(keyData.usage);
+      const keyLimit = Number(keyData.limit);
+      const used  = Number.isFinite(planUsage) ? planUsage : (Number.isFinite(keyUsage) ? keyUsage : NaN);
+      const total = Number.isFinite(planLimit) ? planLimit : (Number.isFinite(keyLimit) ? keyLimit : NaN);
+      if (Number.isFinite(used) && Number.isFinite(total)) {
+        return { status: 'ok', credits_used: used, credits_total: total };
+      }
+      // /usage answered 200 but didn't expose plan numbers (older accounts).
+      // Treat as alive but with no credit info — UI will hide the bar.
+      return { status: 'ok' };
+    }
+    // Non-200 /usage response that wasn't one of the explicit codes above.
+    // Verify the key is at least alive via a minimal /search probe before
+    // declaring an error; some Tavily edge nodes briefly 5xx on /usage.
+    const probe = await fetch("https://api.tavily.com/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ api_key: key, query: "test", max_results: 1 }),
     });
-    if (r.status === 401) return { status: 'unauthorized', detail: '401 invalid/revoked key' };
-    if (r.status === 432) return { status: 'exhausted', detail: '432 plan-limit reached' };
-    if (r.status === 433) return { status: 'exhausted', detail: '433 paygo-limit reached' };
-    if (r.status === 429) return { status: 'exhausted', detail: '429 rate-limited' };
-    if (!r.ok)            return { status: 'error', detail: `HTTP ${r.status}` };
-
-    // Try Tavily's /usage endpoint for actual credit info. Endpoint may
-    // 404 on older accounts — that's fine, we still report 'ok'.
-    try {
-      const u = await fetch("https://api.tavily.com/usage", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api_key: key }),
-      });
-      if (u.ok) {
-        const data = await u.json();
-        // Tavily returns usage as: { plan_usage, plan_limit } or similar.
-        // Defensively try multiple shapes.
-        const used  = Number(data.plan_usage ?? data.credits_used ?? data.used);
-        const total = Number(data.plan_limit ?? data.credits_total ?? data.limit ?? 1000);
-        if (Number.isFinite(used) && Number.isFinite(total)) {
-          return { status: 'ok', credits_used: used, credits_total: total };
-        }
-      }
-    } catch { /* fall through to plain ok */ }
-    return { status: 'ok' };
+    if (probe.status === 401) return { status: 'unauthorized', detail: '401 invalid/revoked key' };
+    if (probe.status === 432) return { status: 'exhausted', detail: '432 plan-limit reached' };
+    if (probe.status === 433) return { status: 'exhausted', detail: '433 paygo-limit reached' };
+    if (probe.status === 429) return { status: 'exhausted', detail: '429 rate-limited' };
+    if (!probe.ok)            return { status: 'error', detail: `usage HTTP ${u.status}; search HTTP ${probe.status}` };
+    return { status: 'ok', detail: `usage HTTP ${u.status} but search ok` };
   } catch (e) {
     return { status: 'error', detail: e instanceof Error ? e.message : String(e) };
   }

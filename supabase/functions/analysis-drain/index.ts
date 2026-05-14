@@ -27,6 +27,8 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { getKeys, markExhausted, markSucceeded } from "../_shared/api_keys.ts";
+import { tryParseJsonObject } from "../_shared/json_repair.ts";
+import { isValidIsoDate } from "../_shared/dates.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -34,8 +36,6 @@ const corsHeaders = {
 };
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-const stripFences = (s: string) =>
-  s.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
 
 // ─── Tavily ──────────────────────────────────────────────────────────────────
 // Keys now come from the api_keys table (via _shared/api_keys.ts) which
@@ -432,7 +432,11 @@ const ENUM = {
   comp_status: ["not_started","in_progress","approved","rejected","conditional","blacklisted","dismissed","pending"],
 };
 const inEnum = (v: any, e: string[]) => typeof v === "string" && e.includes(v);
-const validDate = (v: any) => v == null || (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v));
+// Accepts null/undefined OR a real ISO date (round-trip validated). Earlier
+// this was a regex-only shape check, which let through impossibilities like
+// "2026-03-00" (day 00 — Postgres rejects: date/time field value out of
+// range). Sherlock + comprehensive-analysis runs were failing on those.
+const validDate = (v: any) => v == null || isValidIsoDate(v);
 const numOrNull = (v: any) => (typeof v === "number" && Number.isFinite(v)) ? v : null;
 const strOrNull = (v: any) => (typeof v === "string" && v.trim().length > 0) ? v.trim() : null;
 const clampConfidence = (v: any) => {
@@ -1039,9 +1043,11 @@ serve(async (req) => {
     ]);
     if (!ai.ok) throw new Error(`AI ${ai.status}: ${ai.error}`);
 
-    let parsed: any;
-    try { parsed = JSON.parse(stripFences(ai.text)); }
-    catch { throw new Error(`AI returned non-JSON: ${ai.text.slice(0, 300)}`); }
+    const parseResult = tryParseJsonObject<any>(ai.text ?? "");
+    if (!parseResult.ok) {
+      throw new Error(`AI returned non-JSON (${parseResult.reason}): ${(ai.text ?? "").slice(0, 300)}`);
+    }
+    const parsed = parseResult.value;
 
     const narrative_summary = strOrNull(parsed.narrative_summary);
     const gaps_and_contradictions = Array.isArray(parsed.gaps_and_contradictions)
@@ -1078,7 +1084,7 @@ serve(async (req) => {
     // allowed to refresh.
     const statusFromAi = typeof eRaw.status === "string" && STATUS_VALUES.includes(eRaw.status) ? eRaw.status : null;
     const statusConfidence = typeof eRaw.status_confidence === "number" ? eRaw.status_confidence : 0;
-    const statusEvidenceDate = (typeof eRaw.status_evidence_date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(eRaw.status_evidence_date)) ? eRaw.status_evidence_date : null;
+    const statusEvidenceDate = isValidIsoDate(eRaw.status_evidence_date) ? eRaw.status_evidence_date : null;
 
     // Reported-progress extraction (an explicit "X% as of DATE · source").
     // Stored as a separate quartet of columns so the UI can render with the
@@ -1087,7 +1093,7 @@ serve(async (req) => {
     // publicly-reported number.
     const rpPercent = typeof eRaw.reported_progress_percent === "number" && Number.isFinite(eRaw.reported_progress_percent) && eRaw.reported_progress_percent >= 0 && eRaw.reported_progress_percent <= 100
       ? Number(eRaw.reported_progress_percent.toFixed(2)) : null;
-    const rpAsOf = (typeof eRaw.reported_progress_as_of === "string" && /^\d{4}-\d{2}-\d{2}$/.test(eRaw.reported_progress_as_of)) ? eRaw.reported_progress_as_of : null;
+    const rpAsOf = isValidIsoDate(eRaw.reported_progress_as_of) ? eRaw.reported_progress_as_of : null;
     const rpSourceUrl = (() => {
       if (typeof eRaw.reported_progress_source_url !== "string") return null;
       try { new URL(eRaw.reported_progress_source_url); return eRaw.reported_progress_source_url; }

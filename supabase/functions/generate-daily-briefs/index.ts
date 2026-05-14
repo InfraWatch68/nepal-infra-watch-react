@@ -1,7 +1,10 @@
 // generate-daily-briefs: orchestrator triggered by the pg_cron job
-// `daily-briefs-5am-nepal` (23:15 UTC = 5:00 AM NPT). Generates 8 briefs in
-// sequence: 1 national (scope='global') + 7 provincial. Persists them via
-// the existing ai-generate-global-brief function, then emails a consolidated
+// `daily-briefs-5am-nepal` (23:15 UTC = 5:00 AM NPT) and by the single
+// "Generate AI briefs" admin button. Fans out across 8 scopes (1 national +
+// 7 provincial); the child function now returns a BATCH of 3-10 briefs per
+// scope, each scored for importance. Only briefs at or above the display
+// threshold get marked display_eligible and appear on the homepage carousel.
+// Persists them via ai-generate-global-brief, then emails a consolidated
 // digest to ALERT_EMAIL.
 //
 // Auth: three accepted modes (in order)
@@ -33,40 +36,46 @@ const SCOPES: Scope[] = [
   ...PROVINCES.map(p => ({ kind: "province" as const, name: p })),
 ];
 
-type BriefResult = {
+type ChildBrief = { id: string; headline: string; importance: number; display_eligible: boolean };
+type ScopeResult = {
   scope: string;
   province: string | null;
   ok: boolean;
-  headline?: string;
-  body?: string;
-  importance?: number;
+  generated?: number;        // total briefs the AI produced for this scope
+  displayEligible?: number;  // subset at/above the display threshold
+  topImportance?: number;    // highest importance in this scope's batch
+  briefs?: ChildBrief[];     // the actual rows inserted
   error?: string;
 };
 
-// Format the digest email body. Sorted by importance desc so the most
-// newsworthy brief lands at the top of the operator's inbox.
-function formatDigest(results: BriefResult[]): { subject: string; text: string } {
+// Format the digest email body. Sorted by top importance per scope so the
+// most newsworthy area lands at the top of the operator's inbox.
+function formatDigest(results: ScopeResult[], batchId: string): { subject: string; text: string } {
   const successes = results.filter(r => r.ok);
   const failures = results.filter(r => !r.ok);
-  const top = successes.length > 0
-    ? successes.reduce((a, b) => ((a.importance ?? 0) > (b.importance ?? 0) ? a : b))
-    : null;
+  const totalGenerated = successes.reduce((s, r) => s + (r.generated ?? 0), 0);
+  const totalDisplay = successes.reduce((s, r) => s + (r.displayEligible ?? 0), 0);
   const today = new Date().toISOString().slice(0, 10);
-  const subject = `Nepal Infra Watch — Daily briefs ${today} (${successes.length}/${results.length} generated${top ? `, top ${top.importance?.toFixed(2)} ${top.province ?? 'National'}` : ''})`;
-  const sortedSuccesses = [...successes].sort((a, b) => (b.importance ?? 0) - (a.importance ?? 0));
+  const subject = `Nepal Infra Watch — AI briefs ${today} (${totalDisplay} display-eligible of ${totalGenerated} across ${successes.length}/${results.length} scopes)`;
+  const sortedSuccesses = [...successes].sort((a, b) => (b.topImportance ?? 0) - (a.topImportance ?? 0));
   const parts = [
-    `Generated ${successes.length} of ${results.length} briefs for ${today} at ~05:00 NPT.`,
-    failures.length > 0 ? `${failures.length} failed (see end of email).` : '',
+    `Run ${today}: ${totalGenerated} briefs generated across ${successes.length}/${results.length} scopes; ${totalDisplay} marked display-eligible (importance >= 0.65).`,
+    `Batch: ${batchId}`,
+    failures.length > 0 ? `${failures.length} scope(s) failed (see end).` : '',
     '',
   ];
   for (const r of sortedSuccesses) {
     const label = r.province ?? 'National';
-    const score = (r.importance ?? 0).toFixed(2);
     parts.push(`────────────────────────────────────────────────────────`);
-    parts.push(`${label.toUpperCase()} · importance ${score}`);
-    parts.push(`"${r.headline ?? ''}"`);
-    parts.push('');
-    parts.push(r.body ?? '');
+    parts.push(`${label.toUpperCase()} · ${r.generated ?? 0} brief(s), ${r.displayEligible ?? 0} display-eligible, top ${(r.topImportance ?? 0).toFixed(2)}`);
+    // Top 3 headlines per scope, in importance order.
+    const top3 = [...(r.briefs ?? [])]
+      .sort((a, b) => b.importance - a.importance)
+      .slice(0, 3);
+    for (const b of top3) {
+      const marker = b.display_eligible ? '★' : '·';
+      parts.push(`  ${marker} ${b.importance.toFixed(2)}  "${b.headline}"`);
+    }
     parts.push('');
   }
   if (failures.length > 0) {
@@ -77,7 +86,7 @@ function formatDigest(results: BriefResult[]): { subject: string; text: string }
     }
   }
   parts.push('');
-  parts.push(`— sent automatically by generate-daily-briefs (cron daily-briefs-5am-nepal)`);
+  parts.push(`— sent automatically by generate-daily-briefs`);
   return { subject, text: parts.join('\n') };
 }
 
@@ -131,16 +140,21 @@ serve(async (req) => {
       ? { "X-Internal-Token": INTERNAL_TOKEN }
       : { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` };
 
+    // Single batch_id threaded through every child call so admins can group
+    // "everything from this run" with one query.
+    const batchId = crypto.randomUUID();
+
     // Sequential fan-out to ai-generate-global-brief. Sequential, not parallel
     // — 8 simultaneous Mistral calls would crash through quota and the key
     // rotator wouldn't see results between calls. Pacing also gives the
     // rate-limiter a chance to roll over keys cleanly.
-    const results: BriefResult[] = [];
+    const results: ScopeResult[] = [];
     for (let i = 0; i < SCOPES.length; i++) {
       const s = SCOPES[i];
-      const body: Record<string, unknown> = { maxProjects: 30 };
+      const body: Record<string, unknown> = { maxProjects: 30, batchId };
       if (s.kind === "province") body.province = s.name;
       const province = s.kind === "province" ? s.name : null;
+      const scopeStr = s.kind === "global" ? "global" : `province:${s.name}`;
 
       try {
         const r = await fetch(`${SUPABASE_URL}/functions/v1/ai-generate-global-brief`, {
@@ -150,43 +164,61 @@ serve(async (req) => {
         });
         const txt = await r.text();
         if (!r.ok) {
-          results.push({ scope: s.kind === "global" ? "global" : `province:${s.name}`, province, ok: false, error: `HTTP ${r.status}: ${txt.slice(0, 200)}` });
+          results.push({ scope: scopeStr, province, ok: false, error: `HTTP ${r.status}: ${txt.slice(0, 200)}` });
         } else {
           const j = JSON.parse(txt);
+          const briefs: ChildBrief[] = Array.isArray(j.briefs) ? j.briefs : [];
+          const topImportance = briefs.reduce((m, b) => Math.max(m, Number(b.importance) || 0), 0);
           results.push({
-            scope: j.scope,
+            scope: j.scope ?? scopeStr,
             province,
             ok: true,
-            headline: j.headline,
-            body: j.body,
-            importance: j.importance,
+            generated: Number(j.generated) || briefs.length,
+            displayEligible: Number(j.displayEligible) || briefs.filter(b => b.display_eligible).length,
+            topImportance,
+            briefs,
           });
         }
       } catch (e) {
-        results.push({ scope: s.kind === "global" ? "global" : `province:${s.name}`, province, ok: false, error: e instanceof Error ? e.message : String(e) });
+        results.push({ scope: scopeStr, province, ok: false, error: e instanceof Error ? e.message : String(e) });
       }
 
       // Pace 4s between calls — keeps us well under Mistral's free-tier RPM
-      // and gives the rate limiter visibility per call. 8 × ~6s avg per call
-      // ≈ 50s total wall time, comfortably under the edge-function ceiling.
+      // and gives the rate limiter visibility per call.
       if (i < SCOPES.length - 1) await new Promise(res => setTimeout(res, 4000));
     }
 
+    const totalGenerated = results.reduce((s, r) => s + (r.generated ?? 0), 0);
+    const totalDisplay = results.reduce((s, r) => s + (r.displayEligible ?? 0), 0);
+    const okScopes = results.filter(r => r.ok).length;
+    const failedScopes = results.filter(r => !r.ok).length;
+
     // Email the digest. cooldownMinutes=0 because we want every daily run to
     // produce one email (cooldown is for spammy retry loops, not daily cadence).
-    const { subject, text } = formatDigest(results);
+    const { subject, text } = formatDigest(results, batchId);
     const emailResult = await sendAlert(admin, "daily_briefs_generated", subject, text, {
       cooldownMinutes: 0,
-      details: { triggeredBy, generated: results.filter(r => r.ok).length, failed: results.filter(r => !r.ok).length },
+      details: { triggeredBy, batchId, totalGenerated, totalDisplay, okScopes, failedScopes },
     });
 
     return json({
       triggered_by: triggeredBy,
-      generated: results.filter(r => r.ok).length,
-      failed: results.filter(r => !r.ok).length,
+      batch_id: batchId,
+      scopes_total: results.length,
+      scopes_ok: okScopes,
+      scopes_failed: failedScopes,
+      total_generated: totalGenerated,
+      total_display_eligible: totalDisplay,
       email_sent: emailResult.sent,
       email_reason: emailResult.reason ?? null,
-      briefs: results.map(r => ({ scope: r.scope, importance: r.importance, ok: r.ok, error: r.error })),
+      per_scope: results.map(r => ({
+        scope: r.scope,
+        ok: r.ok,
+        generated: r.generated ?? 0,
+        displayEligible: r.displayEligible ?? 0,
+        topImportance: r.topImportance ?? null,
+        error: r.error ?? null,
+      })),
     });
   } catch (e) {
     return json({ error: e instanceof Error ? e.message : "Unknown error" }, 500);
