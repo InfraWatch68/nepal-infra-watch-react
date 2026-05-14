@@ -20,7 +20,8 @@ export type AlertKind =
   | "mistral_exhausted"
   | "go_live_on"
   | "go_live_off"
-  | "projects_milestone_500";
+  | "projects_milestone_500"
+  | "daily_briefs_generated";  // sent by generate-daily-briefs (5 AM NPT cron)
 
 const DEFAULT_FROM  = "Nepal Infra Watch <onboarding@resend.dev>";
 const DEFAULT_EMAIL = "infrawatch068@gmail.com";

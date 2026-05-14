@@ -82,20 +82,45 @@ serve(async (req) => {
       return json({ error: "No AI key configured (set MISTRAL_API_KEY, LOVABLE_API_KEY, or GOOGLE_AI_API_KEY)" }, 500);
     }
 
+    // Auth gate accepts three modes:
+    //   (a) X-Internal-Token header matching INTERNAL_NOTIFIER_TOKEN — used by
+    //       the daily-briefs orchestrator + pg_cron path.
+    //   (b) Authorization: Bearer <service-role JWT> — also for cron/scripted.
+    //   (c) Authorization: Bearer <user JWT> with moderator role — admin button.
+    const INTERNAL_TOKEN = Deno.env.get("INTERNAL_NOTIFIER_TOKEN") ?? "";
+    const headerInternal = req.headers.get("X-Internal-Token") ?? "";
     const authHeader = req.headers.get("Authorization") ?? "";
     const jwt = authHeader.replace(/^Bearer\s+/i, "");
-    if (!jwt) return json({ error: "Unauthorized" }, 401);
-    const userClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      global: { headers: { Authorization: `Bearer ${jwt}` } },
-    });
-    const { data: userData, error: userErr } = await userClient.auth.getUser();
-    if (userErr || !userData?.user) return json({ error: "Unauthorized" }, 401);
-    const { data: roles } = await userClient
-      .from("user_roles").select("role").eq("user_id", userData.user.id);
-    const isReviewer = (roles ?? []).some(
-      (r: any) => r.role === "reviewer" || r.role === "coadmin" || r.role === "admin",
-    );
-    if (!isReviewer) return json({ error: "Forbidden" }, 403);
+    const isInternal = INTERNAL_TOKEN.length > 0 && headerInternal === INTERNAL_TOKEN;
+
+    let isServiceRole = false;
+    let createdByUserId: string | null = null;
+    if (!isInternal) {
+      if (!jwt) return json({ error: "Unauthorized" }, 401);
+      try {
+        const parts = jwt.split(".");
+        if (parts.length === 3) {
+          const payload = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
+          if (payload?.role === "service_role") isServiceRole = true;
+        }
+      } catch { /* not a parseable JWT — treat as user token */ }
+      if (!isServiceRole && jwt === SUPABASE_SERVICE_ROLE_KEY) isServiceRole = true;
+
+      if (!isServiceRole) {
+        const userClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+          global: { headers: { Authorization: `Bearer ${jwt}` } },
+        });
+        const { data: userData, error: userErr } = await userClient.auth.getUser();
+        if (userErr || !userData?.user) return json({ error: "Unauthorized" }, 401);
+        const { data: roles } = await userClient
+          .from("user_roles").select("role").eq("user_id", userData.user.id);
+        const isReviewer = (roles ?? []).some(
+          (r: { role: string }) => r.role === "reviewer" || r.role === "coadmin" || r.role === "admin",
+        );
+        if (!isReviewer) return json({ error: "Forbidden" }, 403);
+        createdByUserId = userData.user.id;
+      }
+    }
 
     const body = await req.json().catch(() => ({}));
     const province: string | undefined = body.province?.toString().trim() || undefined;
@@ -143,10 +168,20 @@ STRICT RULES: Use ONLY the structured data provided below — ${projects.length}
 
 Aim for an at-a-glance read suitable for a homepage hero card. The headline should be one short, factual observation that an editor would put above the fold.
 
+You must also score the brief's IMPORTANCE — how newsworthy is the underlying data right now?
+
+IMPORTANCE RUBRIC — required, 0.00-1.00:
+- 0.90-1.00: high-stakes news — a flagship project just slipped, a major audit finding landed, a large budget commitment changed, a critical risk opened, or completion of a National Pride Project.
+- 0.70-0.89: notable shift — a sector saw multiple project status changes, several delays clustered in one province, a funder disbursement milestone.
+- 0.50-0.69: moderate signal — sector overview with one or two meaningful new facts, baseline updates.
+- 0.30-0.49: low signal — mostly summary of stable data, few changes.
+- Below 0.30: filler — nothing newsworthy. Score honestly even if data is sparse; do NOT inflate to make the brief feel important. A quiet day in a small province should score 0.20-0.35; that's fine.
+
 Return ONLY a JSON object (no prose, no markdown, no code fence):
 {
-  "headline": string,  // <=140 chars, one factual observation, no surrounding quotes
-  "body":     string   // 2-4 short paragraphs, plain prose, no markdown headings
+  "headline":   string,         // <=140 chars, one factual observation, no surrounding quotes
+  "body":       string,         // 2-4 short paragraphs, plain prose, no markdown headings
+  "importance": number          // 0.00-1.00 per rubric above
 }`;
 
     const ai = await callChatModel([
@@ -156,7 +191,7 @@ Return ONLY a JSON object (no prose, no markdown, no code fence):
     if (!ai.ok) return json({ error: ai.error }, ai.status);
     const raw = stripFences(ai.text);
     if (!raw) return json({ error: "Empty AI response" }, 500);
-    let parsed: { headline?: string; body?: string };
+    let parsed: { headline?: string; body?: string; importance?: number };
     try {
       parsed = JSON.parse(raw);
     } catch {
@@ -165,6 +200,12 @@ Return ONLY a JSON object (no prose, no markdown, no code fence):
     const headline = (parsed.headline ?? "").toString().trim().slice(0, 220);
     const bodyText = (parsed.body ?? "").toString().trim();
     if (!headline || !bodyText) return json({ error: "AI response missing headline or body" }, 500);
+    // Clamp importance to [0,1]; default to 0.5 if AI omitted it (older Mistral
+    // calls or schema-deviant responses). Round to 2dp for clean display.
+    const importanceRaw = Number(parsed.importance);
+    const importance = Number.isFinite(importanceRaw)
+      ? Math.max(0, Math.min(1, Math.round(importanceRaw * 100) / 100))
+      : 0.5;
 
     const sources = projects.map((p: any) => ({ id: p.id, title: p.title, slug: p.slug }));
 
@@ -175,22 +216,26 @@ Return ONLY a JSON object (no prose, no markdown, no code fence):
       headline,
       body: bodyText,
       sources,
-      created_by: userData.user.id,
+      importance,
+      created_by: createdByUserId,
     }).select("id").single();
     if (iErr) return json({ error: iErr.message }, 500);
 
-    // Keep only the 10 most recent briefs per scope to prevent table bloat.
+    // Retention: keep the 5 most recent briefs per scope. Earlier the function
+    // kept 10; reduced to 5 because the new daily cron produces 8 rows/day
+    // (1 national + 7 provincial) and we want a tighter archive — last week
+    // of national + last week of each province is enough context.
     const { data: toDelete } = await admin
       .from("global_briefs")
       .select("id")
       .eq("scope", scope)
       .order("created_at", { ascending: false })
-      .range(10, 100);
+      .range(5, 100);
     if (toDelete && toDelete.length > 0) {
       await admin.from("global_briefs").delete().in("id", toDelete.map((r: any) => r.id));
     }
 
-    return json({ id: ins.id, scope, headline, body: bodyText, sourceCount: sources.length });
+    return json({ id: ins.id, scope, headline, body: bodyText, importance, sourceCount: sources.length });
   } catch (e) {
     console.error("ai-generate-global-brief error:", e);
     return json({ error: e instanceof Error ? e.message : "Unknown error" }, 500);

@@ -11,6 +11,63 @@ SRK=$(grep '^SUPABASE_SERVICE_ROLE_KEY' .env | head -1 | cut -d= -f2- | tr -d ' 
 
 If `SRK` is empty: STOP. Tell the user to paste it into `.env` first.
 
+## Step 0.5 — Open a sherlock_jobs queue row (REQUIRED for queue-tab parity)
+
+The admin Queue tab reads from `sherlock_jobs`. This run must appear there alongside Tavily+Mistral runs. INSERT a row BEFORE doing any web search:
+
+```bash
+JOB_ID=$(curl -s -X POST "$SUPABASE_URL/rest/v1/sherlock_jobs" \
+  -H "apikey: $SRK" -H "Authorization: Bearer $SRK" \
+  -H "Content-Type: application/json" -H "Prefer: return=representation" \
+  -d '{
+    "kind": "geo",                                  # or "topic" — see Step 1
+    "params": {
+      "province":   "<Province>",                   # geo only; omit for topic mode
+      "district":   "<District>",                   # geo only, optional
+      "sectors":    ["<Sector>"],                   # geo: single-element array
+      "topic":      "<...>",                        # topic only
+      "region":     "<...>",                        # topic only, optional
+      "maxResults": 5,
+      "ai_source":  "claude-code-local"             # marker for the queue UI
+    },
+    "priority": 1,
+    "status":   "running",
+    "started_at": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'",
+    "enqueued_by": null,
+    "last_diagnostic": {
+      "ts": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'",
+      "label": "start",
+      "phases": ["       0ms start"],
+      "elapsed_ms": 0
+    }
+  }' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d)[0].id))")
+```
+
+Track this `JOB_ID` for heartbeats and final write-back. Maintain a `phases[]` array in-memory; append a line at each milestone:
+
+```
+"<elapsed_ms>ms <label>"   # e.g. "    1240ms tavily-start sector=Energy"
+```
+
+After each major milestone, fire-and-forget update the row:
+
+```bash
+curl -s -X PATCH "$SUPABASE_URL/rest/v1/sherlock_jobs?id=eq.$JOB_ID" \
+  -H "apikey: $SRK" -H "Authorization: Bearer $SRK" \
+  -H "Content-Type: application/json" \
+  -d '{"last_diagnostic": {"ts": "...", "label": "...", "phases": [<last 40>], "elapsed_ms": ...}}'
+```
+
+Use these labels (mirror the deployed pipeline so the trail reads identically):
+- `start` — handler entry
+- `searches built (N)` — query plan built
+- `tavily-start sector=<S>` — beginning web search for sector (substitute `WebSearch` for `tavily` in your label if you want, but `tavily` matches deployed)
+- `tavily-done sector=<S> results=<N>` — search complete
+- `ai-start sec=<S> idx=<N> <hostname>` — beginning AI extraction for article N
+- `ai-done sec=<S> idx=<N> ok=<bool>` — AI extraction complete
+- `dry-skip sector=<S>` — dry-cell guard fired (see §17 of memory)
+- `loop-done inserted=<X> skipped=<Y> errors=<Z>` — end of articles loop
+
 ## Step 1 — Build the search query
 
 Canonical Nepal sectors: `Transport`, `Energy`, `Water & Sanitation`, `Agriculture & Irrigation`, `Health`, `Education`, `Telecom`, `Urban Development`, `Tourism`.
@@ -160,6 +217,31 @@ curl -s -X POST "$SUPABASE_URL/rest/v1/project_sources" \
 curl -s -X DELETE "$SUPABASE_URL/rest/v1/projects?id=eq.$NEW_ID" \
   -H "apikey: $SRK" -H "Authorization: Bearer $SRK"
 ```
+
+## Step 7.5 — Close the sherlock_jobs queue row (REQUIRED for queue-tab parity)
+
+After all candidate articles processed (or web-search fallback exhausted), close the queue row with final counts:
+
+```bash
+curl -s -X PATCH "$SUPABASE_URL/rest/v1/sherlock_jobs?id=eq.$JOB_ID" \
+  -H "apikey: $SRK" -H "Authorization: Bearer $SRK" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "status":      "done",
+    "inserted":    <count of NEW projects inserted>,
+    "skipped":     <count of articles processed but not inserted: AI-said-null + dedupe-hit + content-too-short>,
+    "error_text":  "<optional, ≤2000 chars: collected errors joined with newlines>",
+    "finished_at": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'",
+    "last_diagnostic": { "ts": "...", "label": "loop-done inserted=N skipped=M errors=K", "phases": [<final trail, last 40>], "elapsed_ms": <total> }
+  }'
+```
+
+If the run threw mid-way, set `status: "failed"` instead and put the message + last 20 phases in `error_text` (prefix with `"phase trail (last N):\n"`). Don't leave rows stuck in `status='running'` — the admin queue would show them as hanging.
+
+**Counter semantics — must match the deployed pipeline:**
+- `inserted` = new `projects` rows you actually wrote.
+- `skipped` = articles processed but NOT inserted (AI returned null + dedupe matched + content too short). JSON-parse failures go into `error_text`, NOT the skipped count.
+- `inserted + skipped ≤ articles fetched`.
 
 ## Step 8 — Report
 

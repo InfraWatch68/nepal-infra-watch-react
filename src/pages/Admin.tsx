@@ -346,6 +346,20 @@ export default function Admin() {
     toast.success(`Global brief published (${data?.scope ?? 'global'})`);
   };
 
+  // Trigger the daily-briefs orchestrator manually — fans out to all 8 scopes
+  // (1 national + 7 provincial) and emails the digest. Useful for testing the
+  // pipeline without waiting for the 05:00 NPT cron tick.
+  const runDailyBriefs = async () => {
+    setBusyGlobal('daily-briefs');
+    const { data, error } = await supabase.functions.invoke('generate-daily-briefs', { body: {} });
+    setBusyGlobal(null);
+    if (error) return toast.error(await extractFnError(error));
+    const generated = (data as any)?.generated ?? 0;
+    const failed = (data as any)?.failed ?? 0;
+    const emailSent = (data as any)?.email_sent ? 'email sent' : `email not sent (${(data as any)?.email_reason ?? '?'})`;
+    toast.success(`Daily briefs: ${generated} generated, ${failed} failed · ${emailSent}`);
+  };
+
   const runBulkComprehensive = async () => {
     // Pick approved projects that have never been analysed, or whose last
     // analysis is older than 30 days. Cap at 10 to keep one run reasonable.
@@ -448,6 +462,14 @@ export default function Admin() {
               )}
               <Button disabled={busyGlobal === 'brief'} onClick={runGlobalBrief} variant="outline">
                 {busyGlobal === 'brief' ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Generate global brief'}
+              </Button>
+              <Button
+                disabled={busyGlobal === 'daily-briefs'}
+                onClick={runDailyBriefs}
+                variant="outline"
+                title="Generate all 8 scopes (1 national + 7 provincial) + email the digest. The cron does this at 05:00 NPT daily; this button is for ad-hoc testing."
+              >
+                {busyGlobal === 'daily-briefs' ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Run daily briefs now'}
               </Button>
             </div>
           </div>

@@ -5,9 +5,8 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
-import { Key, Plus, Loader2, Trash2, Pencil, Activity } from 'lucide-react';
+import { Key, Plus, Loader2, Trash2, Activity, Search, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/hooks/useAuth';
@@ -30,22 +29,22 @@ type ApiKeyRow = {
   updated_at: string;
 };
 
-const PROVIDERS: { value: Provider; label: string }[] = [
-  { value: 'tavily',  label: 'Tavily (web search)' },
-  { value: 'mistral', label: 'Mistral (chat / extraction)' },
-  { value: 'google',  label: 'Google AI (Gemini)' },
-  { value: 'lovable', label: 'Lovable gateway' },
-];
-
+// Mask: show first 12 chars of the key, the rest as asterisks.
+// `tvly-dev-4ROA**********`, `Axt0aPkpCmHN********************`.
 const maskKey = (k: string) => {
   if (!k) return '—';
-  if (k.length <= 12) return k.slice(0, 3) + '…';
-  return k.slice(0, 8) + '…' + k.slice(-6);
+  if (k.length <= 12) return k;
+  return k.slice(0, 12) + '*'.repeat(Math.min(20, k.length - 12));
 };
 
 const fmtTime = (iso: string | null) => {
   if (!iso) return '—';
-  return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const d = new Date(iso);
+  const today = new Date();
+  if (d.toDateString() === today.toDateString()) {
+    return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  }
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 };
 
 export function ApiKeysPanel() {
@@ -53,14 +52,12 @@ export function ApiKeysPanel() {
   const [rows, setRows] = useState<ApiKeyRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState<string | null>(null);
-  const [editingLabelId, setEditingLabelId] = useState<string | null>(null);
-  const [labelDraft, setLabelDraft] = useState('');
+  const [checkingAll, setCheckingAll] = useState<Provider | null>(null);
 
   const refresh = async () => {
     setLoading(true);
     const { data } = await supabase
-      .from('api_keys')
-      .select('*')
+      .from('api_keys').select('*')
       .order('provider', { ascending: true })
       .order('is_exhausted', { ascending: true })
       .order('position', { ascending: true });
@@ -68,6 +65,9 @@ export function ApiKeysPanel() {
     setLoading(false);
   };
   useEffect(() => { refresh(); }, []);
+
+  const tavilyKeys  = rows.filter(r => r.provider === 'tavily');
+  const mistralKeys = rows.filter(r => r.provider === 'mistral');
 
   const checkKey = async (row: ApiKeyRow) => {
     setChecking(row.id);
@@ -78,28 +78,36 @@ export function ApiKeysPanel() {
     if (result.status === 'ok') {
       const credits = result.credits_total
         ? `${result.credits_used ?? 0}/${result.credits_total} credits used`
-        : 'check OK (credits not exposed)';
-      toast.success(`${row.provider} key: ${credits}`);
+        : 'alive (provider doesn\'t expose credit balance)';
+      toast.success(`${row.provider} ${row.label ?? ''}: ${credits}`);
     } else {
-      toast.error(`${row.provider} key: ${result.status}${result.detail ? ` — ${result.detail}` : ''}`);
+      toast.error(`${row.provider} ${row.label ?? ''}: ${result.status}${result.detail ? ` — ${result.detail}` : ''}`);
     }
     refresh();
   };
 
-  const deleteKey = async (row: ApiKeyRow) => {
-    if (!confirm(`Delete this ${row.provider} key${row.label ? ` "${row.label}"` : ''}? It will stop being used immediately.`)) return;
-    const { error } = await supabase.from('api_keys').delete().eq('id', row.id);
-    if (error) return toast.error(error.message);
-    toast.success('Key deleted');
+  // Probe every key in the provider's column. Sequentially to avoid
+  // hammering the provider, but with no artificial delay between calls.
+  const checkAll = async (provider: Provider) => {
+    setCheckingAll(provider);
+    const targets = rows.filter(r => r.provider === provider);
+    let ok = 0, failed = 0;
+    for (const row of targets) {
+      try {
+        const { data } = await supabase.functions.invoke('check-api-key', { body: { keyId: row.id } });
+        if ((data as { status?: string })?.status === 'ok') ok++; else failed++;
+      } catch { failed++; }
+    }
+    setCheckingAll(null);
+    toast.success(`Checked ${targets.length} ${provider} keys · ${ok} alive · ${failed} exhausted/error`);
     refresh();
   };
 
-  const saveLabel = async (row: ApiKeyRow) => {
-    const trimmed = labelDraft.trim().slice(0, 80) || null;
-    const { error } = await supabase.from('api_keys').update({ label: trimmed }).eq('id', row.id);
+  const deleteKey = async (row: ApiKeyRow) => {
+    if (!confirm(`Delete ${row.provider} key${row.label ? ` "${row.label}"` : ''}? It stops being used immediately.`)) return;
+    const { error } = await supabase.from('api_keys').delete().eq('id', row.id);
     if (error) return toast.error(error.message);
-    setEditingLabelId(null);
-    setLabelDraft('');
+    toast.success('Key deleted');
     refresh();
   };
 
@@ -109,12 +117,10 @@ export function ApiKeysPanel() {
         <h3 className="font-semibold flex items-center gap-2">
           <Key className="h-4 w-4 text-accent" /> API Keys
         </h3>
-        <AddKeyDialog onAdded={refresh} userId={user?.id ?? null} />
       </div>
       <p className="text-xs text-muted-foreground">
-        Keys are tried in order. When a key exhausts (Tavily 401/429/432/433 or Mistral 402 / free-tier 429), it's automatically
-        flagged and moved to the bottom of its provider's rotation, so subsequent calls skip past it. Click <span className="font-mono">Check</span> to
-        probe a key's current credit balance and revive a manually-fixed key.
+        Keys are tried in order, exhausted ones move to the bottom automatically (Tavily 401/429/432/433 · Mistral 402 / free-tier 429).
+        New keys land at the bottom by default. Click <span className="font-mono">Check</span> on a row to probe credits and revive a fixed key.
       </p>
 
       {loading && (
@@ -123,137 +129,203 @@ export function ApiKeysPanel() {
         </div>
       )}
 
-      {!loading && rows.length === 0 && (
-        <div className="rounded-md border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
-          No keys yet. Click <span className="font-mono">Add key</span> above to register one. The edge functions fall back to
-          environment secrets until at least one key is added for that provider.
-        </div>
-      )}
-
-      {!loading && rows.length > 0 && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="text-[11px] uppercase tracking-wider font-mono text-muted-foreground border-b">
-              <tr className="text-left">
-                <th className="px-2 py-2">Provider</th>
-                <th className="px-2 py-2">Label</th>
-                <th className="px-2 py-2">Key</th>
-                <th className="px-2 py-2">Status</th>
-                <th className="px-2 py-2">Credits</th>
-                <th className="px-2 py-2">Last ok</th>
-                <th className="px-2 py-2">Last fail</th>
-                <th className="px-2 py-2 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map(row => {
-                const creditPct = row.credits_total
-                  ? Math.min(100, Math.round(((row.credits_used ?? 0) / row.credits_total) * 100))
-                  : null;
-                return (
-                  <tr key={row.id} className="border-b border-border/60 align-top">
-                    <td className="px-2 py-3 font-mono text-xs uppercase">{row.provider}</td>
-                    <td className="px-2 py-3 text-xs min-w-[140px]">
-                      {editingLabelId === row.id ? (
-                        <div className="flex items-center gap-1">
-                          <Input
-                            value={labelDraft}
-                            onChange={e => setLabelDraft(e.target.value)}
-                            className="h-7 text-xs"
-                            autoFocus
-                            onKeyDown={e => { if (e.key === 'Enter') saveLabel(row); if (e.key === 'Escape') { setEditingLabelId(null); setLabelDraft(''); } }}
-                          />
-                          <Button size="sm" variant="ghost" className="h-7 px-2" onClick={() => saveLabel(row)}>Save</Button>
-                        </div>
-                      ) : (
-                        <button
-                          className="text-left hover:underline w-full truncate"
-                          onClick={() => { setEditingLabelId(row.id); setLabelDraft(row.label ?? ''); }}
-                          title="Click to edit"
-                        >
-                          {row.label || <span className="text-muted-foreground italic">(no label)</span>}
-                        </button>
-                      )}
-                    </td>
-                    <td className="px-2 py-3 font-mono text-[11px]">{maskKey(row.key_value)}</td>
-                    <td className="px-2 py-3">
-                      {row.is_exhausted ? (
-                        <Badge variant="outline" className="text-[10px] font-mono border-destructive/40 text-destructive bg-destructive/5">
-                          exhausted
-                        </Badge>
-                      ) : (
-                        <Badge variant="outline" className="text-[10px] font-mono border-success/40 text-success bg-success/5">
-                          active
-                        </Badge>
-                      )}
-                      {row.exhausted_reason && (
-                        <div className="text-[10px] text-muted-foreground font-mono mt-1 truncate max-w-[140px]" title={row.exhausted_reason}>
-                          {row.exhausted_reason}
-                        </div>
-                      )}
-                    </td>
-                    <td className="px-2 py-3 text-xs">
-                      {row.credits_total ? (
-                        <div>
-                          <div className="font-mono">{row.credits_used ?? 0}/{row.credits_total}</div>
-                          <div className="w-20 h-1 bg-muted rounded-full mt-1 overflow-hidden">
-                            <div
-                              className={cn('h-full', (creditPct ?? 0) > 90 ? 'bg-destructive' : (creditPct ?? 0) > 70 ? 'bg-warning' : 'bg-success')}
-                              style={{ width: `${creditPct ?? 0}%` }}
-                            />
-                          </div>
-                        </div>
-                      ) : (
-                        <span className="text-muted-foreground font-mono">—</span>
-                      )}
-                    </td>
-                    <td className="px-2 py-3 text-[11px] font-mono text-muted-foreground">{fmtTime(row.last_succeeded_at)}</td>
-                    <td className="px-2 py-3 text-[11px] font-mono text-muted-foreground">{fmtTime(row.last_exhausted_at)}</td>
-                    <td className="px-2 py-3 text-right">
-                      <div className="inline-flex items-center gap-1">
-                        <Button
-                          size="sm" variant="outline" className="h-7 px-2"
-                          disabled={checking === row.id}
-                          onClick={() => checkKey(row)}
-                          title="Probe the provider and update credits + status"
-                        >
-                          {checking === row.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <><Activity className="h-3 w-3 mr-1" /> Check</>}
-                        </Button>
-                        <Button
-                          size="sm" variant="ghost" className="h-7 px-2 text-destructive hover:text-destructive"
-                          onClick={() => deleteKey(row)}
-                          title="Delete this key"
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </Button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+      {!loading && (
+        <div className="grid md:grid-cols-2 gap-4">
+          <ProviderColumn
+            title="Tavily (web search)"
+            provider="tavily"
+            rows={tavilyKeys}
+            checkingId={checking}
+            checkingAll={checkingAll === 'tavily'}
+            onCheck={checkKey}
+            onCheckAll={() => checkAll('tavily')}
+            onDelete={deleteKey}
+            onAdded={refresh}
+            userId={user?.id ?? null}
+            accentClass="border-accent/30 bg-accent/5"
+          />
+          <ProviderColumn
+            title="Mistral (chat / extraction)"
+            provider="mistral"
+            rows={mistralKeys}
+            checkingId={checking}
+            checkingAll={checkingAll === 'mistral'}
+            onCheck={checkKey}
+            onCheckAll={() => checkAll('mistral')}
+            onDelete={deleteKey}
+            onAdded={refresh}
+            userId={user?.id ?? null}
+            accentClass="border-info/30 bg-info/5"
+          />
         </div>
       )}
     </Card>
   );
 }
 
-function AddKeyDialog({ onAdded, userId }: { onAdded: () => void; userId: string | null }) {
+type ColumnProps = {
+  title: string;
+  provider: Provider;
+  rows: ApiKeyRow[];
+  checkingId: string | null;
+  checkingAll: boolean;
+  onCheck: (r: ApiKeyRow) => void;
+  onCheckAll: () => void;
+  onDelete: (r: ApiKeyRow) => void;
+  onAdded: () => void;
+  userId: string | null;
+  accentClass: string;
+};
+
+function ProviderColumn(p: ColumnProps) {
+  const aliveCount = p.rows.filter(r => !r.is_exhausted).length;
+  const exhaustedCount = p.rows.length - aliveCount;
+  const ProviderIcon = p.provider === 'tavily' ? Search : Sparkles;
+  return (
+    <div className={cn('rounded-md border p-3 space-y-3', p.accentClass)}>
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="font-semibold text-sm inline-flex items-center gap-2">
+          <ProviderIcon className="h-4 w-4" /> {p.title}
+        </div>
+        <div className="text-[10px] uppercase tracking-wider font-mono text-muted-foreground">
+          <span className="text-success">{aliveCount} alive</span>
+          {exhaustedCount > 0 && <span className="text-destructive"> · {exhaustedCount} exhausted</span>}
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <AddKeyDialog provider={p.provider} onAdded={p.onAdded} userId={p.userId} />
+        <Button
+          size="sm" variant="outline"
+          disabled={p.rows.length === 0 || p.checkingAll}
+          onClick={p.onCheckAll}
+          title="Probe every key in this column"
+        >
+          {p.checkingAll ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Activity className="h-3 w-3 mr-1" />}
+          Check all
+        </Button>
+      </div>
+
+      {p.rows.length === 0 ? (
+        <div className="rounded-md border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
+          No {p.provider} keys yet. Click "Add key" to register one. Edge functions fall back to env until you do.
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {p.rows.map(row => <KeyRow key={row.id} row={row} checkingId={p.checkingId} onCheck={p.onCheck} onDelete={p.onDelete} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function KeyRow({ row, checkingId, onCheck, onDelete }: {
+  row: ApiKeyRow;
+  checkingId: string | null;
+  onCheck: (r: ApiKeyRow) => void;
+  onDelete: (r: ApiKeyRow) => void;
+}) {
+  const creditPct = row.credits_total
+    ? Math.min(100, Math.round(((row.credits_used ?? 0) / row.credits_total) * 100))
+    : null;
+  const fmtTimeShort = (iso: string | null) => {
+    if (!iso) return null;
+    const d = new Date(iso);
+    const today = new Date();
+    if (d.toDateString() === today.toDateString()) {
+      return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    }
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  };
+  return (
+    <div className={cn(
+      'rounded-md border p-3 space-y-2 bg-background',
+      row.is_exhausted && 'opacity-70 border-destructive/30',
+    )}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="font-mono text-xs truncate" title={maskKey(row.key_value)}>
+            {maskKey(row.key_value)}
+          </div>
+          <div className="text-[11px] text-muted-foreground truncate mt-0.5">
+            {row.label || <span className="italic">(no label)</span>}
+            <span className="font-mono text-[10px] ml-1">· pos {row.position}</span>
+          </div>
+        </div>
+        <Badge variant="outline" className={cn(
+          'text-[10px] font-mono shrink-0',
+          row.is_exhausted ? 'border-destructive/40 text-destructive bg-destructive/5'
+                           : 'border-success/40 text-success bg-success/5',
+        )}>
+          {row.is_exhausted ? 'exhausted' : 'active'}
+        </Badge>
+      </div>
+
+      {row.credits_total ? (
+        <div>
+          <div className="flex items-baseline justify-between text-[11px] font-mono">
+            <span className="text-muted-foreground">credits</span>
+            <span>{row.credits_used ?? 0}<span className="text-muted-foreground">/{row.credits_total}</span></span>
+          </div>
+          <div className="w-full h-1.5 bg-muted rounded-full mt-0.5 overflow-hidden">
+            <div
+              className={cn(
+                'h-full transition-all',
+                (creditPct ?? 0) > 90 ? 'bg-destructive'
+                  : (creditPct ?? 0) > 70 ? 'bg-warning' : 'bg-success'
+              )}
+              style={{ width: `${creditPct ?? 0}%` }}
+            />
+          </div>
+        </div>
+      ) : null}
+
+      {row.exhausted_reason && (
+        <div className="text-[10px] text-destructive font-mono truncate" title={row.exhausted_reason}>
+          {row.exhausted_reason}
+        </div>
+      )}
+
+      <div className="flex items-center justify-between gap-2 pt-1">
+        <div className="text-[10px] text-muted-foreground font-mono">
+          {row.last_succeeded_at && <span title={row.last_succeeded_at}>last ok {fmtTimeShort(row.last_succeeded_at)}</span>}
+          {row.last_succeeded_at && row.last_exhausted_at && ' · '}
+          {row.last_exhausted_at && <span className="text-destructive" title={row.last_exhausted_at}>last fail {fmtTimeShort(row.last_exhausted_at)}</span>}
+          {!row.last_succeeded_at && !row.last_exhausted_at && <span>never checked</span>}
+        </div>
+        <div className="inline-flex items-center gap-1">
+          <Button
+            size="sm" variant="outline" className="h-7 px-2"
+            disabled={checkingId === row.id}
+            onClick={() => onCheck(row)}
+          >
+            {checkingId === row.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <><Activity className="h-3 w-3 mr-1" /> Check</>}
+          </Button>
+          <Button
+            size="sm" variant="ghost" className="h-7 px-1.5 text-destructive hover:text-destructive"
+            onClick={() => onDelete(row)}
+            title="Delete this key"
+          >
+            <Trash2 className="h-3 w-3" />
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AddKeyDialog({ provider, onAdded, userId }: { provider: Provider; onAdded: () => void; userId: string | null }) {
   const [open, setOpen] = useState(false);
-  const [provider, setProvider] = useState<Provider>('tavily');
   const [label, setLabel] = useState('');
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const reset = () => { setProvider('tavily'); setLabel(''); setValue(''); };
+  const reset = () => { setLabel(''); setValue(''); };
 
   const submit = async () => {
     if (!value.trim()) return toast.error('Paste the key value');
     setBusy(true);
-    // Find the current max position for this provider so the new key goes
-    // to the bottom by default (admin can rerun a check to verify it works,
-    // then it'll naturally float to the top on success).
+    // New keys go to the bottom of the column by default (max+1 position).
     const { data: maxRow } = await supabase
       .from('api_keys').select('position').eq('provider', provider)
       .order('position', { ascending: false }).limit(1).maybeSingle();
@@ -263,19 +335,18 @@ function AddKeyDialog({ onAdded, userId }: { onAdded: () => void; userId: string
       label: label.trim() || null,
       key_value: value.trim(),
       position: nextPos,
+      // Tavily plan-limit is 1000 credits/month on free; pre-seed the total
+      // so the UI can show progress even before the first Check.
+      credits_total: provider === 'tavily' ? 1000 : null,
       created_by: userId,
     });
     setBusy(false);
     if (error) {
-      // Most likely cause: unique violation on (provider, key_value).
-      if (error.code === '23505') {
-        toast.error('That key is already registered for this provider.');
-      } else {
-        toast.error(error.message);
-      }
+      if (error.code === '23505') toast.error('Key already registered for this provider.');
+      else toast.error(error.message);
       return;
     }
-    toast.success(`Added ${provider} key`);
+    toast.success(`Added ${provider} key (position ${nextPos})`);
     reset();
     setOpen(false);
     onAdded();
@@ -290,29 +361,18 @@ function AddKeyDialog({ onAdded, userId }: { onAdded: () => void; userId: string
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Register an API key</DialogTitle>
+          <DialogTitle>Add a {provider} key</DialogTitle>
         </DialogHeader>
         <div className="space-y-4">
           <div className="space-y-1">
-            <Label className="text-xs">Provider</Label>
-            <Select value={provider} onValueChange={(v) => setProvider(v as Provider)}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                {PROVIDERS.map(p => <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-1">
             <Label className="text-xs">Label (optional)</Label>
-            <Input value={label} onChange={e => setLabel(e.target.value)} placeholder="e.g. Tavily team account #2" maxLength={80} />
-            <p className="text-[10px] text-muted-foreground">Free-text — helps you tell keys apart in the list.</p>
+            <Input value={label} onChange={e => setLabel(e.target.value)} placeholder={provider === 'tavily' ? 'e.g. Tavily team account #4' : 'e.g. Mistral fallback'} maxLength={80} />
           </div>
           <div className="space-y-1">
             <Label className="text-xs">Key value</Label>
-            <Input value={value} onChange={e => setValue(e.target.value)} placeholder="tvly-dev-... or full key string" />
+            <Input value={value} onChange={e => setValue(e.target.value)} placeholder={provider === 'tavily' ? 'tvly-dev-…' : 'sk-… or raw key'} autoFocus />
             <p className="text-[10px] text-muted-foreground">
-              The value is stored in the database (RLS-protected, moderator-only read). Existing matching keys for the same
-              provider will be rejected by the unique constraint.
+              Pasted value is stored in the api_keys table (RLS-protected, moderator-only). The new key goes to the bottom of the rotation; if it works on the next call it stays there until a higher-priority key exhausts.
             </p>
           </div>
           <div className="flex justify-end gap-2">
