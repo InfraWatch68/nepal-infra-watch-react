@@ -55,6 +55,12 @@ const schema = z.object({
   implementing_agency: z.string().max(200).optional(),
   start_date: z.string().optional(),
   expected_completion: z.string().optional(),
+  // Manually-entered physical/implementation progress. `progress_percent` is
+  // 0–100; `progress_stage` is a short freeform label ("Foundation poured",
+  // "50% structural"). These are distinct from `reported_progress_*`, which
+  // are reserved for AI-extracted values with a source citation.
+  progress_percent: z.coerce.number().min(0).max(100).optional(),
+  progress_stage: z.string().max(60).optional(),
   cover_image_url: z.string().url().optional().or(z.literal('')),
   coords: z.string().optional(),
 });
@@ -315,6 +321,12 @@ export default function SubmitProject() {
               </Field>
               <Field label="Start date"><Input type="date" value={form.start_date ?? ''} onChange={e => set('start_date', e.target.value)} /></Field>
               <Field label="Expected completion"><Input type="date" value={form.expected_completion ?? ''} onChange={e => set('expected_completion', e.target.value)} /></Field>
+              <Field label="Physical progress (%)" hint="Manual entry. 0–100. Leave blank if unknown — AI analysis populates a separate reported_progress_percent field with a source citation.">
+                <Input type="number" min="0" max="100" step="1" value={form.progress_percent ?? ''} onChange={e => set('progress_percent', e.target.value)} />
+              </Field>
+              <Field label="Progress stage label" hint='Short freeform label ("Foundation poured", "50% structural", "Punch-list").'>
+                <Input maxLength={60} value={form.progress_stage ?? ''} onChange={e => set('progress_stage', e.target.value)} />
+              </Field>
             </div>
 
             <Field label="Cover image" hint="Drag a file in, paste from clipboard, or click upload. Or paste a URL below.">
