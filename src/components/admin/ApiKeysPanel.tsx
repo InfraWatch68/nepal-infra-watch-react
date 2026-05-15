@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
-import { Key, Plus, Loader2, Trash2, Activity, Search, Sparkles } from 'lucide-react';
+import { Key, Plus, Loader2, Trash2, Activity, Search, Sparkles, ArrowUpDown } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/hooks/useAuth';
@@ -53,6 +53,7 @@ export function ApiKeysPanel() {
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState<string | null>(null);
   const [checkingAll, setCheckingAll] = useState<Provider | null>(null);
+  const [reshuffling, setReshuffling] = useState<Provider | null>(null);
 
   const refresh = async () => {
     setLoading(true);
@@ -103,6 +104,59 @@ export function ApiKeysPanel() {
     refresh();
   };
 
+  // Compact position numbers per provider — alive keys to 1..N, exhausted
+  // keys to N+1..M, preserving the current display order within each
+  // group. Useful after several add/exhaust cycles when position values
+  // get gappy and a newly-added alive key ends up with a higher position
+  // than older still-alive keys (which can hide it in the rotation
+  // priority — even though `is_exhausted ASC, position ASC` already
+  // puts alive ones first, position numbers being out of order makes
+  // the panel confusing to read). Edge functions read the same order,
+  // so callers naturally try alive keys first regardless of position
+  // numbering — this is mostly a hygiene operation, but it also brings
+  // any newly-revived alive key to the top of its group on the next
+  // edge-function call.
+  const reshuffle = async (provider: Provider) => {
+    setReshuffling(provider);
+    const { data: keys, error: fetchErr } = await supabase
+      .from('api_keys')
+      .select('id, position, is_exhausted')
+      .eq('provider', provider)
+      .order('is_exhausted', { ascending: true })
+      .order('position', { ascending: true });
+    if (fetchErr || !keys || keys.length === 0) {
+      setReshuffling(null);
+      return fetchErr
+        ? toast.error(fetchErr.message)
+        : toast.message(`No ${provider} keys to reshuffle`);
+    }
+    let changed = 0;
+    let aliveCount = 0;
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i] as { id: string; position: number; is_exhausted: boolean };
+      if (!k.is_exhausted) aliveCount += 1;
+      const targetPosition = i + 1;
+      if (k.position === targetPosition) continue;
+      const { error: updErr } = await supabase
+        .from('api_keys')
+        .update({ position: targetPosition })
+        .eq('id', k.id);
+      if (updErr) {
+        setReshuffling(null);
+        toast.error(`Reshuffle stopped: ${updErr.message}`);
+        await refresh();
+        return;
+      }
+      changed += 1;
+    }
+    setReshuffling(null);
+    toast.success(
+      `Reshuffled ${keys.length} ${provider} key${keys.length === 1 ? '' : 's'} — ${aliveCount} alive at positions 1..${aliveCount}` +
+      (changed === 0 ? ' (already in order)' : `, ${changed} position${changed === 1 ? '' : 's'} updated`)
+    );
+    refresh();
+  };
+
   const deleteKey = async (row: ApiKeyRow) => {
     if (!confirm(`Delete ${row.provider} key${row.label ? ` "${row.label}"` : ''}? It stops being used immediately.`)) return;
     const { error } = await supabase.from('api_keys').delete().eq('id', row.id);
@@ -121,6 +175,7 @@ export function ApiKeysPanel() {
       <p className="text-xs text-muted-foreground">
         Keys are tried in order, exhausted ones move to the bottom automatically (Tavily 401/429/432/433 · Mistral 402 / free-tier 429).
         New keys land at the bottom by default. Click <span className="font-mono">Check</span> on a row to probe credits and revive a fixed key.
+        Use <span className="font-mono">Reshuffle</span> to compact position numbers — alive keys to positions 1..N, exhausted to the bottom — so newly-revived keys land in front of older exhausted ones on the next call.
       </p>
 
       {loading && (
@@ -137,8 +192,10 @@ export function ApiKeysPanel() {
             rows={tavilyKeys}
             checkingId={checking}
             checkingAll={checkingAll === 'tavily'}
+            reshuffling={reshuffling === 'tavily'}
             onCheck={checkKey}
             onCheckAll={() => checkAll('tavily')}
+            onReshuffle={() => reshuffle('tavily')}
             onDelete={deleteKey}
             onAdded={refresh}
             userId={user?.id ?? null}
@@ -150,8 +207,10 @@ export function ApiKeysPanel() {
             rows={mistralKeys}
             checkingId={checking}
             checkingAll={checkingAll === 'mistral'}
+            reshuffling={reshuffling === 'mistral'}
             onCheck={checkKey}
             onCheckAll={() => checkAll('mistral')}
+            onReshuffle={() => reshuffle('mistral')}
             onDelete={deleteKey}
             onAdded={refresh}
             userId={user?.id ?? null}
@@ -169,8 +228,10 @@ type ColumnProps = {
   rows: ApiKeyRow[];
   checkingId: string | null;
   checkingAll: boolean;
+  reshuffling: boolean;
   onCheck: (r: ApiKeyRow) => void;
   onCheckAll: () => void;
+  onReshuffle: () => void;
   onDelete: (r: ApiKeyRow) => void;
   onAdded: () => void;
   userId: string | null;
@@ -193,16 +254,25 @@ function ProviderColumn(p: ColumnProps) {
         </div>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         <AddKeyDialog provider={p.provider} onAdded={p.onAdded} userId={p.userId} />
         <Button
           size="sm" variant="outline"
-          disabled={p.rows.length === 0 || p.checkingAll}
+          disabled={p.rows.length === 0 || p.checkingAll || p.reshuffling}
           onClick={p.onCheckAll}
           title="Probe every key in this column"
         >
           {p.checkingAll ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Activity className="h-3 w-3 mr-1" />}
           Check all
+        </Button>
+        <Button
+          size="sm" variant="outline"
+          disabled={p.rows.length === 0 || p.reshuffling || p.checkingAll}
+          onClick={p.onReshuffle}
+          title="Compact position numbers — alive keys to 1..N, exhausted to the bottom. Ensures any newly-revived alive key sits in front of older exhausted ones."
+        >
+          {p.reshuffling ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <ArrowUpDown className="h-3 w-3 mr-1" />}
+          Reshuffle
         </Button>
       </div>
 
