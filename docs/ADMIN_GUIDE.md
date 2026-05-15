@@ -246,13 +246,12 @@ _(did not exist — keys lived only as Supabase platform secrets; admins had no 
 - **Bug:** Credits always showed `0/1000` for every Tavily key. Cause: `check-api-key` was POSTing to Tavily's `/usage` endpoint with body-based `api_key` (Tavily replies 405 Method Not Allowed), so the credit fetch silently failed and rows kept their seeded defaults forever.
 
 ### Current
-- Same two-column layout, same controls, same rotation logic
-- **+ Real credits display.** `check-api-key` now does GET `/usage` with `Authorization: Bearer <key>` (Tavily's documented contract). Parses `account.plan_usage` + `account.plan_limit` from the response. Live data finally surfaces.
-- **+ Display reformatted from `X/1000` → `N used · M left · P plan`.** Same data, three numbers shown explicitly. The Check button's success toast uses the same format. Exhausted keys naturally read e.g. `1000 used · 0 left · 1000 plan`.
-- **+ Column caps at `max-h-[480px]` with internal vertical scroll** (mirrors the Sherlock queue list pattern). Adding the 8th–10th Tavily key no longer pushes the Mistral column off-screen — only the rows inside scroll.
+- Same two-column layout, real credits display, scroll-capped column heights — all unchanged
+- **+ Reshuffle button** per provider column (next to "Check all"). After several add/exhaust cycles the `position` column gets gappy — alive keys at {1, 4, 8}, exhausted at {2, 3, 5, 6, 7} — which makes the panel confusing to read and means a newly-revived alive key sits behind older alive keys by position. Reshuffle recompacts: alive keys to positions 1..N, exhausted to N+1..M, preserving current display order within each group. One-shot operation, disabled while in flight, mutually exclusive with "Check all" so the two operations don't race.
+  - **Why position numbering matters even though edge functions try alive-first:** the edge-function key reader does `order('is_exhausted', { ascending: true }).order('position', { ascending: true })`. Alive keys ARE tried first regardless of their `position`. But within the alive group, position decides order — so a revived key at position 8 sits behind alive keys at positions 1–5, and gets called later. Reshuffle equalises that.
 - **Note on key format:** the table accepts both legacy JWT-format keys (`eyJ...`) and new `sb_secret_` keys. For server-side use (edge functions, drainer) both work. **For Local AI panel use**, the JWT-format is required — see [Local AI tools panel](#ai-tools--local-ai-tools-panel) for the reason.
 
-**Fix / Change:** Credits visibility was load-bearing for "is this key actually about to run out?" planning. Old display ratio was always 0%, masking the real state. Now `N used · M left · P plan` reflects the actual Tavily/Mistral account state in real time after each Check.
+**Fix / Change:** Until now the only way to influence rotation order was to delete + re-add keys (which loses credit history). Reshuffle compacts in place without dropping rows.
 
 ---
 
@@ -560,16 +559,18 @@ Where to find it: `/admin` → tab bar → "Activity" tab → scroll to the bott
 Where to find it: header nav → "Dashboard" link → opens `/dashboard`. From there, "Submit project" button → multi-step form at `/dashboard/submit`.
 
 ### Previous
-- `/dashboard/submit` form: title, sector, province, district, description, budget, dates, contractor, agency, source URLs, image upload
-- Saves with `approval_status='pending'` unless the submitter is admin/coadmin (auto-approved)
-- Multi-step UX: basic fields → details → review → submit
+- `/dashboard/submit` form: title, sector, province, district, description, budget, dates, contractor, agency, source URLs, image upload, project type, ESIA status, procurement method, estimated beneficiaries
+- **No field for physical progress** — the form had nothing for it, so manual contributors could see e.g. "70% structural complete" on site but had no way to enter that. The project detail page would render "Not yet reported" until an AI Analysis run later populated `reported_progress_percent` from a citation.
+- Saves with `approval_status='pending'`; the auto-approve trigger promotes high-confidence AI submissions but manual submissions always go through human review
 - File uploads go to Supabase Storage
 
 ### Current
-- Same form, same submission flow
-- _(no recent changes to this area)_
+- Same form, same submission flow, same hydration on edit
+- **+ Physical progress (%)** input — number 0–100, optional. Maps to `projects.progress_percent`. Hint text clarifies this is the manual entry; the AI-extracted equivalent (`reported_progress_percent`) is a separate field that carries a quote + source URL.
+- **+ Progress stage label** input — short free text up to 60 chars, optional. Maps to `projects.progress_stage`. For human-readable labels like "Foundation poured", "50% structural", "Punch-list".
+- Both fields are loaded on edit because the form hydration uses `select('*')`, and saved on submit because the insert/update payload already spreads `parsed.data` from the zod schema. No additional plumbing was needed beyond the schema + UI.
 
-**Fix / Change:** —
+**Fix / Change:** ProjectDetail.tsx already preferred `reported_progress_percent` (AI-extracted, has source) and fell back to `progress_percent` (manual). That fallback path was unreachable from any UI before — now contributors and reviewers can populate it directly. Reviewers editing an approved project can also update the manual % as construction advances without waiting for the next AI analysis run.
 
 ---
 
