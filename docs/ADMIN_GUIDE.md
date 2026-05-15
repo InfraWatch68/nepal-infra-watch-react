@@ -145,20 +145,19 @@ Run the website's AI workflows in the moderator's own Claude.ai / ChatGPT subscr
 Where to find it: `/admin` → scroll past API Keys → **`Local AI tools`** card (collapsed by default; click to expand).
 
 ### Previous
-_(did not exist — every AI workflow burned server-side Tavily + Mistral credits)_
+- Collapsible card with service-role key input at top
+- **Seven workflow rows** (Tool menu, Discover, Go Live, Analyze deep, Live Check, Generate briefs, Fetch news, Verify project)
+- Prompts could be portable but the panel never explicitly told the AI to avoid local-folder hunting — agents running in filesystem-capable hosts (Claude Code, code interpreter) sometimes went looking for credentials in `.env`
+- Live Check filter: `reviewed_at > session_start AND last_comprehensive_analysis_at IS NULL` — but `reviewed_at` was never being set by any code path, so the filter returned zero candidates every cycle (silent breakage)
+- `ai_tag` shown in `PROJECT_SCHEMA` example as just `"claude-local"` (no batch id) — inconsistent with the header rule that demanded the batch suffix
 
 ### Current
-- New collapsible card, closed by default to keep the admin page light.
-- **Service-role key setup** at top — paste the **JWT-format `eyJ...` service_role key** from Supabase Dashboard → API. The newer `sb_secret_` keys are rejected by PostgREST (401 "Forbidden use of secret API key in browser") when called from Claude.ai / ChatGPT / subagent runtimes; panel shows a red banner if a `sb_secret_` key is saved. Key persists in browser localStorage (per-browser, never bundled with the SPA).
-- **Seven workflow rows**, each generates a self-contained prompt the admin copies into their AI tool:
-  - **Tool menu** — AI replies with the list of supported tasks. Start here if unsure.
-  - **Discover projects** — single-cell web search → extract → insert. Mirrors `ai-discover-projects`.
-  - **Go Live (multi-cell sweep)** — walks a (province × sector) grid running Discover for each cell. Replaces the server-side Sherlock Live cron — the heaviest consumer of Tavily + Mistral credits.
-  - **Analyze projects (deep)** — multi-select project picker with filter (All / Approved only / Unanalyzed / Stale >2d, stalest first). Loops over selected projects; each gets the full Run-AI-Analysis + Trace-History pipeline (5-bucket research, 7 detail tables, 3 timeline tables, narrative summary + gaps).
-  - **Live Check (on-approval analysis)** — polls Supabase every 60s for newly-approved projects (`reviewed_at > session_start AND last_comprehensive_analysis_at IS NULL`) and runs Analyze on each. Mirrors the server-side `queue_analysis_on_approval` trigger.
-  - **Generate briefs** — multi-brief batch over approved projects in a scope. Mirrors the new multi-brief flow.
-  - **Fetch news** — recent news for one project → `project_updates` + `project_sources`.
-  - **Verify project** — read-only audit; returns a JSON report; no DB writes.
+- **+ Eighth workflow row: Refresh stale (backlog sweep)** — pulls approved projects with `last_comprehensive_analysis_at IS NULL` OR older than N days, then runs the full 10-table Analyze pipeline on each (oldest first). One-shot batch, no session-slot claim — safe to run alongside Go Live and Live Check. Caps + staleness window configurable in the row (defaults: 20 projects, 30 days). Mirrors the admin panel's separate "Refresh stale approved projects" button but uses the moderator's AI quota instead of Tavily + Mistral.
+- **+ Portability hardening** — every prompt now opens with an explicit `## Portability — this prompt is self-contained, do NOT read local files` section. The AI is told to STOP and ask the moderator if `<SERVICE_ROLE_KEY>` still reads as a literal placeholder, rather than search `.env` files, the working directory, or any local checkout.
+- **+ Live Check now actually catches approvals** — `reviewed_at` is finally being stamped (both by the auto-approve BEFORE INSERT trigger AND by a new BEFORE INSERT/UPDATE trigger that fires on every approval transition). Live Check's poll filter works as designed for the first time.
+- **+ Tool menu prompt** rewritten to list all 8 tasks with **house rules** (batch tag required on every row, never write `approval_status:"approved"` directly, honour the kill switch, apply confidence rubric ≥ 0.40).
+- **+ `PROJECT_SCHEMA` example** now reads `"ai_tag": "claude-local-<batchId>"` so the AI doesn't accidentally drop the batch suffix.
+- **Original seven workflow rows unchanged in behaviour** — Tool menu, Discover, Go Live, Analyze deep, Live Check, Generate briefs, Fetch news, Verify project all work as before.
 - **Multi-prompt detection** is baked into every prompt — paste two prompts together into Claude Code and it auto-spawns one subagent per prompt (parallel); paste into ChatGPT / plain Claude.ai and it tells you to use separate windows.
 - **Per-workflow mutex** (not panel-wide): Go Live and Live Check can run in parallel because they claim separate session columns (`sherlock_live_state.golive_session_id` vs `livecheck_session_id`). Same-workflow second-starts are locked. Discover / Analyze (one-shot) / Brief / Fetch news / Verify never claim a session and never lock.
 - **Kill switch:** Stop button next to each running session. Sets the corresponding session column to null; the AI's pre-cell/pre-cycle GET sees the change and exits gracefully (~5–60s latency depending on what step it's on).
@@ -187,20 +186,19 @@ Two related toggles. **Auto-approve** promotes high-confidence AI submissions fr
 Where to find it: `/admin` → "AI tools" card → "Auto-approve high-confidence AI submissions" panel + the **Auto-analysis on approval** toggle inside the Local AI panel.
 
 ### Previous
-- One toggle: Auto-approve high-confidence AI submissions (enabled / disabled), green border when ON
-- Threshold slider 70–100% (default 85%)
-- On toggle ON or threshold change → toast count of rows auto-approved retroactively
-- Backend: writes to `site_settings.auto_approve_enabled` + `auto_approve_threshold`; invokes RPC `sweep_auto_approve_now()` after changes
-- Auto-analysis on approval was **unconditional** — the `queue_analysis_on_approval()` trigger always fired when a project transitioned to approved, regardless of admin intent
+- Auto-approve toggle + threshold (default 85%)
+- Auto-analysis on approval toggle (default ON) controls `site_settings.auto_analysis_on_approval_enabled`; when OFF, the `queue_analysis_on_approval()` trigger short-circuits and Local-AI Live Check is expected to handle analysis instead
+- Confidence rubric harmonised between server and local-AI paths
+- **Silent bug**: the auto-approve trigger set `approval_status='approved'` but never stamped `reviewed_at`. Manual moderator approvals didn't stamp it either. Result: Local-AI Live Check's `reviewed_at > session_start` poll always returned zero, even when 13+ projects had been auto-approved during the session. The whole "auto-approve + Live Check" pipeline had never actually worked end-to-end.
 
 ### Current
 - Auto-approve toggle + threshold unchanged
-- **+ New `Auto-analysis on approval` toggle** in the Local AI panel (default ON to preserve existing behaviour). Writes to `site_settings.auto_analysis_on_approval_enabled`. The `queue_analysis_on_approval()` trigger now checks this column before enqueueing — when OFF, approvals no longer auto-fire `analysis-drain`.
-- Use case: flip auto-analysis OFF → run **Local AI → Live Check** instead → moderator's Claude.ai handles the analysis. Frees up server Mistral quota.
-- Migration `20260514160000_auto_analysis_toggle.sql` adds the column + patches the trigger function.
-- **+ Confidence rubric harmonisation:** server (`ai-discover-projects`) and local-AI prompts now share the same per-article rubric (`0.95–1.00: budget + agency + dates + location all stated · 0.80–0.94: clear name + 3+ concrete fields · ...`). Earlier the local-AI rubric demanded multi-source corroboration (capping single-article runs at 0.79); now both modes score the same way, so the same threshold applies cleanly to both.
+- Auto-analysis on approval toggle unchanged
+- **+ `reviewed_at` is now stamped on every approval transition** — both the auto-approve BEFORE INSERT trigger and a new `trg_stamp_reviewed_at_on_approval` BEFORE INSERT/UPDATE trigger cover their respective paths. `reviewed_by` stays null on the auto-approve path (no human user in the SECURITY DEFINER context); consumers can use `submitted_by_ai=true AND reviewed_by IS NULL` to distinguish auto vs. human reviewers.
+- **+ Backfill**: existing approved-but-`reviewed_at`-null rows got their `reviewed_at` set to `created_at` (NOT `now()`), so the backlog stays invisible to fresh Live Check sessions. The backlog should be processed by the new **Local AI → Refresh stale (backlog sweep)** task, not by Live Check.
+- Migration `20260515000000_auto_approve_stamps_reviewed_at.sql` adds the new trigger function and runs the backfill.
 
-**Fix / Change:** Moderators can now fully opt out of server-side AI spend without disabling auto-approval. Old setup forced approve+analyze as one cascade.
+**Fix / Change:** Local-AI Live Check actually catches auto-approved projects now. Run **Auto-approve ON** + **Auto-analysis on approval OFF** + **Local AI → Live Check** to fully opt out of server Tavily/Mistral spend while still getting analysis on every auto-approval.
 
 ---
 
@@ -211,17 +209,17 @@ Batch trigger for the comprehensive-analysis pipeline on approved projects that 
 Where to find it: `/admin` → "AI tools" card → bottom of the card → "Refresh stale approved projects" button (with a "Stale count" badge alongside).
 
 ### Previous
-- Scans `projects` WHERE `approval_status='approved'` AND (`last_comprehensive_analysis_at IS NULL` OR older than 30d)
+- One way to refresh stale projects: the server-side **"Refresh stale approved projects"** button in the AI tools card
 - Caps at 10 projects per run, paces invocations ~6s apart for Mistral RPM
-- "Refresh stale approved projects" button → invokes `ai-comprehensive-analysis` per project (now legacy alias to `analysis-enqueue`)
-- Shows progress badge "Enqueueing X / total — project title"
-- "Stale count" badge shows the eligible pool
+- Burns Tavily + Mistral quota per project (~5 web searches × ~2KB Mistral response × 10 projects = sizeable hit)
+- No way to chew through the backlog using moderator's own Claude.ai / ChatGPT quota — the Local AI panel's existing **Analyze (deep)** task required manual project picking
 
 ### Current
-- Same scan, same cap, same pacing, same UI
-- _(no recent changes to this area; pipeline now uses the updated analysis-drain code with include_domains whitelist and dry-cell guard — see [Sherlock — Queue tab](#sherlock--queue-tab))_
+- Server-side **"Refresh stale approved projects"** button unchanged (still caps at 10, still burns server quota)
+- **+ Local AI → Refresh stale (backlog sweep)** — same DB query, but the moderator's AI tool runs it. Caps at 20 by default (configurable up to 200), 30-day staleness window (configurable 1–365 days). Oldest-first ordering (`asc.nullsfirst`). Per-project guard against in-flight analysis_jobs (skips with `23505` if a row's already queued/running). No session-slot claim — multiple Refresh-stale runs can target different projects in parallel because the per-row `analysis_jobs` partial unique index prevents collisions.
+- Pulls candidate list from one DB GET (`approval_status=eq.approved & or=(last_comprehensive_analysis_at.is.null, last_comprehensive_analysis_at.lt.<ISO>)`) and processes through the same 10-table Analyze pipeline used by Analyze (deep) and Live Check.
 
-**Fix / Change:** —
+**Fix / Change:** Two ways to drain the backlog now — server-side button burns Tavily/Mistral, Local-AI task burns moderator's AI quota. Pick whichever budget is more flush.
 
 ---
 
