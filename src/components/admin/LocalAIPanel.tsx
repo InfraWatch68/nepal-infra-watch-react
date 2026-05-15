@@ -537,6 +537,8 @@ function WorkflowRow({ task, label, blurb, serviceKey, projects, projectsLoading
   // Live Check loop bounds.
   const [lcCycles, setLcCycles] = useState<number>(60);
   const [lcIntervalSec, setLcIntervalSec] = useState<number>(60);
+  // Hard cap on # of project analyses per session — 0 = unlimited.
+  const [lcMaxProjects, setLcMaxProjects] = useState<number>(20);
   // Refresh Stale: one-shot batch over approved projects whose analysis is
   // missing or older than `rsDays` days. `rsMax` caps the run.
   const [rsMax, setRsMax] = useState<number>(20);
@@ -637,6 +639,7 @@ function WorkflowRow({ task, label, blurb, serviceKey, projects, projectsLoading
         : null,
       liveCheckCycles: lcCycles,
       liveCheckIntervalSec: lcIntervalSec,
+      liveCheckMaxProjects: lcMaxProjects,
       refreshStaleMax: rsMax,
       refreshStaleDays: rsDays,
     };
@@ -867,7 +870,7 @@ function WorkflowRow({ task, label, blurb, serviceKey, projects, projectsLoading
       )}
 
       {task === "live-check" && (
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
           <div className="space-y-1">
             <Label
               className="text-[10px] uppercase tracking-wider font-mono text-muted-foreground"
@@ -894,11 +897,25 @@ function WorkflowRow({ task, label, blurb, serviceKey, projects, projectsLoading
               className="h-8 text-xs"
             />
           </div>
-          <p className="text-[10px] text-muted-foreground font-mono leading-snug col-span-2">
-            Runs for up to <span className="text-foreground">{(lcCycles * lcIntervalSec / 60).toFixed(0)} minutes</span> total
-            ({lcCycles} cycles × {lcIntervalSec}s).
+          <div className="space-y-1">
+            <Label
+              className="text-[10px] uppercase tracking-wider font-mono text-muted-foreground"
+              title="Hard cap on the # of project analyses this session will close before exiting. Prevents a busy approval window from burning all AI quota in one go. 0 = unlimited."
+            >
+              Max projects
+            </Label>
+            <Input
+              type="number" min={0} max={500} value={lcMaxProjects}
+              onChange={(e) => setLcMaxProjects(Math.max(0, Math.min(500, Number(e.target.value) || 0)))}
+              className="h-8 text-xs"
+            />
+          </div>
+          <p className="text-[10px] text-muted-foreground font-mono leading-snug col-span-2 sm:col-span-3">
+            Runs for up to <span className="text-foreground">{(lcCycles * lcIntervalSec / 60).toFixed(0)} minutes</span>{" "}
+            ({lcCycles} cycles × {lcIntervalSec}s){lcMaxProjects > 0 && <>, capped at <span className="text-foreground">{lcMaxProjects}</span> analyses</>}.
             Turn off the website's "Auto-analysis on approval" toggle above before starting this.
             Catches BOTH manual approvals and auto-approve-trigger approvals — both now stamp <code className="font-mono text-[10px]">reviewed_at</code>.
+            <strong> If you have a backlog to drain</strong> (many approved projects with no analysis), use <strong>Refresh stale</strong> below instead — Live Check is for reacting to fresh approvals, not chewing through old ones.
           </p>
         </div>
       )}

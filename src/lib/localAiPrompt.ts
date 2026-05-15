@@ -58,6 +58,7 @@ export type LocalAiInput = {
   // Live Check loop bounds.
   liveCheckCycles?: number;       // 0 = one-shot pass; N>0 = poll N times
   liveCheckIntervalSec?: number;  // seconds between polls (e.g. 60)
+  liveCheckMaxProjects?: number;  // hard cap on # of projects analyzed in one session; 0 = unlimited
   // Refresh Stale (one-shot batch over the backlog).
   refreshStaleMax?: number;       // hard cap on projects processed in one run
   refreshStaleDays?: number;      // "stale" threshold in days (default 30)
@@ -109,6 +110,30 @@ PostgREST array-inserts require **every object in the array to have
 identical JSON keys**. If you POST \`[{a:1,b:2},{a:3}]\` it errors with
 PGRST102 "All object keys must match". Always include every column in
 every row of a bulk-insert; use explicit \`null\` for missing fields.
+
+## Shell-escape gotcha (PowerShell, bash, etc.)
+
+When you build REST request bodies by interpolating prose into a shell
+string, **typographic apostrophes ('), em-dashes (—), and other Unicode
+punctuation** can break the parser before the request even fires. Examples
+that have broken past sessions: \`"Nepal's first..."\` (curly apostrophe),
+\`"NPR 8B—10B range"\` (em-dash).
+
+Safer patterns:
+- **Build the JSON object in your runtime first**, then serialise with
+  the language's JSON encoder (PowerShell \`ConvertTo-Json\`, Python
+  \`json.dumps\`, Node \`JSON.stringify\`). Encoders handle Unicode
+  correctly; here-strings do not.
+- **Write the body to a temp file** and POST from the file, e.g.
+  PowerShell \`Invoke-RestMethod -Body (Get-Content path -Raw)\`. Avoids
+  the shell-quoting layer entirely.
+- **In PowerShell**, prefer \`@'...'@\` (single-quoted here-string,
+  literal) over \`@"..."@\` (double-quoted, interpolated) unless you
+  need variable expansion. Put the closing \`'@\` at column 0 — indenting
+  it is a parse error.
+- **Send body bytes as UTF-8 explicitly**: \`[System.Text.Encoding]::UTF8.GetBytes($jsonStr)\`
+  before passing to \`Invoke-RestMethod -Body\`. The default encoding in
+  Windows PowerShell 5.1 is UTF-16 LE which Supabase rejects.
 
 ## Multi-prompt detection — CHECK THIS BEFORE YOU START
 
@@ -412,19 +437,39 @@ const DETAIL_TABLES_SCHEMA = `## 7 detail tables (uuid PK id, FK project_id bigi
 Every row needs: \`project_id\`, \`approval_status:"pending"\`, \`submitted_by_ai:true\`,
 \`confidence_score:0.00–1.00\`, \`sources:[{"url":"...","title":"...","bucket":"news|government|..."}]\`.
 
-| Table | Required | Notable optional columns |
+**Every enum column below has \`other\` as a valid value.** When the article
+describes something that doesn't fit any of the more specific buckets,
+use \`"other"\` rather than picking the closest-but-wrong value or omitting
+the row entirely. Postgres rejects any value not in the constraint list
+with HTTP 400 + \`violates check constraint\`.
+
+| Table | Required | Notable optional columns + enum values (case-sensitive, must match exactly) |
 |---|---|---|
-| project_funding | source_name | source_type ∈ **{government, multilateral, bilateral, private, loan, grant, equity, ppp}** — note: \`government\` is the valid value, **not** \`govt\`. Other cols: amount_npr, amount_usd, committed_at (date), disbursed_amount |
-| project_documents | title | doc_type (eia/iee/contract/tender/audit/progress_report/completion_report/blueprint/financial/press_release), url, source_org, published_at (date) |
-| project_stakeholders | role, org_name | role: implementing_agency / executing_ministry / contractor / sub_contractor / consultant / donor / beneficiary / regulator / community |
-| project_risks | title, severity, status | severity: low/medium/high/critical; status: open/mitigated/closed/escalated; category: financial/legal/environmental/social/political/technical/schedule/audit/corruption; reported_at, resolved_at (dates) |
-| project_impact | metric_type | metric_type: beneficiaries/jobs_temporary/jobs_permanent/displacement/area_served_sq_km/households_served/co2_reduction_t/revenue_generated_npr/energy_capacity_mw/water_capacity_mld; metric_value, baseline_value, target_value, measured_at (date) |
-| project_procurement | tender_title | contract_type: epc/design_build/itb/icb/ncb/limited/direct/framework/ppp; status: planned/published/bidding/evaluation/awarded/cancelled/disputed; tender_published_at, bid_open_at, contract_awarded_at (dates) |
-| project_compliance | item_type | item_type: eia/iee/land_acquisition/right_of_way/forest_clearance/social_impact/audit_oag/audit_ciaa/blacklist/court_case; status: not_started/in_progress/approved/rejected/conditional/blacklisted/dismissed/pending; decided_at (date) |
+| project_funding | source_name | \`source_type\` ∈ {government, multilateral, bilateral, private, loan, grant, equity, ppp, **other**}. Note: \`government\` is valid, NOT \`govt\`. Other cols: amount_npr, amount_usd, committed_at (date), disbursed_amount |
+| project_documents | title | \`doc_type\` ∈ {eia, iee, contract, tender, audit, progress_report, completion_report, blueprint, financial, press_release, legal, **other**}. Also: url, source_org, published_at (date) |
+| project_stakeholders | role, org_name | \`role\` ∈ {implementing_agency, executing_ministry, contractor, sub_contractor, consultant, donor, beneficiary, regulator, community, **other**} |
+| project_risks | title, severity, status | \`severity\` ∈ {low, medium, high, critical}; \`status\` ∈ {open, mitigated, closed, escalated}; \`category\` ∈ {financial, legal, environmental, social, political, technical, schedule, audit, corruption, **other**}; reported_at, resolved_at (dates) |
+| project_impact | metric_type | \`metric_type\` ∈ {beneficiaries, jobs_temporary, jobs_permanent, displacement, area_served_sq_km, households_served, co2_reduction_t, revenue_generated_npr, energy_capacity_mw, water_capacity_mld, **other**}. Also: metric_value, baseline_value, target_value, measured_at (date) |
+| project_procurement | tender_title | \`contract_type\` ∈ {epc, design_build, itb, icb, ncb, limited, direct, framework, ppp, **other**}; \`status\` ∈ {planned, published, bidding, evaluation, awarded, cancelled, disputed}; tender_published_at, bid_open_at, contract_awarded_at (dates) |
+| project_compliance | item_type | \`item_type\` ∈ {eia, iee, land_acquisition, right_of_way, forest_clearance, social_impact, audit_oag, audit_ciaa, blacklist, court_case, **other**}; \`status\` ∈ {not_started, in_progress, approved, rejected, conditional, blacklisted, dismissed, pending}; decided_at (date) |
 
 ALL dates MUST be real ISO calendar dates (YYYY-MM-DD). Postgres rejects
 \`2026-03-00\`, \`2026-02-30\`, \`2026-13-05\`, etc. If you're not sure of the
 day, use null — never fabricate "00".
+
+## project_analysis_runs schema (the row you open + close per project)
+
+This is the table the Analyze, Refresh Stale, and Live Check workflows
+write to. Key columns and their **non-obvious gotchas** (verified against
+the live DB):
+
+- \`status\` ∈ {queued, running, succeeded, failed, cancelled}. **Use \`succeeded\` for happy-path close**, NOT \`done\` — Postgres rejects \`done\` with HTTP 400 \`violates check constraint project_analysis_runs_status_check\`.
+- \`narrative_summary\` is **text NULL** — fine to omit on the open INSERT and set on the close PATCH.
+- \`gaps_and_contradictions\` is **text[] NOT NULL DEFAULT '{}'** — JSON array of strings (\`["bullet 1", "bullet 2"]\`), not a prose paragraph. **Don't explicitly set it to \`null\`** — that fails the NOT NULL constraint. Omit it on the open INSERT (defaults to \`{}\`) and supply an array on the close PATCH.
+- \`errors\` is **text[] NOT NULL DEFAULT '{}'** — same rules as gaps_and_contradictions.
+- \`bucket_status\`, \`inserted_per_table\`, \`deduped_per_table\` are **jsonb NOT NULL DEFAULT '{}'** — same: omit on open, supply an object on close. Never set to \`null\`.
+- \`started_at\` defaults to \`now()\`; \`finished_at\` is NULL until close.
+- \`ai_tag\` text NULL — stamp with the batch tag (\`claude-local-<batchId>\`).
 `;
 
 // Generate a fresh 8-hex batch id. Used when the caller didn't supply one
@@ -887,6 +932,14 @@ function buildGoLive(input: LocalAiInput): string {
   const nationalPride = !!input.goLiveNationalPride;
   const cellCount = provinces.length * sectors.length;
   const resume = input.goLiveResumeFrom;
+  // Detect end-of-grid: when the checkpoint IS the last cell in column-major
+  // order, "resume from the next cell" has no work to do. Tell the AI
+  // explicitly so it doesn't claim the session, do an empty walk, and exit.
+  const lastSector   = sectors[sectors.length - 1];
+  const lastProvince = provinces[provinces.length - 1];
+  const checkpointIsLastCell = !!resume
+    && resume.sector === lastSector
+    && resume.province === lastProvince;
 
   // When resuming we tell the AI to skip cells through the checkpoint in
   // column-major order. Column-major = "sector A across all provinces, then
@@ -896,8 +949,19 @@ function buildGoLive(input: LocalAiInput): string {
     ? `### RESUME FROM CHECKPOINT
 
 The admin's previous Go Live run got through the cell:
-  **sector=\`${resume.sector}\` × province=\`${resume.province}\`**
+  **sector=\`${resume?.sector}\` × province=\`${resume?.province}\`**
+${checkpointIsLastCell ? `
+⚠ **GRID COMPLETE — no work to do.** That cell is the LAST cell in the
+current grid (\`${lastSector}\` × \`${lastProvince}\` in column-major
+order). There is no "next cell" to resume to. **Do not claim the Go Live
+session.** Instead:
 
+1. Tell the admin: "Previous Go Live finished the whole grid. Toggle
+   **Start fresh** in the panel and re-copy the prompt to do another full
+   sweep, or narrow the scope (drop some provinces/sectors) first."
+2. Exit immediately without ANY DB writes — no session claim, no
+   \`sherlock_jobs\` rows, no projects rows.
+` : `
 In column-major order — sector A across all provinces, sector B across all
 provinces, … — that cell is at index <find it in the grid above>. Skip
 every cell up to and through it (no queue row, no web search) and resume
@@ -905,6 +969,7 @@ on the very next cell.
 
 If the checkpoint cell isn't in the current grid (the admin narrowed
 provinces or sectors since), restart from cell 1.
+`}
 
 `
     : "";
@@ -1089,6 +1154,10 @@ function buildLiveCheck(input: LocalAiInput): string {
   const batchId = input.batchId ?? genBatchId();
   const cycles = input.liveCheckCycles ?? 60;       // 60 polls × 60s ≈ 1 hour
   const intervalSec = input.liveCheckIntervalSec ?? 60;
+  // 0 = unlimited; otherwise stop after this many `succeeded` runs.
+  // When many approvals land at once Live Check otherwise behaves like a
+  // backlog processor — this cap puts a ceiling on AI-quota burn per session.
+  const maxProjects = Math.max(0, input.liveCheckMaxProjects ?? 0);
   return `${buildHeader(batchId)}
 ${ENUMS_FULL}
 ${DETAIL_TABLES_SCHEMA}
@@ -1109,7 +1178,9 @@ comprehensive analysis and run the full Analyze pipeline (7 detail tables +
 
 - **Poll interval:** ${intervalSec} seconds between cycles.
 - **Max cycles:** ${cycles} (after which you exit cleanly; the admin can paste the prompt again to keep watching).
+- **Max projects analyzed in this session:** ${maxProjects === 0 ? "unlimited (no cap)" : `**${maxProjects}**`}. ${maxProjects === 0 ? "There is no hard cap; the session ends only on max-cycles, kill-switch, or admin-stop." : `Exit cleanly the moment you've closed your ${maxProjects}-th \`succeeded\` project_analysis_runs row, even if the cycle budget hasn't been reached. This prevents an unexpectedly busy approval window from burning all your AI quota in one session.`}
 - **One project per cycle**, sequentially. If multiple projects need analysis, queue them up and process one per cycle — this keeps the workload steady and avoids saturating your web-search quota.
+- **Watcher vs backlog**: Live Check is a *watcher* — it reacts to fresh approvals. For chewing through an existing backlog of approved-but-unanalyzed projects, use the **Refresh Stale** workflow instead. If your first cycle finds 10+ candidates immediately, you're probably in backlog mode by accident — consider stopping and re-pasting Refresh Stale.
 
 ### Kill switch — REQUIRED BEFORE EACH CYCLE
 
@@ -1156,7 +1227,9 @@ PATCH ${SUPABASE_URL}/rest/v1/sherlock_live_state?id=eq.1
 
 ### Each cycle
 
-1. **Poll for candidates.** This task mirrors the server-side trigger
+${maxProjects > 0 ? `0. **Max-projects check.** If you've already closed ${maxProjects} \`succeeded\` runs in this session, STOP — write the Final-summary block and release the session. Don't enter another cycle.
+
+` : ""}1. **Poll for candidates.** This task mirrors the server-side trigger
    \`queue_analysis_on_approval()\` which fires when a project transitions
    to \`approval_status='approved'\` — so look ONLY at projects approved
    AFTER you claimed your session, and that don't yet have an analysis:
