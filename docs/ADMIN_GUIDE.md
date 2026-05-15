@@ -145,19 +145,23 @@ Run the website's AI workflows in the moderator's own Claude.ai / ChatGPT subscr
 Where to find it: `/admin` → scroll past API Keys → **`Local AI tools`** card (collapsed by default; click to expand).
 
 ### Previous
-- Collapsible card with service-role key input at top
-- **Seven workflow rows** (Tool menu, Discover, Go Live, Analyze deep, Live Check, Generate briefs, Fetch news, Verify project)
-- Prompts could be portable but the panel never explicitly told the AI to avoid local-folder hunting — agents running in filesystem-capable hosts (Claude Code, code interpreter) sometimes went looking for credentials in `.env`
-- Live Check filter: `reviewed_at > session_start AND last_comprehensive_analysis_at IS NULL` — but `reviewed_at` was never being set by any code path, so the filter returned zero candidates every cycle (silent breakage)
-- `ai_tag` shown in `PROJECT_SCHEMA` example as just `"claude-local"` (no batch id) — inconsistent with the header rule that demanded the batch suffix
+- Collapsible card with **one credential input** at top: Supabase service-role key (JWT-format `eyJ...`)
+- Service-role key input had a misleading placeholder showing `sb_secret_…` — but the panel rejects sb_secret_ keys with a red banner, so the placeholder was actively wrong
+- Intro paragraph listed an outdated set of workflows ("Discover, Go Live, Analyze, Brief, Fetch news, Verify") — missing Live Check and (later) Refresh Stale
+- **Eight workflow rows** (Tool menu, Discover, Go Live, Analyze deep, Live Check, Refresh Stale, Generate briefs, Fetch news, Verify)
+- Go Live row had a **"Per-query max"** numeric input — the label and prompt wording both treated this as a ceiling. The AI consistently inserted 1–3 viable projects per cell even when set to 5, with `skipped=0` (meaning rejected articles weren't being counted). The AI stopped at the first batch of viable inserts instead of running follow-up queries.
+- Prompts told the AI to "Cap at N insertions" — interpreted as "stop when you hit N", not "try to hit N"
+- No way for admin tooling (Claude Code sessions, helper scripts running migrations / Management API calls) to pick up a stored Personal Access Token; the operator had to paste their PAT into chat every time an AI assistant needed one
 
 ### Current
-- **+ Eighth workflow row: Refresh stale (backlog sweep)** — pulls approved projects with `last_comprehensive_analysis_at IS NULL` OR older than N days, then runs the full 10-table Analyze pipeline on each (oldest first). One-shot batch, no session-slot claim — safe to run alongside Go Live and Live Check. Caps + staleness window configurable in the row (defaults: 20 projects, 30 days). Mirrors the admin panel's separate "Refresh stale approved projects" button but uses the moderator's AI quota instead of Tavily + Mistral.
-- **+ Portability hardening** — every prompt now opens with an explicit `## Portability — this prompt is self-contained, do NOT read local files` section. The AI is told to STOP and ask the moderator if `<SERVICE_ROLE_KEY>` still reads as a literal placeholder, rather than search `.env` files, the working directory, or any local checkout.
-- **+ Live Check now actually catches approvals** — `reviewed_at` is finally being stamped (both by the auto-approve BEFORE INSERT trigger AND by a new BEFORE INSERT/UPDATE trigger that fires on every approval transition). Live Check's poll filter works as designed for the first time.
-- **+ Tool menu prompt** rewritten to list all 8 tasks with **house rules** (batch tag required on every row, never write `approval_status:"approved"` directly, honour the kill switch, apply confidence rubric ≥ 0.40).
-- **+ `PROJECT_SCHEMA` example** now reads `"ai_tag": "claude-local-<batchId>"` so the AI doesn't accidentally drop the batch suffix.
-- **Original seven workflow rows unchanged in behaviour** — Tool menu, Discover, Go Live, Analyze deep, Live Check, Generate briefs, Fetch news, Verify project all work as before.
+- **+ Second credential slot: Supabase Personal Access Token (PAT)** — same UI pattern as the service-role key (collapsible, show/hide, save/clear), separate localStorage key (`niw_local_ai_pat`), info-coloured border to distinguish from the warning-coloured service-role key. **Marked clearly as optional and "for migrations / Management API"**, with a note that no AI workflow uses it — purely an operator convenience for collaborators (Claude Code sessions, helper scripts) so they can pick up a stored PAT instead of asking for it every time.
+- **+ Service-role key placeholder fixed** to show the actual expected format `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…`, with helper text spelling out exactly where to find it in the Supabase dashboard.
+- **+ Intro paragraph rewritten** to list all 8 workflows (Tool menu, Discover, Go Live, Analyze deep, Live Check, Refresh stale, Generate briefs, Fetch news, Verify) and clarify the paste-back-JSON fallback.
+- **+ "Per-query max" renamed to "Per-cell target"** with a tooltip explaining: the AI aims to hit the number, runs follow-up queries with varied terms (district names, English-language Nepali outlets, broader time windows, program/scheme/DPR/tender synonyms) if the first pass falls short, with a hard per-cell ceiling of `target + 3` (or 8, whichever is larger). The grid summary at the bottom of the Go Live row now reads "AI targets N projects per cell — runs follow-up queries when the first pass falls short" instead of the old "Worst case: NxM projects".
+- **+ Prompt wording flipped** in `buildDiscover` and `buildGoLive`: "Cap at N" → explicit TARGET semantics. Added Step 4a "Follow-up searches if you fell short of the target" in Discover. Added explicit `skipped` accounting rules (every fetched-but-not-inserted article counts as 1 skip; `inserted + skipped` should equal total articles fetched).
+- All previous behaviour preserved: portability hardening, Live Check `reviewed_at` fix, Refresh Stale workflow, batch rollback, kill switch + heartbeat, cross-mode integration with server Sherlock Live.
+
+**Fix / Change:** Two operator pain points addressed at once. (1) The misleading placeholder + missing tool list + missing PAT slot all conspired to make first-time setup more confusing than it needed to be. (2) The "max 5 only gets 2" problem was the AI mis-reading the prompt's "cap" language as "ceiling" — flipping the wording to "target" plus follow-up-query instructions plus accurate skipped-counting fixes the misalignment.
 - **Multi-prompt detection** is baked into every prompt — paste two prompts together into Claude Code and it auto-spawns one subagent per prompt (parallel); paste into ChatGPT / plain Claude.ai and it tells you to use separate windows.
 - **Per-workflow mutex** (not panel-wide): Go Live and Live Check can run in parallel because they claim separate session columns (`sherlock_live_state.golive_session_id` vs `livecheck_session_id`). Same-workflow second-starts are locked. Discover / Analyze (one-shot) / Brief / Fetch news / Verify never claim a session and never lock.
 - **Kill switch:** Stop button next to each running session. Sets the corresponding session column to null; the AI's pre-cell/pre-cycle GET sees the change and exits gracefully (~5–60s latency depending on what step it's on).
@@ -287,16 +291,19 @@ Where to find it: `/admin` → "Sherlock" panel → "Discover by Location" tab.
 ### Previous
 - Province dropdown (required) → District (optional, cascades) → Municipality (optional, cascades)
 - Sectors: 9 checkboxes, all selected by default
-- "Max results per sector" 1–10 (default 3)
+- **"Per-sector max"** dropdown (1–10, default 3) — interpreted as a hard ceiling on insertions per sector. Tavily was called with `max_results = perSectorMax` exactly, so if 5 articles came back and 3 got rejected by extraction, the sector ended with 2 inserts and no recovery effort. Cells consistently produced 1–3 inserts even when set to 5.
+- Helper text: "Enqueues N jobs (one per sector, M articles/job)" — described the article count as a 1:1 with the configured max
 - "Enqueue" button → INSERTs one `sherlock_jobs` row per selected sector with `kind='geo', priority=10`
-- Toast: "Enqueued X geo jobs for [location]"
 
 ### Current
-- Same controls, same behaviour
-- **+** Resulting jobs run through the updated `ai-discover-projects` code: include_domains whitelist (Nepali news + gov.np + funders, with `documents1.worldbank.org` and `thedocs.worldbank.org` excluded — those served broad program PDFs that crowded out project news), `days: 730` recency, robust JSON parse, dry-cell guard.
-- **+** Query template simplified to `Nepal <sector> project <district> <province>` (event-keyword OR cluster removed after empirical testing showed it was neutral).
+- Same UI controls (dropdown, sector checkboxes, location pickers, Enqueue button)
+- **"Per-sector max"** renamed to **"Per-sector target"** with a tooltip explaining the asymmetric extraction model
+- **Tavily candidate budget** changed from `max_results = target` to `max_results = clamp(target * 2, 5, 10)`. Same Tavily credit cost (1 per call regardless of `max_results` up to 20), but the AI now has more candidates to extract from when some get rejected for non-Nepal-specific content, JSON parse failure, dedupe, or content-too-short
+- **Per-cell `localInserted` counter** tracks insertions for the current sector. Inner extraction loop early-breaks when `localInserted >= target`, so we don't make extra AI calls when the target is already met (asymmetric: pay extra Mistral cost only when the first candidates failed)
+- Helper text now reads "targeting M viable projects/sector (Sherlock pulls X candidates from Tavily and early-stops when target met)"
+- Same include_domains whitelist, same `days: 730` recency, same dry-cell guard, same robust JSON parse
 
-**Fix / Change:** Tavily quota is no longer wasted on Indian regional wire copy. The whitelist + simpler query + dry-cell guard combination targets actual Nepali project news.
+**Fix / Change:** Before this, a cell set to "max 5" routinely produced 1–3 inserts and stopped — the AI ran one Tavily call, processed whatever it got, and never recovered when extraction failed on a few articles. Now the cell pulls a bigger Tavily candidate pool (free quota-wise), extracts until the target is hit, and reports an accurate `skipped` count for the rejected candidates. Deployed as edge function version 59.
 
 ---
 
