@@ -362,13 +362,34 @@ serve(async (req) => {
     // (non-Nepal-specific, off-topic, content too short, dedupe hit), so we
     // request more candidates than the target to give extraction enough room.
     const maxResults = Math.min(Math.max(Number(body.maxResults) || 5, 1), 10);
-    // Tavily candidate budget per call: 2× the target, capped at Tavily's
-    // soft ceiling of 10. One Tavily call costs the same credit regardless
+    // Tavily candidate budget per call: 3× the target, capped at Tavily's
+    // hard ceiling of 20. One Tavily call costs the same credit regardless
     // of max_results up to 20, so this is free quota-wise. The inner
     // extraction loop early-breaks once `localInserted >= maxResults`, so
     // the extra candidates only cost AI calls when the first ones got
     // rejected (asymmetric: pay extra only when needed).
-    const tavilyCandidates = Math.min(Math.max(maxResults * 2, 5), 10);
+    const tavilyCandidates = Math.min(Math.max(maxResults * 3, 10), 20);
+    // When the primary query falls short of the target, we'll run ONE
+    // follow-up Tavily call per cell with a varied query (swap "project"
+    // for program/scheme/tender/DPR synonyms, broaden time window). That
+    // doubles Tavily quota usage on shortfall cells (still 1 call when
+    // primary nails the target), so guard the follow-up behind a clear
+    // shortfall threshold to avoid burning quota on cells that are already
+    // close. `0` disables follow-up entirely.
+    const FOLLOWUP_TRIGGER_RATIO = 0.6;
+    // Build a varied query for the follow-up pass. Returns null if no
+    // meaningful variation is possible (e.g. the original query is too
+    // generic to vary).
+    const buildFollowupQuery = (original: string): string | null => {
+      // Swap "project" (and Nepali equivalents if present) for a wider
+      // OR-cluster covering programmes, schemes, tenders, DPRs, and named
+      // initiatives. Tavily handles OR within a single query.
+      if (/\bproject\b/i.test(original)) {
+        return original.replace(/\bproject\b/i, "(program OR scheme OR tender OR DPR OR initiative)");
+      }
+      // Original didn't have "project" — just append the synonym cluster.
+      return `${original} (program OR scheme OR tender OR DPR)`;
+    };
     // Optional tag for autonomous tools (e.g. "Sherlock") — surfaces in admin queue.
     const aiTag: string | null = body.aiTag?.toString().trim().slice(0, 40) || null;
     // Optional sherlock_jobs row id; if present, we write status/counts back at the end.
@@ -624,20 +645,53 @@ Other rules:
         }
       }
 
-      mark(`tavily-start sector=${search.sector ?? 'topic'}`);
-      heartbeat(`tavily-start sector=${search.sector ?? 'topic'}`);
+      // Per-cell insertion counter — accumulates across BOTH passes.
+      // The outer (`inserted`) counter is cumulative across all cells;
+      // this one tracks just the current sector so we can (a) stop
+      // AI-extracting candidates once the cell target is met and (b)
+      // decide whether to run the follow-up Tavily pass.
+      let localInserted = 0;
 
-      const tavResult = await tavilySearch(admin, tavilyKeys, {
-        query: search.query,
+      // Two-pass discovery per sector. Pass 0 = primary query (original
+      // behaviour). Pass 1 = follow-up with a varied query, fired only
+      // when pass 0 left a shortfall of at least
+      // (maxResults * FOLLOWUP_TRIGGER_RATIO). The follow-up adds 1 more
+      // Tavily credit per shortfalling sector but gives us a second
+      // chance to hit the target via differently-phrased queries.
+      passes: for (let pass = 0; pass < 2; pass++) {
+        if (overBudget()) break passes;
+        if (localInserted >= maxResults) break passes;
+
+        let passQuery: string;
+        let passDays: number;
+        if (pass === 0) {
+          passQuery = search.query;
+          passDays = 730;
+        } else {
+          // Pass 1 = follow-up. Gated on shortfall + meaningful variation.
+          const shortfall = maxResults - localInserted;
+          if (shortfall < maxResults * FOLLOWUP_TRIGGER_RATIO) break passes;
+          const fq = buildFollowupQuery(search.query);
+          if (!fq || fq === search.query) break passes;
+          passQuery = fq;
+          passDays = 1095;  // 3-year window — looser than the primary
+          mark(`followup-start sec=${search.sector ?? 'topic'} shortfall=${shortfall}`);
+          heartbeat(`followup-start sec=${search.sector ?? 'topic'} shortfall=${shortfall}`);
+        }
+
+        mark(`tavily-start sec=${search.sector ?? 'topic'} pass=${pass}`);
+        heartbeat(`tavily-start sec=${search.sector ?? 'topic'} pass=${pass}`);
+
+        const tavResult = await tavilySearch(admin, tavilyKeys, {
+        query: passQuery,
         search_depth: "advanced",
         max_results: tavilyCandidates,
         include_answer: false,
         include_images: true,
-        // 2-year recency window: project events (DPR approval, tender
-        // awards, groundbreakings, contract signings) often pre-date a few
-        // months; keeping 730 lets us catch them while filtering out very
-        // old historical articles.
-        days: 730,
+        // Recency window: 2 years for the primary pass (project events
+        // often pre-date a few months), 3 years for the follow-up so the
+        // varied query can pick up older program/scheme references.
+        days: passDays,
         // include_domains: empirically validated whitelist of Nepali news +
         // gov.np ministries + funders. Side-by-side tests showed open-web
         // search returned predominantly Indian wire copy (propnewstime,
@@ -675,8 +729,8 @@ Other rules:
 
       const tavJson = await tav.json();
       const results: any[] = tavJson.results ?? [];
-      mark(`tavily-done sector=${search.sector ?? 'topic'} results=${results.length}`);
-      heartbeat(`tavily-done sector=${search.sector ?? 'topic'} results=${results.length}`);
+      mark(`tavily-done sec=${search.sector ?? 'topic'} pass=${pass} results=${results.length}`);
+      heartbeat(`tavily-done sec=${search.sector ?? 'topic'} pass=${pass} results=${results.length}`);
       // Deduped image URLs from this Tavily search. Up to 6 per search.
       // Reused for every project we extract from this search's articles —
       // not perfect (one search can yield multiple projects) but cheap.
@@ -690,10 +744,6 @@ Other rules:
         if (searchImages.length >= 6) break;
       }
 
-      // Per-cell insertion counter. The outer (`inserted`) counter is
-      // cumulative across all cells; this one tracks just the current cell
-      // so we can stop AI-extracting candidates once the cell target is met.
-      let localInserted = 0;
       for (let idx = 0; idx < results.length; idx++) {
         if (overBudget()) {
           errors.push(phaseTrail(`Wall-time budget (${WALL_BUDGET_MS / 1000}s) reached mid-sector "${search.sector ?? "topic"}" after ${inserted} insert(s), ${skipped} skip(s).`));
@@ -1008,6 +1058,7 @@ Other rules:
           errors.push(e instanceof Error ? e.message : String(e));
         }
       }
+      } // close passes loop
     }
 
     mark(`loop-done inserted=${inserted} skipped=${skipped} errors=${errors.length}`);
