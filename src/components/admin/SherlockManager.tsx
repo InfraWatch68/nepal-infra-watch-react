@@ -485,7 +485,9 @@ function GeoDiscoverTab() {
 
       <div className="flex items-end gap-2 flex-wrap">
         <div>
-          <Label className="text-xs">Per-sector max</Label>
+          <Label className="text-xs" title="Per-sector TARGET — Sherlock aims to insert this many viable Nepal projects per (province × sector). It pulls ~2× this many candidates from Tavily (same quota cost) and early-stops when the target is hit, so insufficient extractions don't cap the cell prematurely.">
+            Per-sector target
+          </Label>
           <Select value={String(maxResults)} onValueChange={(v) => setMaxResults(Number(v))}>
             <SelectTrigger className="w-[120px]"><SelectValue /></SelectTrigger>
             <SelectContent>{[1, 2, 3, 5, 8, 10].map(n => <SelectItem key={n} value={String(n)}>{n}</SelectItem>)}</SelectContent>
@@ -496,7 +498,7 @@ function GeoDiscoverTab() {
           Enqueue discovery
         </Button>
         <p className="text-[10px] text-muted-foreground self-center">
-          Enqueues {sectors.length} job{sectors.length === 1 ? '' : 's'} (one per sector, {maxResults} article{maxResults === 1 ? '' : 's'}/job) so each fits the edge-function timeout
+          Enqueues {sectors.length} job{sectors.length === 1 ? '' : 's'} — one per sector, targeting {maxResults} viable project{maxResults === 1 ? '' : 's'}/sector (Sherlock pulls {Math.min(Math.max(maxResults * 2, 5), 10)} candidates from Tavily and early-stops when target met).
         </p>
       </div>
     </div>

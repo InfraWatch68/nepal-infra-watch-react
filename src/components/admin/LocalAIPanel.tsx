@@ -45,6 +45,7 @@ import {
 } from "@/lib/localAiPrompt";
 
 const KEY_STORAGE = "niw_local_ai_service_key";
+const PAT_STORAGE = "niw_local_ai_pat";
 const BATCH_HISTORY_STORAGE = "niw_local_ai_batches";
 const MAX_BATCH_HISTORY = 20;
 
@@ -137,17 +138,26 @@ export function LocalAIPanel() {
   const [serviceKey, setServiceKey] = useState<string>("");
   const [showKey, setShowKey] = useState(false);
   const [keyOpen, setKeyOpen] = useState(false);
+  // Personal Access Token — only used by admin tooling (Claude Code / scripts)
+  // for Management API calls (apply migration, run SQL, deploy edge function).
+  // Workflows themselves don't need it. Stored locally so the tooling can
+  // pick it up without prompting every session.
+  const [pat, setPat] = useState<string>("");
+  const [showPat, setShowPat] = useState(false);
+  const [patOpen, setPatOpen] = useState(false);
   const [projects, setProjects] = useState<ProjectRow[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [claims, setClaims] = useState<LiveClaims>(EMPTY_CLAIMS);
   const [batchHistory, setBatchHistory] = useState<BatchEntry[]>(() => loadBatchHistory());
   const anyActive = !!claims.goLive || !!claims.liveCheck;
 
-  // Hydrate the saved service-role key from localStorage on mount.
+  // Hydrate the saved service-role key + PAT from localStorage on mount.
   useEffect(() => {
     try {
-      const saved = localStorage.getItem(KEY_STORAGE);
-      if (saved) setServiceKey(saved);
+      const savedKey = localStorage.getItem(KEY_STORAGE);
+      if (savedKey) setServiceKey(savedKey);
+      const savedPat = localStorage.getItem(PAT_STORAGE);
+      if (savedPat) setPat(savedPat);
     } catch { /* localStorage may be disabled */ }
   }, []);
 
@@ -246,11 +256,30 @@ export function LocalAIPanel() {
     } catch { toast.error("Couldn't write to localStorage"); }
   };
 
+  const savePat = () => {
+    const v = pat.trim();
+    try {
+      if (v) {
+        localStorage.setItem(PAT_STORAGE, v);
+        toast.success("Personal Access Token saved locally");
+      } else {
+        localStorage.removeItem(PAT_STORAGE);
+        toast.success("Personal Access Token cleared");
+      }
+    } catch { toast.error("Couldn't write to localStorage"); }
+  };
+
   const keyPreview = useMemo(() => {
     if (!serviceKey) return "";
     if (showKey) return serviceKey;
     return serviceKey.length <= 12 ? "•".repeat(serviceKey.length) : serviceKey.slice(0, 12) + "•".repeat(20);
   }, [serviceKey, showKey]);
+
+  const patPreview = useMemo(() => {
+    if (!pat) return "";
+    if (showPat) return pat;
+    return pat.length <= 12 ? "•".repeat(pat.length) : pat.slice(0, 8) + "•".repeat(20);
+  }, [pat, showPat]);
 
   return (
     <Card className="p-0 border-accent/30 bg-accent/5 overflow-hidden">
@@ -278,69 +307,136 @@ export function LocalAIPanel() {
         <CollapsibleContent className="border-t border-accent/20">
           <div className="p-5 space-y-4">
             <p className="text-xs text-muted-foreground">
-              Same workflows as the website's built-in AI tools — Discover,
-              Go Live, Analyze, Brief, Fetch news, Verify. Pick a tool, fill
-              the inputs, click <span className="font-mono">Copy prompt</span>,
-              paste into your AI. The AI writes the result back to Supabase
-              via the embedded credentials; if it can't make HTTPS calls,
-              paste the JSON it returns into the box at the bottom and the
-              website applies it locally.
+              Eight workflows that mirror the website's built-in AI tools —
+              Tool menu, Discover, Go Live, Analyze (deep), Live Check,
+              Refresh stale, Generate briefs, Fetch news, Verify. Pick a
+              workflow, fill the inputs, click{" "}
+              <span className="font-mono">Copy prompt</span>, paste into your
+              AI (Claude Code, Claude.ai, ChatGPT — any tool with web search).
+              The AI writes results back to Supabase using the credentials
+              saved below. If it can't make HTTPS calls (no-browse sandbox),
+              paste the JSON it emits into the box at the bottom and the
+              website inserts it on your behalf.
             </p>
 
-            {/* ── Service-role key setup ──────────────────────────────────── */}
-            <div className="rounded-md border border-warning/40 bg-warning/5 p-3 space-y-2">
-              <button
-                type="button"
-                className="flex w-full items-center justify-between gap-2 text-left"
-                onClick={() => setKeyOpen(o => !o)}
-              >
-                <span className="text-xs font-semibold flex items-center gap-2">
-                  {keyOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-                  <AlertTriangle className="h-3.5 w-3.5 text-warning" />
-                  Supabase service-role key {serviceKey
-                    ? <span className="text-success font-mono text-[10px] uppercase ml-2">set</span>
-                    : <span className="text-destructive font-mono text-[10px] uppercase ml-2">not set</span>}
-                </span>
-                <span className="text-[10px] text-muted-foreground">{serviceKey ? "saved in this browser only" : "needed for direct writes"}</span>
-              </button>
-              {keyOpen && (
-                <div className="space-y-2">
-                  <p className="text-[11px] text-muted-foreground">
-                    Substituted into the prompt's <span className="font-mono">&lt;SERVICE_ROLE_KEY&gt;</span> placeholder
-                    right before copying. Stored only in your browser's localStorage.
-                  </p>
-                  <p className="text-[11px] text-warning font-mono">
-                    ⚠ Use the <strong>JWT-format service_role key</strong> (starts with <span className="font-mono">eyJ</span>),
-                    NOT the <span className="font-mono">sb_secret_</span> one. Supabase rejects sb_secret_ keys
-                    with HTTP 401 "Forbidden use of secret API key in browser" when called from Claude.ai / ChatGPT / subagent runtimes.
-                    Find the JWT key at Supabase Dashboard → Project Settings → API → service_role.
-                  </p>
-                  {serviceKey.startsWith("sb_secret_") && (
-                    <p className="text-[11px] text-destructive font-semibold bg-destructive/10 border border-destructive/40 rounded px-2 py-1">
-                      The key you've saved starts with <span className="font-mono">sb_secret_</span> — that will fail at runtime. Paste the JWT-format <span className="font-mono">eyJ...</span> key instead.
+            {/* ── Credentials ────────────────────────────────────────────── */}
+            <div className="space-y-2">
+              {/* Service-role key — required for every Local AI workflow */}
+              <div className="rounded-md border border-warning/40 bg-warning/5 p-3 space-y-2">
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between gap-2 text-left"
+                  onClick={() => setKeyOpen(o => !o)}
+                >
+                  <span className="text-xs font-semibold flex items-center gap-2">
+                    {keyOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                    <AlertTriangle className="h-3.5 w-3.5 text-warning" />
+                    Supabase service-role key{" "}
+                    <span className="text-muted-foreground font-normal text-[10px] normal-case ml-1">— required</span>
+                    {serviceKey
+                      ? <span className="text-success font-mono text-[10px] uppercase ml-2">set</span>
+                      : <span className="text-destructive font-mono text-[10px] uppercase ml-2">not set</span>}
+                  </span>
+                  <span className="text-[10px] text-muted-foreground">{serviceKey ? "saved in this browser only" : "needed by every workflow"}</span>
+                </button>
+                {keyOpen && (
+                  <div className="space-y-2">
+                    <p className="text-[11px] text-muted-foreground">
+                      Used by every workflow to write rows back to Supabase. The panel
+                      substitutes it into the prompt's <span className="font-mono">&lt;SERVICE_ROLE_KEY&gt;</span> placeholder
+                      right before clipboard copy. Stored only in this browser's localStorage —
+                      never sent to the SPA's backend, never bundled with the build.
                     </p>
-                  )}
-                  <div className="flex items-center gap-2">
-                    <Input
-                      type={showKey ? "text" : "password"}
-                      value={showKey ? serviceKey : keyPreview}
-                      onChange={(e) => setServiceKey(e.target.value)}
-                      placeholder="sb_secret_…"
-                      className="font-mono text-xs"
-                      autoComplete="off"
-                      spellCheck={false}
-                    />
-                    <Button
-                      size="sm" variant="outline" className="h-9 px-2"
-                      onClick={() => setShowKey(s => !s)}
-                      aria-label={showKey ? "Hide key" : "Show key"}
-                    >
-                      {showKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                    </Button>
-                    <Button size="sm" onClick={saveKey}>Save</Button>
+                    <p className="text-[11px] text-warning font-mono">
+                      ⚠ Use the <strong>JWT-format service_role key</strong> (starts with <span className="font-mono">eyJ</span>),
+                      NOT the newer <span className="font-mono">sb_secret_</span> variant. PostgREST rejects sb_secret_ keys
+                      with HTTP 401 "Forbidden use of secret API key in browser" when the request comes from
+                      Claude.ai / ChatGPT / subagent runtimes. Find the JWT key at:<br />
+                      Supabase Dashboard → Project Settings → API → <strong>service_role</strong> (the long <span className="font-mono">eyJ…</span> string).
+                    </p>
+                    {serviceKey.startsWith("sb_secret_") && (
+                      <p className="text-[11px] text-destructive font-semibold bg-destructive/10 border border-destructive/40 rounded px-2 py-1">
+                        The key you've saved starts with <span className="font-mono">sb_secret_</span> — that will fail at runtime. Paste the JWT-format <span className="font-mono">eyJ…</span> key instead.
+                      </p>
+                    )}
+                    <div className="flex items-center gap-2">
+                      <Input
+                        type={showKey ? "text" : "password"}
+                        value={showKey ? serviceKey : keyPreview}
+                        onChange={(e) => setServiceKey(e.target.value)}
+                        placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…"
+                        className="font-mono text-xs"
+                        autoComplete="off"
+                        spellCheck={false}
+                      />
+                      <Button
+                        size="sm" variant="outline" className="h-9 px-2"
+                        onClick={() => setShowKey(s => !s)}
+                        aria-label={showKey ? "Hide key" : "Show key"}
+                      >
+                        {showKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                      </Button>
+                      <Button size="sm" onClick={saveKey}>Save</Button>
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
+              </div>
+
+              {/* Personal Access Token — optional, only used by admin tooling */}
+              <div className="rounded-md border border-info/40 bg-info/5 p-3 space-y-2">
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between gap-2 text-left"
+                  onClick={() => setPatOpen(o => !o)}
+                >
+                  <span className="text-xs font-semibold flex items-center gap-2">
+                    {patOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                    <AlertTriangle className="h-3.5 w-3.5 text-info" />
+                    Supabase Personal Access Token (PAT){" "}
+                    <span className="text-muted-foreground font-normal text-[10px] normal-case ml-1">— optional</span>
+                    {pat
+                      ? <span className="text-success font-mono text-[10px] uppercase ml-2">set</span>
+                      : <span className="text-muted-foreground font-mono text-[10px] uppercase ml-2">not set</span>}
+                  </span>
+                  <span className="text-[10px] text-muted-foreground">{pat ? "saved in this browser only" : "for migrations / management API"}</span>
+                </button>
+                {patOpen && (
+                  <div className="space-y-2">
+                    <p className="text-[11px] text-muted-foreground">
+                      Optional — used by admin tooling (Claude Code sessions, helper
+                      scripts) to call the <span className="font-mono">api.supabase.com/v1</span> Management API:
+                      apply migrations, run ad-hoc SQL, deploy edge functions, view logs.
+                      <strong> Not used by any Local AI workflow</strong> — paste it only if you're collaborating
+                      with an AI assistant that needs to run those operations on your behalf
+                      without asking you to find a token every time. Stored only in this
+                      browser's localStorage.
+                    </p>
+                    <p className="text-[11px] text-info font-mono">
+                      Find or create one at: <strong>Supabase Dashboard → Account → Access Tokens → Generate new token</strong>.
+                      The value starts with <span className="font-mono">sbp_</span>. You only see it once — copy it immediately.
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        type={showPat ? "text" : "password"}
+                        value={showPat ? pat : patPreview}
+                        onChange={(e) => setPat(e.target.value)}
+                        placeholder="sbp_…"
+                        className="font-mono text-xs"
+                        autoComplete="off"
+                        spellCheck={false}
+                      />
+                      <Button
+                        size="sm" variant="outline" className="h-9 px-2"
+                        onClick={() => setShowPat(s => !s)}
+                        aria-label={showPat ? "Hide token" : "Show token"}
+                      >
+                        {showPat ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                      </Button>
+                      <Button size="sm" onClick={savePat}>Save</Button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* ── Active-session banners (one per running long workflow) ── */}
@@ -696,9 +792,9 @@ function WorkflowRow({ task, label, blurb, serviceKey, projects, projectsLoading
             <div className="space-y-1">
               <Label
                 className="text-[10px] uppercase tracking-wider font-mono text-muted-foreground"
-                title="Maximum new projects the AI may insert from one (province × sector) cell before moving on. Mirrors the website Live Discovery card's per-query-max."
+                title="Per-cell TARGET — the AI aims to insert this many viable Nepal projects from each (province × sector) cell. If the first-pass search returns fewer, it runs follow-up queries with varied terms before moving on. Hard ceiling per cell is target+3 (or 8, whichever is larger)."
               >
-                Per-query max
+                Per-cell target
               </Label>
               <Input
                 type="number" min={1} max={10} value={glPerCellMax}
@@ -750,8 +846,8 @@ function WorkflowRow({ task, label, blurb, serviceKey, projects, projectsLoading
 
           <p className="text-[10px] text-muted-foreground font-mono leading-snug">
             Grid: {glProvinces.size} × {glSectors.size} = <span className="text-foreground">{glProvinces.size * glSectors.size}</span> cells.
-            Worst case: <span className="text-foreground">{glProvinces.size * glSectors.size * glPerCellMax}</span> projects (cells × per-query-max).
-            The AI halts after <span className="text-foreground">{glBudget}</span> total insertions whichever comes first.
+            AI targets <span className="text-foreground">{glPerCellMax}</span> projects per cell — runs follow-up queries when the first pass falls short.
+            Hard ceiling per cell <span className="text-foreground">{Math.max(glPerCellMax + 3, 8)}</span>; whole-run halt at <span className="text-foreground">{glBudget}</span> total inserts.
           </p>
 
           {/* Live log — mirrors the Sherlock Queue view, filtered to local

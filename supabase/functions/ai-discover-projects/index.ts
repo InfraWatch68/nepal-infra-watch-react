@@ -356,7 +356,19 @@ serve(async (req) => {
     const sectorsParam: string[] | undefined = Array.isArray(body.sectors)
       ? body.sectors.map((s: unknown) => String(s).trim()).filter(Boolean)
       : undefined;
+    // `maxResults` is the per-cell TARGET (the # of viable Nepal projects we
+    // aim to insert from a single province × sector). It's NOT a ceiling on
+    // candidate articles — Tavily returns plenty of articles the AI rejects
+    // (non-Nepal-specific, off-topic, content too short, dedupe hit), so we
+    // request more candidates than the target to give extraction enough room.
     const maxResults = Math.min(Math.max(Number(body.maxResults) || 5, 1), 10);
+    // Tavily candidate budget per call: 2× the target, capped at Tavily's
+    // soft ceiling of 10. One Tavily call costs the same credit regardless
+    // of max_results up to 20, so this is free quota-wise. The inner
+    // extraction loop early-breaks once `localInserted >= maxResults`, so
+    // the extra candidates only cost AI calls when the first ones got
+    // rejected (asymmetric: pay extra only when needed).
+    const tavilyCandidates = Math.min(Math.max(maxResults * 2, 5), 10);
     // Optional tag for autonomous tools (e.g. "Sherlock") — surfaces in admin queue.
     const aiTag: string | null = body.aiTag?.toString().trim().slice(0, 40) || null;
     // Optional sherlock_jobs row id; if present, we write status/counts back at the end.
@@ -618,7 +630,7 @@ Other rules:
       const tavResult = await tavilySearch(admin, tavilyKeys, {
         query: search.query,
         search_depth: "advanced",
-        max_results: maxResults,
+        max_results: tavilyCandidates,
         include_answer: false,
         include_images: true,
         // 2-year recency window: project events (DPR approval, tender
@@ -678,10 +690,22 @@ Other rules:
         if (searchImages.length >= 6) break;
       }
 
+      // Per-cell insertion counter. The outer (`inserted`) counter is
+      // cumulative across all cells; this one tracks just the current cell
+      // so we can stop AI-extracting candidates once the cell target is met.
+      let localInserted = 0;
       for (let idx = 0; idx < results.length; idx++) {
         if (overBudget()) {
           errors.push(phaseTrail(`Wall-time budget (${WALL_BUDGET_MS / 1000}s) reached mid-sector "${search.sector ?? "topic"}" after ${inserted} insert(s), ${skipped} skip(s).`));
           break outer;
+        }
+        // Target met for this cell — stop extracting candidates and move
+        // to the next cell. We requested more candidates than the target
+        // to give extraction breathing room, but every successful insert
+        // means one fewer candidate we need to process.
+        if (localInserted >= maxResults) {
+          mark(`target-met sec=${search.sector ?? 'topic'} localInserted=${localInserted}`);
+          break;
         }
         const r = results[idx];
         // Pace between AI calls. Cut from 2500ms → 1200ms — still under the
@@ -978,6 +1002,7 @@ Other rules:
             await admin.from("projects").delete().eq("id", proj.id);
           } else {
             inserted += 1;
+            localInserted += 1;
           }
         } catch (e) {
           errors.push(e instanceof Error ? e.message : String(e));

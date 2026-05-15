@@ -514,18 +514,30 @@ ${filterDescription}
 ### Steps
 
 1. **Open the queue row.** POST a \`sherlock_jobs\` row per the Queue-tab
-   Parity section. Save the returned id as JOB_ID.
+   Parity section. Save the returned id as JOB_ID. Note the \`maxResults\`
+   value in \`params\` — that's your **target** for this cell (not a ceiling).
 2. **Build the search query.** Templates:
    - both: \`Nepal <sector> project OR program <province>\`
    - sector only: \`Nepal <sector> project OR program\`
    - province only: \`Nepal infrastructure project <province>\`
    - neither: \`Nepal infrastructure project\`
    Soft sectors (Health, Education) deliberately drop the word "infrastructure".
-3. **Web-search + fetch.** Top 5–8 results. For each, fetch the article body.
-   Skip results with <50 chars of content.
+3. **First-pass search + fetch.** Top 5–8 results. For each, fetch the
+   article body. Skip results with <50 chars of content.
 4. **Extract one project record per article** matching the \`projects\` schema
    above. Apply the confidence rubric (skip < 0.40). Apply the status rubric
    based on the article's latest dated evidence. Apply the description rules.
+4a. **Follow-up searches if you fell short of the target.** If after the
+    first pass you've inserted fewer viable projects than \`maxResults\`
+    AND you still have web-search quota, run 1–2 follow-up queries with
+    varied terms before closing the cell:
+    - add district names (\`Nepal <sector> project <district name>\`)
+    - swap to English-language Nepali outlets (e.g. \`site:kathmandupost.com\`)
+    - widen the time window (older project announcements, not just news)
+    - swap "project" for "program" / "scheme" / "initiative" / "DPR" / "tender"
+    Stop the second-pass loop the moment you've reached the target OR you've
+    exhausted reasonable query variations. If the cell genuinely has nothing,
+    that's fine — close with the partial count.
 5. **Dedupe by case-insensitive title**:
    \`\`\`http
    GET ${SUPABASE_URL}/rest/v1/projects?title=ilike.<escaped-title>&select=id,provinces,districts,municipalities
@@ -553,15 +565,24 @@ ${filterDescription}
    If this fails, DELETE the orphan project to keep the DB clean.
 9. **Close the queue row.** PATCH \`/rest/v1/sherlock_jobs?id=eq.<JOB_ID>\` with
    \`status:"done"\`, final \`inserted\` and \`skipped\` counts.
+   **Counter semantics — match these exactly, the admin's dashboard relies on it:**
+   - \`inserted\` = the number of NEW \`projects\` rows you wrote.
+   - \`skipped\` = every article you fetched but did NOT insert as a new project.
+     Includes: confidence < 0.40, status-rubric mismatch, dedupe hit (existing
+     project), content too short, AI judged not-a-Nepal-project, JSON parse
+     fail, location merge into existing row.
+   - \`inserted + skipped\` should equal the total articles you fetched across
+     all passes (first pass + any follow-ups). If \`skipped\` is 0 but you
+     fetched 8 articles and only inserted 2, you're under-counting — fix it.
 10. **Summarize for the admin.** End with a plain-text block:
     \`\`\`
     DISCOVERY COMPLETE
-      Query: <query>
+      Query: <primary query> (+ <N> follow-ups)
       Fetched: <N> URLs
-      Inserted: <N> new projects
+      Inserted: <N> new projects (target was <T>)
         - "Title" → /projects/<slug>
       Merged into existing: <M> projects had new geo signals
-      Skipped: <K> below confidence or not Nepal-specific
+      Skipped: <K> (<reasons-breakdown>)
     \`\`\`
 
 If you have no HTTPS tool, skip step 1 and 7-9 and instead emit:
@@ -974,11 +995,20 @@ ${resumeSection}### Grid
 - District-comprehensive: **${includeDistricts ? "ON — also rotate through each province's districts (77 districts × " + sectors.length + " sectors)" : "off — province granularity only"}**
 - National Pride mode: **${nationalPride ? "ON — rotate through the 24 Rastra Gaurab projects instead of generic province/sector queries" : "off"}**
 
-### Caps (be honest — don't try to do everything in one session)
+### Targets and budget (read carefully — these are NOT all ceilings)
 
-- Per-query max: **${perCellMax}** (max distinct projects inserted from one cell)
-- Stop after (total): **${budget}** projects inserted across all cells, even if cells remain
-- Wall-time budget: aim for ≤30 minutes total; the AI tool's quota will throttle you before you exceed this.
+- **Per-cell TARGET: ${perCellMax}** — for every cell you process, aim to insert
+  this many viable Nepal projects. \`${perCellMax}\` is a target you should
+  actively work to hit, not a ceiling you should bump into and stop. The
+  Discover sub-task (step 3 below) tells you how to run follow-up queries
+  when the first pass falls short.
+- **Per-cell ceiling: ${Math.max(perCellMax + 3, 8)}** — hard upper limit per cell
+  (target + 3 or 8, whichever is larger). Don't insert more than this even
+  if a cell is unusually productive — move on to the next cell.
+- **Total budget: ${budget} projects** — across all cells, stop as soon as you've
+  inserted this many. The next session can resume from the cursor.
+- **Wall-time budget**: aim for ≤30 minutes total; the AI tool's web-search
+  quota will throttle you well before you exceed this.
 
 ### Kill switch — REQUIRED BEFORE EACH CELL
 
@@ -1018,9 +1048,18 @@ For each cell in **column-major order** (sector A across all provinces, then sec
    \`"claude-local-golive-${batchId}"\` so the panel's resume query can find
    you later.
 3. **Run the Discover workflow** for this cell exactly as the Discover task
-   describes (build query, web-search top 5-8, extract per-article, dedupe by
-   title, slug, insert project + source row). Cap at ${perCellMax} insertions
-   for the cell.
+   describes (build query, first-pass web-search top 5–8, extract per-article,
+   dedupe by title, slug, insert project + source row).
+   - **Target ${perCellMax} insertions per cell.** If the first-pass query
+     returns fewer than ${perCellMax} viable Nepal projects, run 1–2 follow-up
+     queries with varied terms (district names, English-language Nepali
+     outlets, broader time window, "program"/"DPR"/"tender" instead of
+     "project") before closing the cell. Don't give up at 1 or 2 inserts if
+     the cell hasn't been honestly searched.
+   - **Per-cell ceiling: ${Math.max(perCellMax + 3, 8)}** (target + 3 or 8).
+   - **Skipped counter must be accurate**: every article you fetch but don't
+     insert (confidence, dedupe, not-Nepal-specific, parse fail) counts as
+     skipped. \`inserted + skipped\` ≈ total articles fetched.
 4. **Close the queue row** with \`status:"done"\`, final \`inserted\` and \`skipped\` counts.
 5. **Pace ~5s between cells** so the AI tool's web-search quota lasts.
 6. **After each cell, check the total budget.** If you've inserted ${budget}
