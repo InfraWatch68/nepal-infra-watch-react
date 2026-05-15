@@ -441,6 +441,10 @@ function WorkflowRow({ task, label, blurb, serviceKey, projects, projectsLoading
   // Live Check loop bounds.
   const [lcCycles, setLcCycles] = useState<number>(60);
   const [lcIntervalSec, setLcIntervalSec] = useState<number>(60);
+  // Refresh Stale: one-shot batch over approved projects whose analysis is
+  // missing or older than `rsDays` days. `rsMax` caps the run.
+  const [rsMax, setRsMax] = useState<number>(20);
+  const [rsDays, setRsDays] = useState<number>(30);
 
   // Checkpoint discovery — only runs for the Go Live row. Now primary
   // source is sherlock_live_state (id=1) which BOTH the server cron and
@@ -537,6 +541,8 @@ function WorkflowRow({ task, label, blurb, serviceKey, projects, projectsLoading
         : null,
       liveCheckCycles: lcCycles,
       liveCheckIntervalSec: lcIntervalSec,
+      refreshStaleMax: rsMax,
+      refreshStaleDays: rsDays,
     };
     if (task === "analyze" && selectedProjects.length === 0) {
       toast.error("Pick at least one project before copying the Analyze prompt.");
@@ -796,6 +802,41 @@ function WorkflowRow({ task, label, blurb, serviceKey, projects, projectsLoading
             Runs for up to <span className="text-foreground">{(lcCycles * lcIntervalSec / 60).toFixed(0)} minutes</span> total
             ({lcCycles} cycles × {lcIntervalSec}s).
             Turn off the website's "Auto-analysis on approval" toggle above before starting this.
+            Catches BOTH manual approvals and auto-approve-trigger approvals — both now stamp <code className="font-mono text-[10px]">reviewed_at</code>.
+          </p>
+        </div>
+      )}
+
+      {task === "refresh-stale" && (
+        <div className="grid grid-cols-2 gap-2">
+          <div className="space-y-1">
+            <Label
+              className="text-[10px] uppercase tracking-wider font-mono text-muted-foreground"
+              title="Hard cap on projects processed in one paste of the prompt. The AI exits after this many analyses complete, even if more stale projects remain."
+            >
+              Max projects
+            </Label>
+            <Input
+              type="number" min={1} max={200} value={rsMax}
+              onChange={(e) => setRsMax(Math.max(1, Math.min(200, Number(e.target.value) || 20)))}
+              className="h-8 text-xs"
+            />
+          </div>
+          <div className="space-y-1">
+            <Label
+              className="text-[10px] uppercase tracking-wider font-mono text-muted-foreground"
+              title="A project is 'stale' when its last_comprehensive_analysis_at is null OR older than this many days. Mirrors the website's Refresh-stale-projects button."
+            >
+              Stale after (days)
+            </Label>
+            <Input
+              type="number" min={1} max={365} value={rsDays}
+              onChange={(e) => setRsDays(Math.max(1, Math.min(365, Number(e.target.value) || 30)))}
+              className="h-8 text-xs"
+            />
+          </div>
+          <p className="text-[10px] text-muted-foreground font-mono leading-snug col-span-2">
+            Pulls up to <span className="text-foreground">{rsMax}</span> approved projects with no analysis (or analysis older than {rsDays} days) and runs the full 10-table Analyze pipeline on each, oldest first. One-shot — not a polling loop.
           </p>
         </div>
       )}

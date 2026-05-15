@@ -15,7 +15,7 @@
 // to make but not HOW; the AI picks whichever HTTPS-capable tool it has,
 // or falls back to returning a JSON block for the admin to paste back.
 
-export type LocalAiTask = "menu" | "discover" | "go-live" | "analyze" | "live-check" | "brief" | "fetch-news" | "verify";
+export type LocalAiTask = "menu" | "discover" | "go-live" | "analyze" | "live-check" | "refresh-stale" | "brief" | "fetch-news" | "verify";
 
 // One project's row passed into the multi-select-driven workflows. The
 // admin's Local-AI panel pre-fetches this metadata from the DB so the AI
@@ -58,6 +58,9 @@ export type LocalAiInput = {
   // Live Check loop bounds.
   liveCheckCycles?: number;       // 0 = one-shot pass; N>0 = poll N times
   liveCheckIntervalSec?: number;  // seconds between polls (e.g. 60)
+  // Refresh Stale (one-shot batch over the backlog).
+  refreshStaleMax?: number;       // hard cap on projects processed in one run
+  refreshStaleDays?: number;      // "stale" threshold in days (default 30)
   // Go Live resume — when set, the prompt tells the AI to start AFTER this
   // (sector, province) cell in column-major order, skipping everything up
   // through it. The panel populates this from the most recent local Go Live
@@ -159,6 +162,27 @@ For \`sherlock_jobs\` and \`project_analysis_runs\` rows you open: write
 roll back a whole session with one click by filtering on this tag prefix.
 Without the tag the admin would have to delete rows by hand.
 
+## Portability — this prompt is self-contained, do NOT read local files
+
+This prompt was copied from the admin panel and is designed to run on **any
+device**: the admin's laptop, a phone, a teammate's machine, a fresh sandbox.
+Everything you need is either (a) inside this prompt text, or (b) pullable
+from Supabase via the REST endpoints below.
+
+**Do NOT look for credentials, configuration, or project data in any local
+folder, \`.env\` file, working-directory file, mounted volume, or repository
+checkout — even if your host has filesystem access (Claude Code, code
+interpreter, Cursor, etc.). The service role key above is the only key you
+need; the Supabase URL is the only host you need. If \`<SERVICE_ROLE_KEY>\`
+above still reads as a literal angle-bracket placeholder, the admin forgot
+to paste the key into their panel — STOP and ask them to fix it (don't try
+to find it elsewhere).**
+
+If you need project metadata that isn't already in this prompt, GET it from
+\`${SUPABASE_URL}/rest/v1/projects?...\` using the credentials above. Same for
+\`sherlock_jobs\`, \`sherlock_live_state\`, \`project_analysis_runs\`, and the
+detail / timeline tables.
+
 ## How to research
 
 Use whichever web-search / browsing / fetch tool you have. For news queries,
@@ -250,10 +274,10 @@ const PROJECT_SCHEMA = `## projects table (bigint PK id)
   "start_date": "YYYY-MM-DD or null",        // MUST be a real calendar date
   "expected_completion": "YYYY-MM-DD or null",
   "status": "<STATUS>",                       // required, use rubric below
-  "approval_status": "pending",               // always 'pending' for AI writes
+  "approval_status": "pending",               // always 'pending' — the BEFORE INSERT trigger flips qualifying rows to 'approved' and stamps reviewed_at
   "submitted_by": null,
   "submitted_by_ai": true,
-  "ai_tag": "claude-local",
+  "ai_tag": "claude-local-<batchId>",         // see Batch tag section for the literal value
   "national_pride": false,
   "image_urls": [],
   "cover_image_url": null,
@@ -417,31 +441,56 @@ function buildMenu(input: LocalAiInput): string {
 
 The admin pastes this prompt to start a session. Ask which task to run:
 
-1. **Discover** — find new infrastructure projects via web search. Inputs:
-   sector (optional), province (optional). Output: rows inserted into
-   \`projects\` + \`project_sources\` as \`approval_status:"pending"\`.
-2. **Analyze** — multi-source research on one existing project. Inputs: the
-   project slug or id. Output: rows inserted across 7 detail tables +
-   a narrative_summary + gaps_and_contradictions written to
-   \`project_analysis_runs\`.
-3. **Brief** — compose homepage briefs from approved projects. Inputs:
-   scope (global / province:X / sector:Y). Output: rows inserted into
-   \`global_briefs\` with importance scoring; the website's carousel
-   surfaces \`display_eligible=true\` rows.
-4. **Fetch news** — Tavily-style news scan for one project. Inputs: project
-   slug or id. Output: rows inserted into \`project_updates\` +
-   \`project_sources\`.
-5. **Verify** — read-only audit pass that compares the website's existing
+**Discovery / ingest**
+1. **Discover** — find new infrastructure projects via web search.
+   Inputs: sector (optional), province (optional).
+   Output: rows in \`projects\` + \`project_sources\` as \`approval_status:"pending"\`.
+2. **Go Live (multi-cell sweep)** — walk a province × sector grid and run
+   Discover for each cell. Long-running; claims \`golive_session_id\` on
+   \`sherlock_live_state\` so the panel can stop you mid-run. Mirrors the
+   server-side Sherlock Live cron — heaviest Tavily/Mistral consumer.
+
+**Analysis**
+3. **Analyze (deep)** — multi-source research on a moderator-picked list of
+   existing projects. Inputs: project ids or slugs. Output: rows across
+   7 detail tables + 3 timeline tables + a \`project_analysis_runs\` row
+   per project with \`narrative_summary\` and \`gaps_and_contradictions\`.
+4. **Live Check (on-approval analysis)** — polls every ~60s for newly
+   approved projects (manual OR auto-approve-trigger approvals, both stamp
+   \`reviewed_at\`) and runs Analyze on each. Claims \`livecheck_session_id\`;
+   runs alongside Go Live (separate session columns). Turn the website's
+   "Auto-analysis on approval" toggle OFF before starting.
+5. **Refresh Stale (backlog sweep)** — one-shot batch over approved projects
+   whose analysis is missing or older than N days. Pulls the candidate list
+   from a DB query; processes each through the same Analyze pipeline. Does
+   NOT claim a session — finite batch, exits when done.
+
+**Content / audit**
+6. **Brief** — compose homepage briefs from approved projects. Inputs:
+   scope (global / province:X / sector:Y). Output: rows in \`global_briefs\`
+   with importance scoring.
+7. **Fetch news** — Tavily-style news scan for one project. Inputs: project
+   slug or id. Output: rows in \`project_updates\` + \`project_sources\`.
+8. **Verify** — read-only audit pass that compares the website's existing
    project record against fresh web sources. Inputs: project slug or id.
    Output: a structured verification report in chat (no DB writes).
 
 After the admin picks one, follow the workflow they describe. Each workflow
-has its own prompt the admin can paste, OR you can run it from this menu
-if the admin gives you the inputs directly.
+has its own prompt the admin can paste from the Local-AI panel, OR you can
+run it from this menu if the admin gives you the inputs directly.
 
-All rows you insert carry \`submitted_by_ai:true\`, \`approval_status:"pending"\`,
-\`ai_tag:"claude-local"\`. Moderators review the pending queue before
-publication. Never write \`approval_status:"approved"\` directly.
+**House rules for every workflow that writes to the DB:**
+- Stamp \`ai_tag:"claude-local-<batchId>"\` on every row so the admin can
+  bulk-roll-back a bad session in one click.
+- Write \`submitted_by_ai:true\`, \`approval_status:"pending"\`. Never write
+  \`approval_status:"approved"\` directly — the BEFORE INSERT trigger
+  \`trg_auto_approve_high_confidence\` will flip qualifying rows to approved
+  (and stamp \`reviewed_at\`) automatically based on \`confidence_score\` +
+  the \`site_settings.auto_approve_threshold\`.
+- Apply the confidence rubric to every row; skip anything < 0.40.
+- Honour the kill switch for long-running workflows (Go Live, Live Check):
+  GET \`sherlock_live_state\` before each unit of work, exit cleanly if the
+  session id column doesn't match your batch id.
 `;
 }
 
@@ -1078,15 +1127,19 @@ PATCH ${SUPABASE_URL}/rest/v1/sherlock_live_state?id=eq.1
    \`\`\`
 
    **Important — column name is \`reviewed_at\`**, not \`approved_at\`
-   (that column doesn't exist). It bumps when a moderator flips approval
-   to 'approved'. Order \`asc\` so the oldest-of-the-newly-approved goes
-   first (FIFO within this session).
+   (that column doesn't exist). It bumps in TWO situations:
+   - a human moderator flips approval to 'approved' in the admin UI, OR
+   - the \`auto_approve_high_confidence_project\` BEFORE INSERT trigger
+     auto-approves an AI submission (confidence ≥ site_settings threshold).
+   Both paths now stamp \`reviewed_at\` so Live Check catches them. Order
+   \`asc\` so the oldest-of-the-newly-approved goes first (FIFO within
+   this session).
 
    If the result is empty → log "no new approvals this cycle, sleeping
    ${intervalSec}s" and wait. The goal is to **not** back-fill old stale
-   projects — that's what the admin's "Refresh stale approved projects"
-   button is for. Your job is to react to fresh approvals only, like
-   the server trigger does.
+   projects — that's what the **Refresh stale** local-AI workflow is for.
+   Your job is to react to fresh approvals only, like the server trigger
+   does.
 2. **Skip if an analysis is already queued/running** for the project (the
    partial unique index on \`analysis_jobs\` would 23505 your insert anyway):
    \`\`\`http
@@ -1125,6 +1178,174 @@ Plus with code interpreter). The website-side auto-analysis trigger is the
 fallback — flip the toggle back ON."
 
 Begin cycle 1 of ${cycles}.`;
+}
+
+function buildRefreshStale(input: LocalAiInput): string {
+  const batchId = input.batchId ?? genBatchId();
+  const maxProjects = Math.max(1, Math.min(200, input.refreshStaleMax ?? 20));
+  const staleDays = Math.max(1, Math.min(365, input.refreshStaleDays ?? 30));
+  return `${buildHeader(batchId)}
+${ENUMS_FULL}
+${DETAIL_TABLES_SCHEMA}
+${TIMELINE_TABLES_SCHEMA}
+${CONFIDENCE_AND_STATUS}
+## Task: Refresh Stale (back-fill analysis for the approved backlog)
+
+This task mirrors the admin panel's **"Refresh stale approved projects"**
+button — the one that enqueues comprehensive analysis for approved projects
+whose last analysis is missing or older than ${staleDays} days. It runs the
+same Analyze pipeline you'd run from the "Analyze projects (deep)" workflow,
+but the project list is **pulled from a DB query** instead of admin
+multi-select, so the AI can chew through the backlog without the moderator
+hand-picking each row.
+
+Unlike Live Check, this task does **not** poll — it processes a finite list
+once, in oldest-first order, and exits. Unlike Go Live, it does **not**
+claim a session slot on \`sherlock_live_state\` — multiple Refresh Stale
+runs can safely target different projects in parallel because the per-row
+analysis_jobs partial unique index prevents collisions.
+
+### Caps
+
+- **Hard cap:** ${maxProjects} projects per run. The AI exits after that
+  many \`project_analysis_runs\` rows have been closed with \`status=succeeded\`,
+  even if more stale projects remain. The admin can paste the prompt again
+  to chew through the next batch.
+- **Staleness window:** ${staleDays} days. A project is "stale" when
+  \`last_comprehensive_analysis_at IS NULL\` (never analyzed) OR
+  \`last_comprehensive_analysis_at < now() - INTERVAL '${staleDays} days'\`.
+- **Pacing:** sleep ~5s between projects so the AI tool's web-search quota
+  lasts.
+
+### Step 0 — Pull the candidate list
+
+\`\`\`http
+GET ${SUPABASE_URL}/rest/v1/projects?approval_status=eq.approved&or=(last_comprehensive_analysis_at.is.null,last_comprehensive_analysis_at.lt.<ISO ${staleDays} days ago>)&order=last_comprehensive_analysis_at.asc.nullsfirst&limit=${maxProjects}&select=id,slug,title,sector,province,district,description,last_comprehensive_analysis_at
+\`\`\`
+
+Compute the ISO threshold as \`now() − ${staleDays} days\` in your tool.
+Order \`asc.nullsfirst\` so never-analyzed rows come before old-analyzed ones,
+and old-analyzed rows come before recently-analyzed-but-still-past-window.
+
+If the list is empty → STOP. Tell the admin "no stale projects in scope
+(staleness window: ${staleDays} days)" and exit.
+
+### Step 1 — Per-project guard (before each analysis)
+
+For each project in the list, check whether an analysis is already in flight:
+
+\`\`\`http
+GET ${SUPABASE_URL}/rest/v1/analysis_jobs?project_id=eq.<id>&status=in.(queued,running)&limit=1
+\`\`\`
+
+If a row comes back → log "skipped (already queued)" and move to next project.
+The partial unique index on \`analysis_jobs\` would 23505 your insert anyway.
+
+### Step 2 — Run the full Analyze pipeline on the project
+
+This is the SAME pipeline the "Analyze projects (deep)" workflow runs.
+Do it for every project in the candidate list, sequentially:
+
+1. **Open the analysis run row.**
+   \`\`\`http
+   POST ${SUPABASE_URL}/rest/v1/project_analysis_runs
+   {
+     "project_id": <id>,
+     "status": "running",
+     "started_at": "<ISO-8601>",
+     "bucket_status": { "news":{"state":"queued"},"government":{"state":"queued"},"procurement":{"state":"queued"},"audit":{"state":"queued"},"international":{"state":"queued"} },
+     "ai_tag": "claude-local-${batchId}"
+   }
+   \`\`\`
+   Capture returned id as RUN_ID.
+
+2. **5-bucket parallel web search** for the project title:
+   | Bucket | Query |
+   |---|---|
+   | news | \`"<title>" Nepal\` (last 90 days preferred) |
+   | government | \`"<title>" site:gov.np\` |
+   | procurement | \`"<title>" (site:ppmo.gov.np OR site:bolpatra.gov.np)\` |
+   | audit | \`"<title>" (site:oag.gov.np OR site:ciaa.gov.np)\` |
+   | international | \`"<title>" (site:worldbank.org OR site:adb.org OR site:jica.go.jp)\` |
+   Fetch top 2–3 URLs per bucket. After each bucket, PATCH
+   \`project_analysis_runs.bucket_status\` with
+   \`{state:"done"|"empty"|"error", hits:N}\`.
+
+3. **Authority hierarchy when sources conflict** (highest first):
+   .gov.np → international orgs → procurement portals → audit institutions →
+   established Nepali media → other. Within a tier, newer date wins.
+
+4. **Extract candidate rows for ALL ten tables** (7 detail + 3 timeline).
+   Apply the confidence rubric (skip < 0.40). All rows MUST include
+   \`"ai_tag": "claude-local-${batchId}"\`, \`approval_status:"pending"\`,
+   \`submitted_by_ai:true\`.
+
+5. **Dedupe each candidate** against existing approved+pending rows on this
+   project. Match keys:
+   - project_funding: \`source_name\`
+   - project_documents: normalised \`url\` OR \`title\`
+   - project_stakeholders: \`org_name\` + \`role\`
+   - project_risks: \`title\`
+   - project_impact: \`metric_type\` + \`measured_at\`
+   - project_procurement: \`tender_id_external\` OR \`tender_title\`
+   - project_compliance: \`item_type\` + \`authority\`
+   - project_milestones: fuzzy \`title\` + \`milestone_date\`
+   - project_updates: fuzzy \`title\` + \`update_date\`
+   - project_sources: normalised \`url\` (strip \`https?://(www\\.)?\`, lowercase)
+
+6. **Bulk-insert non-duplicates.** One POST per table. Tally
+   \`inserted_per_table\` and \`deduped_per_table\`.
+
+7. **Compose narrative + gaps.**
+   - \`narrative_summary\`: 200–400 words. Lead with current status + latest
+     dated fact, then context, then open questions.
+   - \`gaps_and_contradictions\`: short bullet flags ("No procurement record
+     despite status=in_progress", "MoPIT says NPR 8B; OAG says NPR 6.2B —
+     not reconciled").
+
+8. **Close the analysis run row.**
+   \`\`\`http
+   PATCH ${SUPABASE_URL}/rest/v1/project_analysis_runs?id=eq.<RUN_ID>
+   {
+     "status": "succeeded",
+     "finished_at": "<ISO-8601>",
+     "narrative_summary": "...",
+     "gaps_and_contradictions": [...],
+     "inserted_per_table": {...},
+     "deduped_per_table": {...},
+     "bucket_status": {<final state per bucket>}
+   }
+   \`\`\`
+   (The website's analysis-drain trigger will update
+   \`projects.last_comprehensive_analysis_at\` automatically when the run
+   transitions to succeeded — you don't need to set it yourself.)
+
+9. **Checkpoint message** so the admin can watch progress:
+   \`\`\`
+   [N/${maxProjects}] <title> — Inserted: funding F · docs D · stakeholders S · risks R · impact I · procurement P · compliance C · milestones M · updates U · sources X  · Deduped: total Z
+   \`\`\`
+
+### Final summary (after ${maxProjects} done OR list exhausted)
+
+\`\`\`
+REFRESH STALE BATCH COMPLETE — ${batchId}
+  Candidates pulled:  <N>
+  Projects analyzed:  <M>
+  Skipped (already queued): <K>
+  Total inserted across 10 tables: <I>
+  Total deduped:                   <D>
+  Highest-importance finding:  <bullet>
+  Common gaps observed:        <bullet>
+\`\`\`
+
+### If you have no HTTPS tool
+
+Refresh Stale needs the GET in Step 0 to know which projects to analyze.
+If your environment can't make HTTPS calls, STOP and tell the admin
+"Refresh Stale requires a host with HTTPS GET capability (Claude Code,
+Claude.ai with computer use, ChatGPT Plus with code interpreter)."
+
+Begin Step 0 now.`;
 }
 
 function buildVerify(input: LocalAiInput): string {
@@ -1178,6 +1399,7 @@ export function buildLocalAiPrompt(task: LocalAiTask, input: LocalAiInput = {}):
     "go-live": buildGoLive,
     analyze: buildAnalyze,
     "live-check": buildLiveCheck,
+    "refresh-stale": buildRefreshStale,
     brief: buildBrief,
     "fetch-news": buildFetchNews,
     verify: buildVerify,
@@ -1196,7 +1418,8 @@ export const LOCAL_AI_TASKS: Array<{ key: LocalAiTask; label: string; blurb: str
   { key: "discover", label: "Discover projects", blurb: "Single-cell web search → extract project records → insert with submitted_by_ai=true, approval_status=pending. Mirrors ai-discover-projects." },
   { key: "go-live", label: "Go Live (multi-cell sweep)", blurb: "Walks a (province × sector) grid running Discover for each cell. Replaces the server-side Sherlock Live cron — the heaviest consumer of Tavily + Mistral credits." },
   { key: "analyze", label: "Analyze projects (deep)", blurb: "Loops over selected projects. Each one gets the full Run-AI-Analysis + Trace-History pipeline: 5-bucket research, 7 detail tables, 3 timeline tables (milestones / updates / sources), narrative summary, gaps." },
-  { key: "live-check", label: "Live Check (on-approval analysis)", blurb: "Polls Supabase every 60s for newly-approved projects that lack a comprehensive analysis. Runs the full Analyze pipeline on each. Mirrors the server-side auto-analysis trigger — turn the website toggle OFF when you're using this." },
+  { key: "live-check", label: "Live Check (on-approval analysis)", blurb: "Polls Supabase every 60s for newly-approved projects that lack a comprehensive analysis. Runs the full Analyze pipeline on each. Catches BOTH manual-moderator approvals and auto-approve-trigger approvals (both now stamp reviewed_at). Mirrors the server-side auto-analysis trigger — turn the website toggle OFF when you're using this." },
+  { key: "refresh-stale", label: "Refresh stale (backlog sweep)", blurb: "Pulls approved projects with no analysis (or analysis older than 30 days) and runs the full Analyze pipeline on each. One-shot batch — not a polling loop. Mirrors the admin panel's \"Refresh stale approved projects\" button. Use this to chew through the backlog Live Check won't touch." },
   { key: "brief", label: "Generate briefs", blurb: "Multi-brief batch over approved projects in a scope → write to global_briefs with importance scoring. Mirrors generate-daily-briefs." },
   { key: "fetch-news", label: "Fetch news", blurb: "Recent news for one project → write project_updates + project_sources. Mirrors ai-fetch-project-news." },
   { key: "verify", label: "Verify project", blurb: "Read-only audit of one project against fresh web sources → returns a JSON report. Mirrors ai-verify-project." },
