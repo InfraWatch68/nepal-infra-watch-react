@@ -17,14 +17,14 @@ export default function MapPage() {
     <div className="min-h-screen flex flex-col">
       <SiteHeader />
       <section className="border-b bg-secondary/30">
-        <div className="container py-8">
+        <div className="container py-6 sm:py-8">
           <p className="text-xs uppercase tracking-[0.2em] font-mono text-accent mb-2">Geo View</p>
-          <h1 className="font-display text-4xl font-bold">Project map</h1>
-          <p className="text-muted-foreground mt-2">{projects.length} geo-tagged projects across Nepal</p>
+          <h1 className="font-display text-3xl sm:text-4xl font-bold">Project map</h1>
+          <p className="text-muted-foreground mt-2 text-sm sm:text-base">{projects.length} geo-tagged projects across Nepal</p>
         </div>
       </section>
-      <div className="container py-6 flex-1">
-        <Card className="overflow-hidden h-[calc(100vh-280px)] min-h-[500px]">
+      <div className="container py-4 sm:py-6 flex-1">
+        <Card className="overflow-hidden h-[60vh] sm:h-[calc(100vh-280px)] sm:min-h-[500px]">
           <ProjectMap projects={projects} />
         </Card>
       </div>

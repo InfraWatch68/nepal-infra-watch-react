@@ -96,40 +96,40 @@ export default function ProjectRatings() {
       <div className="container py-6 space-y-4">
         {/* Sort + filter controls */}
         <Card className="p-4">
-          <div className="flex flex-wrap items-end gap-3">
-            <div className="space-y-1">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:flex lg:flex-wrap items-end gap-3">
+            <div className="space-y-1 w-full lg:w-auto">
               <label className="text-[10px] uppercase tracking-wider font-mono text-muted-foreground">Sort by</label>
               <Select value={sort} onValueChange={(v) => setSort(v as SortKey)}>
-                <SelectTrigger className="w-[210px]"><SelectValue /></SelectTrigger>
+                <SelectTrigger className="w-full lg:w-[210px]"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {SORT_OPTIONS.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
-            <div className="space-y-1">
+            <div className="space-y-1 w-full lg:w-auto">
               <label className="text-[10px] uppercase tracking-wider font-mono text-muted-foreground">Sector</label>
               <Select value={sectorFilter} onValueChange={setSectorFilter}>
-                <SelectTrigger className="w-[180px]"><SelectValue /></SelectTrigger>
+                <SelectTrigger className="w-full lg:w-[180px]"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All sectors</SelectItem>
                   {SECTORS.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
-            <div className="space-y-1">
+            <div className="space-y-1 w-full lg:w-auto">
               <label className="text-[10px] uppercase tracking-wider font-mono text-muted-foreground">Province</label>
               <Select value={provinceFilter} onValueChange={setProvinceFilter}>
-                <SelectTrigger className="w-[160px]"><SelectValue /></SelectTrigger>
+                <SelectTrigger className="w-full lg:w-[160px]"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All provinces</SelectItem>
                   {PROVINCES.map(p => <SelectItem key={p} value={p}>{p}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
-            <div className="space-y-1">
+            <div className="space-y-1 w-full lg:w-auto">
               <label className="text-[10px] uppercase tracking-wider font-mono text-muted-foreground">Status</label>
               <Select value={statusFilter} onValueChange={setStatusFilter}>
-                <SelectTrigger className="w-[160px]"><SelectValue /></SelectTrigger>
+                <SelectTrigger className="w-full lg:w-[160px]"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All statuses</SelectItem>
                   {Object.entries(STATUS_LABELS).map(([k, l]) => <SelectItem key={k} value={k}>{l}</SelectItem>)}

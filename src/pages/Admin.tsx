@@ -659,7 +659,7 @@ function ProjectList({ projects, onReview, onFetchNews, onGenerateBrief, onPushN
           const scheduled = p.published_at && new Date(p.published_at) > new Date();
           const selectable = true;
           return (
-            <div key={p.id} className="p-4 flex items-start justify-between gap-4">
+            <div key={p.id} className="p-3 sm:p-4 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-4">
               <div className="flex items-start gap-3 min-w-0 flex-1">
                 {selectable ? (
                   <Checkbox checked={sel.has(String(p.id))} onCheckedChange={() => toggle(String(p.id))} className="mt-1" aria-label="Select project" />
@@ -675,14 +675,14 @@ function ProjectList({ projects, onReview, onFetchNews, onGenerateBrief, onPushN
                     )}
                     {p.submitted_by_ai && <AiBadge tag={p.ai_tag} />}
                     {p.submitted_by_ai && <ConfidenceBadge score={p.confidence_score} />}
-                    <span className="text-xs text-muted-foreground">{p.sector} · {p.province ?? '—'} · {new Date(p.created_at).toLocaleDateString()}</span>
+                    <span className="text-[11px] sm:text-xs text-muted-foreground">{p.sector} · {p.province ?? '—'} · {new Date(p.created_at).toLocaleDateString()}</span>
                     <ReviewHistoryIcon targetTable="projects" targetId={p.id} />
                   </div>
-                  <Link to={`/projects/${p.slug}`} className="font-semibold hover:text-accent">{p.title}</Link>
+                  <Link to={`/projects/${p.slug}`} className="font-semibold hover:text-accent break-words">{p.title}</Link>
                   <p className="text-xs text-muted-foreground line-clamp-2 mt-1">{p.description}</p>
                 </div>
               </div>
-              <div className="flex gap-2 shrink-0 flex-wrap justify-end">
+              <div className="flex gap-2 shrink-0 flex-wrap justify-start sm:justify-end pl-7 sm:pl-0">
                 <VerifyDialog projectId={p.id} projectTitle={p.title} />
                 {scheduled && canPushNow && (
                   <Button size="sm" variant="default" onClick={() => onPushNow('projects', p.id)}>Push now</Button>

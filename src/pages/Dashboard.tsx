@@ -48,17 +48,17 @@ export default function Dashboard() {
     <div className="min-h-screen flex flex-col">
       <SiteHeader />
       <section className="border-b bg-secondary/30">
-        <div className="container py-8 flex items-center justify-between gap-6">
-          <div className="flex items-center gap-5 min-w-0">
-            <Avatar className="h-20 w-20 ring-4 ring-background shadow-md shrink-0">
+        <div className="container py-6 sm:py-8 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 sm:gap-6">
+          <div className="flex items-center gap-3 sm:gap-5 min-w-0">
+            <Avatar className="h-16 w-16 sm:h-20 sm:w-20 ring-4 ring-background shadow-md shrink-0">
               {profile?.avatar_url && <AvatarImage src={profile.avatar_url} alt={profile?.full_name ?? 'User'} />}
-              <AvatarFallback className="bg-accent/15 text-accent text-2xl font-bold">
+              <AvatarFallback className="bg-accent/15 text-accent text-xl sm:text-2xl font-bold">
                 {(profile?.full_name || user.email || '?').split(/[\s@._-]+/).filter(Boolean).slice(0, 2).map(s => s[0]?.toUpperCase()).join('') || '?'}
               </AvatarFallback>
             </Avatar>
             <div className="min-w-0">
               <p className="text-xs uppercase tracking-[0.2em] font-mono text-accent mb-1">Your workspace</p>
-              <h1 className="font-display text-3xl md:text-4xl font-bold truncate flex items-center gap-2">
+              <h1 className="font-display text-2xl sm:text-3xl md:text-4xl font-bold truncate flex items-center gap-2">
                 {profile?.full_name || user.email?.split('@')[0] || 'Welcome'}
                 <UserBadge userId={user.id} />
               </h1>
@@ -67,14 +67,14 @@ export default function Dashboard() {
               )}
             </div>
           </div>
-          <Button className="bg-accent hover:bg-accent/90 text-accent-foreground shrink-0" asChild>
+          <Button className="bg-accent hover:bg-accent/90 text-accent-foreground shrink-0 w-full sm:w-auto" asChild>
             <Link to="/dashboard/submit"><Plus className="h-4 w-4" /> New project</Link>
           </Button>
         </div>
       </section>
 
-      <div className="container py-8 space-y-6">
-        <div className="grid md:grid-cols-4 gap-4">
+      <div className="container py-6 sm:py-8 space-y-6">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
           <StatCard icon={FileText} label="Total submitted" value={stats.total} />
           <StatCard icon={Clock} label="Pending review" value={stats.pending} />
           <StatCard icon={CheckCircle2} label="Approved" value={stats.approved} color="text-success" />

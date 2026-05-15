@@ -343,9 +343,9 @@ export default function SubmitProject() {
               </div>
               <p className="text-xs text-muted-foreground">Paste links to news, government notices, or reports that back up the data above. At least one is helpful for review.</p>
               {sources.map((s, i) => (
-                <div key={i} className="grid md:grid-cols-[1fr_1fr_140px_auto] gap-2 items-start">
-                  <Input placeholder="https://…" type="url" value={s.url} onChange={e => setSource(i, { url: e.target.value })} />
-                  <Input placeholder="Source title" maxLength={200} value={s.title} onChange={e => setSource(i, { title: e.target.value })} />
+                <div key={i} className="grid grid-cols-[1fr_auto] sm:grid-cols-2 md:grid-cols-[1fr_1fr_140px_auto] gap-2 items-start">
+                  <Input className="col-span-2 sm:col-span-1 md:col-span-1" placeholder="https://…" type="url" value={s.url} onChange={e => setSource(i, { url: e.target.value })} />
+                  <Input className="col-span-2 sm:col-span-1 md:col-span-1" placeholder="Source title" maxLength={200} value={s.title} onChange={e => setSource(i, { title: e.target.value })} />
                   <Select value={s.source_type} onValueChange={v => setSource(i, { source_type: v })}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>{SOURCE_TYPES.map(t => <SelectItem key={t} value={t}>{t.replace(/_/g, ' ')}</SelectItem>)}</SelectContent>

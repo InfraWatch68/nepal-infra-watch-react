@@ -273,8 +273,8 @@ export default function Analytics() {
             <ResponsiveContainer width="100%" height={180}>
               <AreaChart data={activityData} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
-                <XAxis dataKey="day" tick={{ fontSize: 10 }} interval={5} />
-                <YAxis tick={{ fontSize: 10 }} allowDecimals={false} />
+                <XAxis dataKey="day" tick={{ fontSize: 9 }} interval="preserveStartEnd" minTickGap={28} />
+                <YAxis tick={{ fontSize: 9 }} width={28} allowDecimals={false} />
                 <Tooltip contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))' }} />
                 <Area type="monotone" dataKey="projects" stackId="1" fill="hsl(var(--primary))" stroke="hsl(var(--primary))" fillOpacity={0.7} />
                 <Area type="monotone" dataKey="updates"  stackId="1" fill="hsl(var(--accent))"  stroke="hsl(var(--accent))"  fillOpacity={0.6} />

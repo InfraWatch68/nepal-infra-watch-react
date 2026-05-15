@@ -61,7 +61,7 @@ export default function Home() {
               {liveDiscovery && <span className="h-1.5 w-1.5 rounded-full bg-accent animate-pulse" />}
               {liveDiscovery ? 'Live · Public Beta' : 'Public Beta'}
             </div>
-            <h1 className="font-display text-5xl md:text-6xl lg:text-7xl font-bold leading-[1.05] text-balance">
+            <h1 className="font-display text-4xl sm:text-5xl md:text-6xl lg:text-7xl font-bold leading-[1.05] text-balance">
               Every road, bridge, and rupee.<br/>
               <span className="text-accent italic">Watched.</span>
             </h1>
@@ -74,7 +74,7 @@ export default function Home() {
                 <Link to="/map">Open the map</Link>
               </Button>
             </div>
-            <div className="grid grid-cols-4 gap-4 pt-8 max-w-xl border-t border-primary-foreground/15">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-8 max-w-xl border-t border-primary-foreground/15">
               {[
                 { v: stats.total, l: 'Tracked' },
                 { v: stats.inProgress, l: 'Active' },
@@ -96,7 +96,7 @@ export default function Home() {
 
       {/* Feature strip */}
       <section className="border-b">
-        <div className="container py-10 grid md:grid-cols-4 gap-6">
+        <div className="container py-10 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-6">
           {[
             { i: MapPinned, t: 'Geo-tagged', d: 'Every project mapped from coordinate strings.' },
             { i: ShieldCheck, t: 'Source-verified', d: 'Citations vetted by reviewers.' },
@@ -135,7 +135,7 @@ export default function Home() {
             </div>
           </Card>
         ) : (
-          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
             {recent.map(p => <ProjectCard key={p.id} p={p} />)}
           </div>
         )}
@@ -147,7 +147,7 @@ export default function Home() {
 
       {/* CTA */}
       <section className="border-t bg-secondary/40">
-        <div className="container py-16 grid md:grid-cols-2 gap-10 items-center">
+        <div className="container py-16 grid grid-cols-1 md:grid-cols-2 gap-10 items-center">
           <div>
             <h2 className="font-display text-3xl md:text-4xl font-bold mb-4 text-balance">
               Spotted a project we're missing?

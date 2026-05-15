@@ -89,11 +89,11 @@ export function SherlockManager() {
       </div>
 
       <Tabs defaultValue="queue" className="w-full">
-        <TabsList className="w-full grid grid-cols-4 h-auto">
+        <TabsList className="w-full grid grid-cols-2 sm:grid-cols-4 h-auto gap-1">
           <TabsTrigger value="queue" className="text-xs"><ListChecks className="h-3.5 w-3.5 mr-1" />Queue</TabsTrigger>
-          <TabsTrigger value="geo" className="text-xs"><MapPin className="h-3.5 w-3.5 mr-1" />Discover by location</TabsTrigger>
-          <TabsTrigger value="topic" className="text-xs"><FilterIcon className="h-3.5 w-3.5 mr-1" />Topic filters</TabsTrigger>
-          <TabsTrigger value="sweeps" className="text-xs"><Clock className="h-3.5 w-3.5 mr-1" />Scheduled sweeps</TabsTrigger>
+          <TabsTrigger value="geo" className="text-xs"><MapPin className="h-3.5 w-3.5 mr-1" /><span className="truncate">Discover by location</span></TabsTrigger>
+          <TabsTrigger value="topic" className="text-xs"><FilterIcon className="h-3.5 w-3.5 mr-1" /><span className="truncate">Topic filters</span></TabsTrigger>
+          <TabsTrigger value="sweeps" className="text-xs"><Clock className="h-3.5 w-3.5 mr-1" /><span className="truncate">Scheduled sweeps</span></TabsTrigger>
         </TabsList>
         <TabsContent value="queue" className="mt-3"><QueueTab /></TabsContent>
         <TabsContent value="geo" className="mt-3"><GeoDiscoverTab /></TabsContent>
@@ -429,7 +429,7 @@ function GeoDiscoverTab() {
 
   return (
     <div className="space-y-3">
-      <div className="grid sm:grid-cols-3 gap-2">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
         <div>
           <Label className="text-xs">Province *</Label>
           <Select value={province} onValueChange={setProvince}>
@@ -870,7 +870,7 @@ function SweepsTab() {
                 else { setDraftCustomMode(false); setDraftCadencePreset(v); }
               }}
             >
-              <SelectTrigger className="min-w-[260px]"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="w-full sm:min-w-[260px] sm:w-auto"><SelectValue /></SelectTrigger>
               <SelectContent>
                 {CADENCE_PRESETS.map(p => (
                   <SelectItem key={p.value} value={p.value}>{p.label} <span className="text-[10px] text-muted-foreground ml-1 font-mono">{p.value}</span></SelectItem>

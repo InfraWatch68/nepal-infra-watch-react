@@ -43,8 +43,8 @@ export function SiteHeader() {
             <div className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-accent ring-2 ring-background" />
           </div>
           <div className="leading-tight">
-            <div className="font-display text-lg font-bold tracking-tight">Nepal Infra Watch</div>
-            <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground -mt-0.5">Public Project Tracker</div>
+            <div className="font-display text-base sm:text-lg font-bold tracking-tight">Nepal Infra Watch</div>
+            <div className="text-[10px] sm:text-[11px] uppercase tracking-wider sm:tracking-[0.18em] text-muted-foreground -mt-0.5">Public Project Tracker</div>
           </div>
         </Link>
 
@@ -101,7 +101,12 @@ export function SiteHeader() {
           )}
         </div>
 
-        <button className="md:hidden p-2" onClick={() => setOpen(!open)}>
+        <button
+          className="md:hidden p-2 -mr-2 rounded-md hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          onClick={() => setOpen(!open)}
+          aria-label={open ? 'Close menu' : 'Open menu'}
+          aria-expanded={open}
+        >
           {open ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
         </button>
       </div>

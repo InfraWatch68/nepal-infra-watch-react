@@ -145,8 +145,8 @@ export default function Browse() {
 
       <div className="container py-8 grid lg:grid-cols-[1fr_280px] gap-8">
         <div>
-          <Card className="p-4 mb-6 grid md:grid-cols-3 lg:grid-cols-6 gap-3">
-            <div className="md:col-span-3 lg:col-span-2 relative">
+          <Card className="p-4 mb-6 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+            <div className="sm:col-span-2 md:col-span-3 lg:col-span-2 relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input value={q} onChange={e => setQ(e.target.value)} placeholder="Search title, contractor, agency..." className="pl-9" />
             </div>
@@ -186,7 +186,7 @@ export default function Browse() {
                 </SelectItem>
                 {(munQuery.data ?? []).map(m => (
                   <SelectItem key={m.id} value={m.name}>
-                    {m.name} <span className="text-[10px] text-muted-foreground ml-1">({m.kind.replace('_', ' ')})</span>
+                    {m.name} <span className="text-[10px] sm:text-xs text-muted-foreground ml-1">({m.kind.replace('_', ' ')})</span>
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -208,7 +208,7 @@ export default function Browse() {
               type="button"
               onClick={() => setRastraOnly(v => !v)}
               className={cn(
-                "flex items-center gap-2 px-3 py-2 rounded-md border text-sm transition lg:col-span-1 md:col-span-3",
+                "flex items-center justify-center gap-2 px-3 py-2 rounded-md border text-sm transition sm:col-span-2 md:col-span-3 lg:col-span-1",
                 rastraOnly ? "bg-accent text-accent-foreground border-accent" : "hover:bg-muted"
               )}
               title="Show only Rastra Gaurav (national-pride) projects"

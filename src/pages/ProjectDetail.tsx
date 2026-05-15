@@ -920,7 +920,7 @@ function ProjectImageGallery({ images, title }: { images: string[]; title: strin
                 type="button"
                 onClick={(e) => { e.preventDefault(); prev(); }}
                 aria-label="Previous photo"
-                className="absolute left-3 top-1/2 -translate-y-1/2 h-10 w-10 rounded-full bg-background/85 hover:bg-background backdrop-blur-sm flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm"
+                className="absolute left-3 top-1/2 -translate-y-1/2 h-10 w-10 rounded-full bg-background/85 hover:bg-background backdrop-blur-sm flex items-center justify-center opacity-70 sm:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity shadow-sm"
               >
                 <ChevronLeft className="h-5 w-5" />
               </button>
@@ -928,7 +928,7 @@ function ProjectImageGallery({ images, title }: { images: string[]; title: strin
                 type="button"
                 onClick={(e) => { e.preventDefault(); next(); }}
                 aria-label="Next photo"
-                className="absolute right-3 top-1/2 -translate-y-1/2 h-10 w-10 rounded-full bg-background/85 hover:bg-background backdrop-blur-sm flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm"
+                className="absolute right-3 top-1/2 -translate-y-1/2 h-10 w-10 rounded-full bg-background/85 hover:bg-background backdrop-blur-sm flex items-center justify-center opacity-70 sm:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity shadow-sm"
               >
                 <ChevronRight className="h-5 w-5" />
               </button>

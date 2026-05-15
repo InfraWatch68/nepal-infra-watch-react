@@ -68,11 +68,11 @@ export default function Compare() {
           ) : (
             <>
               <Card className="overflow-x-auto">
-                <table className="w-full text-sm">
+                <table className="w-full text-sm min-w-[480px]">
                   <thead className="bg-muted/50">
                     <tr>
-                      <th className="text-left p-3 font-semibold w-40">Metric</th>
-                      {chosen.map(p => <th key={p.id} className="text-left p-3 font-semibold">{p.title}</th>)}
+                      <th className="text-left p-2 sm:p-3 font-semibold w-28 sm:w-40">Metric</th>
+                      {chosen.map(p => <th key={p.id} className="text-left p-2 sm:p-3 font-semibold min-w-[140px]">{p.title}</th>)}
                     </tr>
                   </thead>
                   <tbody>
@@ -89,8 +89,8 @@ export default function Compare() {
                       ['Completion', (p: any) => p.expected_completion ?? '—'],
                     ].map(([label, fn]: any) => (
                       <tr key={label} className="border-t">
-                        <td className="p-3 text-muted-foreground font-mono text-xs uppercase tracking-wider">{label}</td>
-                        {chosen.map(p => <td key={p.id} className="p-3">{fn(p)}</td>)}
+                        <td className="p-2 sm:p-3 text-muted-foreground font-mono text-[10px] sm:text-xs uppercase tracking-wider">{label}</td>
+                        {chosen.map(p => <td key={p.id} className="p-2 sm:p-3 break-words">{fn(p)}</td>)}
                       </tr>
                     ))}
                   </tbody>

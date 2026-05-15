@@ -75,7 +75,7 @@ export function ActivityDashboardTab() {
   return (
     <div className="space-y-4">
       {/* Headline stats — yesterday's row, mirrors the dashboard's "what happened?" framing. */}
-      <div className="grid md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Stat label="New projects (today)" value={todayRow?.new_projects ?? 0} />
         <Stat label="News / updates (today)" value={todayRow?.new_updates ?? 0} />
         <Stat label="Detail rows (today)" value={todayRow?.new_detail_rows ?? 0} />
