@@ -5,6 +5,8 @@ import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { useAuth } from '@/hooks/useAuth';
 import { Loader2, ChevronDown, ChevronRight, Check, RefreshCw, ExternalLink } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
@@ -25,6 +27,8 @@ type ProjectRow = {
   total_pending: number;
   total_pending_eligible: number;
   buckets: Record<BucketName, BucketStats>;
+  progress_percent: number | null;
+  progress_stage: string | null;
 };
 
 // Fixed display order for the 9 buckets. Sources/updates render last because
@@ -62,7 +66,95 @@ const StatChips = ({ approved, pending }: { approved: number; pending: number })
   </span>
 );
 
+const EditProgressPopover = ({
+  row,
+  onSaved,
+}: {
+  row: ProjectRow;
+  onSaved: (projectId: number, progress_percent: number | null, progress_stage: string | null) => void;
+}) => {
+  const [open, setOpen] = useState(false);
+  const [percent, setPercent] = useState(row.progress_percent == null ? '' : String(row.progress_percent));
+  const [stage, setStage] = useState(row.progress_stage ?? '');
+  const [saving, setSaving] = useState(false);
+
+  const reset = () => {
+    setPercent(row.progress_percent == null ? '' : String(row.progress_percent));
+    setStage(row.progress_stage ?? '');
+  };
+
+  const save = async () => {
+    const trimmedStage = stage.trim();
+    const nextPercent = percent === '' ? null : Math.max(0, Math.min(100, Number(percent)));
+    const nextStage = trimmedStage === '' ? null : trimmedStage;
+
+    if (percent !== '' && !Number.isFinite(Number(percent))) {
+      toast.error('Progress percent must be a number.');
+      return;
+    }
+
+    setSaving(true);
+    const { error } = await supabase
+      .from('projects')
+      .update({ progress_percent: nextPercent, progress_stage: nextStage })
+      .eq('id', row.project_id);
+    setSaving(false);
+
+    if (error) {
+      toast.error(error.message);
+      return;
+    }
+
+    onSaved(row.project_id, nextPercent, nextStage);
+    toast.success('Progress updated');
+    setOpen(false);
+  };
+
+  return (
+    <Popover open={open} onOpenChange={(next) => { setOpen(next); if (next) reset(); }}>
+      <PopoverTrigger asChild>
+        <Button size="sm" variant="ghost" className="h-6 px-2 text-[10px]">
+          Edit progress
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-[min(92vw,28rem)] space-y-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <label className="space-y-1 text-[10px] font-medium text-muted-foreground">
+            Progress %
+            <Input
+              type="number"
+              min={0}
+              max={100}
+              step={1}
+              value={percent}
+              onChange={(e) => setPercent(e.target.value)}
+              className="h-8 text-xs"
+            />
+          </label>
+          <label className="space-y-1 text-[10px] font-medium text-muted-foreground">
+            Stage
+            <Input
+              type="text"
+              maxLength={60}
+              value={stage}
+              onChange={(e) => setStage(e.target.value)}
+              className="h-8 text-xs"
+            />
+          </label>
+        </div>
+        <div className="flex justify-end">
+          <Button size="sm" className="h-7 text-xs" onClick={save} disabled={saving}>
+            {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            Save
+          </Button>
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+};
+
 export function ProjectModerationTab() {
+  const { isReviewer } = useAuth();
   const [rows, setRows] = useState<ProjectRow[]>([]);
   const [threshold, setThreshold] = useState<number>(0.85);
   const [loading, setLoading] = useState<boolean>(true);
@@ -73,9 +165,36 @@ export function ProjectModerationTab() {
   const load = useCallback(async () => {
     setLoading(true);
     const { data, error } = await supabase.rpc('project_moderation_summary', { p_threshold: threshold });
+    if (error) {
+      setLoading(false);
+      toast.error(`Load failed: ${error.message}`);
+      return;
+    }
+
+    const summaryRows = (data ?? []) as ProjectRow[];
+    const ids = summaryRows.map(r => r.project_id);
+    let progressByProject = new Map<number, { progress_percent: number | null; progress_stage: string | null }>();
+    if (ids.length > 0) {
+      const { data: progressRows, error: progressError } = await supabase
+        .from('projects')
+        .select('id, progress_percent, progress_stage')
+        .in('id', ids);
+      if (progressError) {
+        toast.error(`Progress load failed: ${progressError.message}`);
+      } else {
+        progressByProject = new Map((progressRows ?? []).map(p => [
+          p.id,
+          { progress_percent: p.progress_percent, progress_stage: p.progress_stage },
+        ]));
+      }
+    }
+
     setLoading(false);
-    if (error) { toast.error(`Load failed: ${error.message}`); return; }
-    setRows((data ?? []) as ProjectRow[]);
+    setRows(summaryRows.map(r => ({
+      ...r,
+      progress_percent: progressByProject.get(r.project_id)?.progress_percent ?? null,
+      progress_stage: progressByProject.get(r.project_id)?.progress_stage ?? null,
+    })));
   }, [threshold]);
 
   useEffect(() => { load(); }, [load]);
@@ -86,6 +205,12 @@ export function ProjectModerationTab() {
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
+  };
+
+  const updateProgressRow = (projectId: number, progress_percent: number | null, progress_stage: string | null) => {
+    setRows(prev => prev.map(r => (
+      r.project_id === projectId ? { ...r, progress_percent, progress_stage } : r
+    )));
   };
 
   // Aggregate totals across every approved project, shown in the top strip.
@@ -206,6 +331,9 @@ export function ProjectModerationTab() {
                   <Link to={`/projects/${r.slug}`} target="_blank" rel="noreferrer" className="text-muted-foreground hover:text-accent">
                     <ExternalLink className="h-3 w-3" />
                   </Link>
+                  {isReviewer && (
+                    <EditProgressPopover row={r} onSaved={updateProgressRow} />
+                  )}
                   {r.total_pending_eligible > 0 && (
                     <Button
                       size="sm"
