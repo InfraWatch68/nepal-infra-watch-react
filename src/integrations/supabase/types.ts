@@ -1129,8 +1129,11 @@ export type Database = {
           ai_tag: string | null
           approval_status: string
           confidence_score: number | null
+          cited_at: string | null
           created_at: string | null
           id: number
+          progress_note: string | null
+          progress_percent: number | null
           project_id: number | null
           published_at: string | null
           review_notes: string | null
@@ -1147,8 +1150,11 @@ export type Database = {
           ai_tag?: string | null
           approval_status?: string
           confidence_score?: number | null
+          cited_at?: string | null
           created_at?: string | null
           id?: number
+          progress_note?: string | null
+          progress_percent?: number | null
           project_id?: number | null
           published_at?: string | null
           review_notes?: string | null
@@ -1165,8 +1171,11 @@ export type Database = {
           ai_tag?: string | null
           approval_status?: string
           confidence_score?: number | null
+          cited_at?: string | null
           created_at?: string | null
           id?: number
+          progress_note?: string | null
+          progress_percent?: number | null
           project_id?: number | null
           published_at?: string | null
           review_notes?: string | null
@@ -1278,9 +1287,12 @@ export type Database = {
           author_id: string | null
           confidence_score: number | null
           content: string | null
+          cited_at: string | null
           created_at: string | null
           id: number
           image_url: string | null
+          progress_note: string | null
+          progress_percent: number | null
           project_id: number | null
           published: boolean | null
           published_at: string | null
@@ -1299,9 +1311,12 @@ export type Database = {
           author_id?: string | null
           confidence_score?: number | null
           content?: string | null
+          cited_at?: string | null
           created_at?: string | null
           id?: number
           image_url?: string | null
+          progress_note?: string | null
+          progress_percent?: number | null
           project_id?: number | null
           published?: boolean | null
           published_at?: string | null
@@ -1320,9 +1335,12 @@ export type Database = {
           author_id?: string | null
           confidence_score?: number | null
           content?: string | null
+          cited_at?: string | null
           created_at?: string | null
           id?: number
           image_url?: string | null
+          progress_note?: string | null
+          progress_percent?: number | null
           project_id?: number | null
           published?: boolean | null
           published_at?: string | null
@@ -2142,10 +2160,3 @@ export const Constants = {
     },
   },
 } as const
-npx : <claude-code-hint v="1" type="plugin" value="supabase@claude-plugins-official" />
-At line:13 char:1
-+ npx supabase gen types typescript --project-id vlioybqqswbohdhpnjym 2 ...
-+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    + CategoryInfo          : NotSpecified: (<claude-code-hi...ns-official" />:String) [], RemoteException
-    + FullyQualifiedErrorId : NativeCommandError
- 

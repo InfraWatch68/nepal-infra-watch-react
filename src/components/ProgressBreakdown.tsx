@@ -13,6 +13,14 @@ type ReportedSignal = {
   source: string | null;
   quote: string | null;
 };
+type SourceCitedSignal = {
+  method: 'source_cited';
+  percent: number;
+  citedAt: string | null;
+  sourceUrl: string | null;
+  sourceTitle: string | null;
+  note: string | null;
+};
 type ManualSignal = {
   method: 'manual';
   percent: number;
@@ -30,7 +38,7 @@ type StatusSignal = {
   status: string;
 };
 
-type ProgressSignal = ReportedSignal | ManualSignal | MilestoneSignal | StatusSignal;
+type ProgressSignal = SourceCitedSignal | ReportedSignal | ManualSignal | MilestoneSignal | StatusSignal;
 
 export type ProgressResult = {
   value: number | null;
@@ -49,7 +57,9 @@ const STATUS_PCT: Record<string, number | null> = {
   cancelled: null,
 };
 
-export function computeProgress(project: any, approvedMilestones: any[]): ProgressResult {
+const signalDate = (date: string | null | undefined) => date ? date.slice(0, 10) : null;
+
+export function computeProgress(project: any, approvedMilestones: any[], sources: any[] = []): ProgressResult {
   const signals: ProgressSignal[] = [];
 
   // Status signal — always present as the floor
@@ -60,6 +70,27 @@ export function computeProgress(project: any, approvedMilestones: any[]): Progre
     const completed = approvedMilestones.filter((m: any) => m.status === 'completed').length;
     const pct = Math.round((completed / approvedMilestones.length) * 100);
     signals.push({ method: 'milestones', percent: pct, completed, total: approvedMilestones.length });
+  }
+
+  const sourceCited = sources
+    .filter((s: any) =>
+      typeof s.progress_percent === 'number'
+      && (s.approval_status === 'approved' || s.approval_status == null)
+    )
+    .sort((a: any, b: any) => {
+      const ta = signalDate(a.cited_at) ?? signalDate(a.created_at) ?? '';
+      const tb = signalDate(b.cited_at) ?? signalDate(b.created_at) ?? '';
+      return tb.localeCompare(ta);
+    })[0];
+  if (sourceCited) {
+    signals.push({
+      method: 'source_cited',
+      percent: sourceCited.progress_percent,
+      citedAt: signalDate(sourceCited.cited_at) ?? signalDate(sourceCited.created_at),
+      sourceUrl: sourceCited.url ?? null,
+      sourceTitle: sourceCited.title ?? null,
+      note: sourceCited.progress_note ?? null,
+    });
   }
 
   // Manual curator entry
@@ -86,9 +117,14 @@ export function computeProgress(project: any, approvedMilestones: any[]): Progre
     return { value: null, primary: null, signals };
   }
 
-  // Priority: reported > manual > milestones > status heuristic (if non-null)
+  const sourceSignal = signals.find(s => s.method === 'source_cited') as SourceCitedSignal | undefined;
+  const reportedSignal = signals.find(s => s.method === 'reported') as ReportedSignal | undefined;
+  const reportedIsNewer = !!reportedSignal?.asOf && !!sourceSignal?.citedAt && reportedSignal.asOf > sourceSignal.citedAt;
+
+  // Priority: source-cited > reported > manual > milestones > status heuristic (if non-null)
   const primary: ProgressSignal | null =
-    signals.find(s => s.method === 'reported') ??
+    (reportedIsNewer ? reportedSignal : sourceSignal) ??
+    (reportedIsNewer ? sourceSignal : reportedSignal) ??
     signals.find(s => s.method === 'manual') ??
     signals.find(s => s.method === 'milestones') ??
     signals.find(s => s.method === 'status' && (s as StatusSignal).percent != null) ??
@@ -100,13 +136,20 @@ export function computeProgress(project: any, approvedMilestones: any[]): Progre
 // ─── Signal display helpers ───────────────────────────────────────────────────
 
 function methodLabel(method: string) {
-  return method === 'reported' ? 'AI-reported'
+  return method === 'source_cited' ? 'Source-cited progress'
+    : method === 'reported' ? 'AI-reported'
     : method === 'manual' ? 'Manual entry'
     : method === 'milestones' ? 'Milestone completion'
     : 'Status inference';
 }
 
 function methodDescription(s: ProgressSignal): string {
+  if (s.method === 'source_cited') {
+    const parts = ['Cited by an approved source'];
+    if (s.sourceTitle) parts.push(`"${s.sourceTitle}"`);
+    if (s.citedAt) parts.push(`on ${s.citedAt}`);
+    return parts.join(' ');
+  }
   if (s.method === 'reported') {
     const parts = ['Extracted by AI from a dated source'];
     if (s.asOf) parts.push(`as of ${s.asOf}`);
@@ -140,14 +183,21 @@ interface ProgressBreakdownProps {
   project: any;
   milestones: any[];   // all loaded milestones (approved + pending for reviewers)
   updates: any[];      // all loaded updates
+  sources: any[];      // all loaded sources
 }
 
-export function ProgressBreakdown({ project, milestones, updates }: ProgressBreakdownProps) {
+export function ProgressBreakdown({ project, milestones, updates, sources }: ProgressBreakdownProps) {
   const [open, setOpen] = useState(false);
 
   // Use only approved milestones for computing the score
   const approvedMilestones = milestones.filter((m: any) => m.status === 'completed' || m.approval_status === 'approved' || m.approval_status == null);
-  const progress = computeProgress(project, approvedMilestones);
+  const progress = computeProgress(project, approvedMilestones, sources);
+  const sourceSignal = progress.signals.find((s): s is SourceCitedSignal => s.method === 'source_cited');
+  const milestoneSummary = milestones.length > 0 ? `${milestones.filter((m: any) => m.status === 'completed').length}/${milestones.length} milestones done` : null;
+  const sourceSummary = sourceSignal?.citedAt
+    ? `last source: ${sourceSignal.percent}% on ${sourceSignal.citedAt}${sourceSignal.sourceTitle ? ` (${sourceSignal.sourceTitle})` : ''}`
+    : null;
+  const heroSummary = [milestoneSummary, sourceSummary].filter(Boolean).join(' · ');
 
   // Recent updates that mention progress (progress type first, then all)
   const progressUpdates = updates
@@ -190,6 +240,11 @@ export function ProgressBreakdown({ project, milestones, updates }: ProgressBrea
             ) : null
           )}
         </div>
+        {heroSummary && (
+          <p className="text-[10px] text-primary-foreground/60 mt-1 leading-snug">
+            {heroSummary}
+          </p>
+        )}
         <p className="text-[10px] text-primary-foreground/60 mt-1.5 leading-snug group-hover:text-primary-foreground/80 transition-colors">
           {progress.primary
             ? methodLabel(progress.primary.method)
@@ -228,9 +283,25 @@ export function ProgressBreakdown({ project, milestones, updates }: ProgressBrea
                   "{(progress.primary as ReportedSignal).quote}"
                 </blockquote>
               )}
+              {progress.primary?.method === 'source_cited' && (progress.primary as SourceCitedSignal).note && (
+                <blockquote className="mt-2 border-l-2 border-accent/40 pl-2 text-[11px] italic text-muted-foreground">
+                  "{(progress.primary as SourceCitedSignal).note}"
+                </blockquote>
+              )}
               {progress.primary?.method === 'reported' && (progress.primary as ReportedSignal).source && (
                 <a
                   href={(progress.primary as ReportedSignal).source!}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-1.5 text-[11px] text-accent hover:underline inline-flex items-center gap-1"
+                  onClick={e => e.stopPropagation()}
+                >
+                  Source <ExternalLink className="h-3 w-3" />
+                </a>
+              )}
+              {progress.primary?.method === 'source_cited' && (progress.primary as SourceCitedSignal).sourceUrl && (
+                <a
+                  href={(progress.primary as SourceCitedSignal).sourceUrl!}
                   target="_blank"
                   rel="noreferrer"
                   className="mt-1.5 text-[11px] text-accent hover:underline inline-flex items-center gap-1"
@@ -263,6 +334,17 @@ export function ProgressBreakdown({ project, milestones, updates }: ProgressBrea
                         )}
                       </div>
                       <p className="text-muted-foreground leading-snug">{methodDescription(s)}</p>
+                      {s.method === 'source_cited' && s.sourceUrl && (
+                        <a
+                          href={s.sourceUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="mt-1 text-[11px] text-accent hover:underline inline-flex items-center gap-1"
+                          onClick={e => e.stopPropagation()}
+                        >
+                          Source <ExternalLink className="h-3 w-3" />
+                        </a>
+                      )}
                     </div>
                     <span className="font-mono font-semibold shrink-0 tabular-nums">
                       {s.percent != null ? `${s.percent}%` : '—'}

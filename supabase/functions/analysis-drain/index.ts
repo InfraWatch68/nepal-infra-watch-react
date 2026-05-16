@@ -897,6 +897,11 @@ async function insertAll(admin: any, projectId: number, parsed: any, hitDateMap:
   {
     const TYPES = ["news","government","audit","procurement","donor","academic","other","article"];
     const candidates = (Array.isArray(parsed.additional_sources) ? parsed.additional_sources : []).slice(0, 12);
+    const rpPercent = typeof parsed.reported_progress_percent === "number" && Number.isFinite(parsed.reported_progress_percent) && parsed.reported_progress_percent >= 0 && parsed.reported_progress_percent <= 100
+      ? Math.round(parsed.reported_progress_percent) : null;
+    const rpAsOf = validDate(parsed.reported_progress_as_of) ? parsed.reported_progress_as_of : null;
+    const rpSourceUrl = strOrNull(parsed.reported_progress_source_url);
+    const rpQuote = strOrNull(parsed.reported_progress_quote)?.slice(0, 200) ?? null;
     inserted["project_sources"] = 0;
     deduped["project_sources"] = 0;
     for (const a of candidates) {
@@ -917,6 +922,9 @@ async function insertAll(admin: any, projectId: number, parsed: any, hitDateMap:
         submitted_by_ai: true,
         approval_status: "pending",
         confidence_score: clampConfidence(a.confidence_score),
+        progress_percent: rpPercent != null && rpSourceUrl && normUrl(rpSourceUrl) === nUrl ? rpPercent : null,
+        cited_at: rpPercent != null && rpSourceUrl && normUrl(rpSourceUrl) === nUrl ? rpAsOf : null,
+        progress_note: rpPercent != null && rpSourceUrl && normUrl(rpSourceUrl) === nUrl ? rpQuote : null,
       });
       if (error) { errs.push(`project_sources: ${error.message}`); continue; }
       inserted["project_sources"] += 1;

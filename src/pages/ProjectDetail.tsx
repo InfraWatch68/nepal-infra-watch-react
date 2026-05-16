@@ -352,7 +352,7 @@ export default function ProjectDetail() {
               <KV icon={Building2} label="Implementing agency" value={p.implementing_agency ?? aggregates.implementingAgency ?? '—'} />
               <KV icon={HardHat} label="Contractor" value={p.contractor ?? aggregates.contractor ?? '—'} />
               <KV icon={Calendar} label="Timeline" value={`${p.start_date ?? aggregates.earliestDate ?? 'TBD'} → ${p.expected_completion ?? aggregates.latestDate ?? 'TBD'}`} />
-              <ProgressBreakdown project={p} milestones={milestones} updates={updates} />
+              <ProgressBreakdown project={p} milestones={milestones} updates={updates} sources={sources} />
             </Card>
           </div>
         </div>

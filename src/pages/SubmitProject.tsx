@@ -34,7 +34,7 @@ const ESIA_OPTIONS = ['not_started','in_progress','iee_approved','eia_approved',
 const PROCUREMENT_METHODS = ['ICB (international)','NCB (national)','Limited','Direct','Framework','PPP','Two-stage','Single-source','Other'];
 const SOURCE_TYPES = ['article','government','report','social_media','blog','official_document','other'];
 
-type SourceRow = { url: string; title: string; source_type: string };
+type SourceRow = { url: string; title: string; source_type: string; progress_percent?: string; cited_at?: string };
 
 const schema = z.object({
   title: z.string().trim().min(4).max(200),
@@ -102,9 +102,15 @@ export default function SubmitProject() {
         ...data,
         coords: (data.latitude != null && data.longitude != null) ? `${data.latitude}, ${data.longitude}` : '',
       });
-      const { data: src } = await supabase.from('project_sources').select('url, title, source_type').eq('project_id', editId);
+      const { data: src } = await supabase.from('project_sources').select('url, title, source_type, progress_percent, cited_at').eq('project_id', editId);
       if ((src ?? []).length > 0) {
-        setSources((src ?? []).map((s: any) => ({ url: s.url ?? '', title: s.title ?? '', source_type: s.source_type ?? 'article' })));
+        setSources((src ?? []).map((s: any) => ({
+          url: s.url ?? '',
+          title: s.title ?? '',
+          source_type: s.source_type ?? 'article',
+          progress_percent: s.progress_percent != null ? String(s.progress_percent) : '',
+          cited_at: s.cited_at ?? '',
+        })));
       }
 
       // Load this user's editable detail rows (pending or changes_requested).
@@ -146,12 +152,22 @@ export default function SubmitProject() {
 
     // Validate the source rows: any row with a URL also needs a title.
     const cleanSources = sources
-      .map(s => ({ url: s.url.trim(), title: s.title.trim(), source_type: s.source_type }))
+      .map(s => ({
+        url: s.url.trim(),
+        title: s.title.trim(),
+        source_type: s.source_type,
+        progress_percent: (s.progress_percent ?? '').trim(),
+        cited_at: (s.cited_at ?? '').trim(),
+      }))
       .filter(s => s.url.length > 0);
     for (const s of cleanSources) {
       try { new URL(s.url); }
       catch { return toast.error(`Source URL is invalid: ${s.url}`); }
       if (!s.title) return toast.error('Each source needs a short title');
+      if (s.progress_percent !== '') {
+        const progress = Number(s.progress_percent);
+        if (!Number.isFinite(progress) || progress < 0 || progress > 100) return toast.error('Source progress must be between 0 and 100');
+      }
     }
 
     setLoading(true);
@@ -197,6 +213,8 @@ export default function SubmitProject() {
         title: s.title,
         url: s.url,
         source_type: s.source_type,
+        progress_percent: s.progress_percent === '' ? null : Number(s.progress_percent),
+        cited_at: s.cited_at || null,
         verified: false,
         approval_status: 'pending',
         submitted_by_ai: false,
@@ -352,13 +370,15 @@ export default function SubmitProject() {
               </div>
               <p className="text-xs text-muted-foreground">Paste links to news, government notices, or reports that back up the data above. At least one is helpful for review.</p>
               {sources.map((s, i) => (
-                <div key={i} className="grid grid-cols-[1fr_auto] sm:grid-cols-2 md:grid-cols-[1fr_1fr_140px_auto] gap-2 items-start">
+                <div key={i} className="grid grid-cols-[1fr_auto] sm:grid-cols-2 lg:grid-cols-[1fr_1fr_140px_110px_150px_auto] gap-2 items-start">
                   <Input className="col-span-2 sm:col-span-1 md:col-span-1" placeholder="https://…" type="url" value={s.url} onChange={e => setSource(i, { url: e.target.value })} />
                   <Input className="col-span-2 sm:col-span-1 md:col-span-1" placeholder="Source title" maxLength={200} value={s.title} onChange={e => setSource(i, { title: e.target.value })} />
                   <Select value={s.source_type} onValueChange={v => setSource(i, { source_type: v })}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>{SOURCE_TYPES.map(t => <SelectItem key={t} value={t}>{t.replace(/_/g, ' ')}</SelectItem>)}</SelectContent>
                   </Select>
+                  <Input placeholder="Progress %" type="number" min="0" max="100" step="1" value={s.progress_percent ?? ''} onChange={e => setSource(i, { progress_percent: e.target.value })} />
+                  <Input type="date" value={s.cited_at ?? ''} onChange={e => setSource(i, { cited_at: e.target.value })} />
                   <Button type="button" size="sm" variant="ghost" onClick={() => removeSource(i)} aria-label="Remove source" className="text-muted-foreground hover:text-destructive" disabled={sources.length === 1}>
                     ×
                   </Button>
