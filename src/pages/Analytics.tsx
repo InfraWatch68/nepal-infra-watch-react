@@ -122,6 +122,7 @@ export default function Analytics() {
     () => projects.some(p => !p.fiscal_year?.trim()),
     [projects],
   );
+  const untaggedCount = projects.filter(p => !p.fiscal_year && !p.start_date).length;
   const filteredBudget = useMemo(() => {
     if (fyFilter === 'all') return totalBudget;
     return projects
@@ -322,7 +323,14 @@ export default function Analytics() {
         {budgetByFY.some(d => d.fy !== 'Untagged') && (
           <Card className="p-5" id="budget-fy">
             <div className="flex items-baseline justify-between mb-4 gap-2 flex-wrap">
-              <h3 className="font-display text-lg font-semibold">Budget by fiscal year</h3>
+              <div>
+                <h3 className="font-display text-lg font-semibold">Budget by fiscal year</h3>
+                {untaggedCount > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    Derived from start_date when fiscal_year wasn't set. {untaggedCount} project{untaggedCount !== 1 ? 's' : ''} still untagged.
+                  </p>
+                )}
+              </div>
               <p className="text-xs text-muted-foreground font-mono">Nepal BS fiscal year · NPR · approved projects</p>
             </div>
             <ResponsiveContainer width="100%" height={Math.max(120, budgetByFY.length * 40)}>
