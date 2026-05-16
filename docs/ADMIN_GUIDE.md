@@ -385,19 +385,19 @@ Pending project moderation. The default tab when opening `/admin`.
 Where to find it: `/admin` → bottom of page → tab bar → "Review queue" tab (first tab, with pending count badge).
 
 ### Previous
-- Shows projects where `approval_status IN ('pending', 'changes_requested')`
-- Per-row Approve / Reject buttons; reject opens a modal asking for `review_notes`
-- Auto-approve flow (see [Auto-approve threshold](#ai-tools--auto-approve-threshold)) can promote high-confidence rows automatically
-- Per-row link to `/projects/<slug>` for full detail review
-
-### Current
 - Same display, same buttons, same flow on individual rows
 - **+ Pagination on the All Projects tab.** Was infinite scroll on the full list (~500 rows); now renders 20 per page with a prev / `1 2 3 … N` / next pager at the bottom. Pinned-first-and-last with ±2 around current page; ellipses fill the gaps.
 - **+ Status filter chips** above the list (Approved / Reviewed / Pending / Rejected) reset to page 1 on switch; counts shown on each chip.
 - **+ Clamping logic** — if the underlying list shrinks past the current page (filter change, bulk-delete), the visible slice and pager both clamp to page 1 without crashing.
 - Review queue tab itself (pending / changes_requested only) inherits the same pagination but typically fits on a single page.
 
-**Fix / Change:** Old infinite scroll was unusable on the All Projects tab with 200+ rows — dialog children inflated render time. Pagination caps initial render and keeps the page responsive. Historic note (54 of 56 rejections had no `review_notes`) still applies; that fix remains an open follow-up.
+### Current
+- Same pagination, same status chips, same per-row Approve / Reject
+- **+ Inline "Edit progress" popover** on each row (reviewer-only). Shadcn `Popover` with two inputs — number 0–100 for `progress_percent` and a 60-char text input for `progress_stage` — pre-filled from the row. Save PATCHes `projects` directly and updates the row in place; **does NOT touch `approval_status` or `published_at`**, so quick progress fixes on approved projects don't bounce them back into the review queue.
+- The moderation row data now joins to `projects.progress_percent` + `projects.progress_stage` (the RPC view `project_moderation_summary` doesn't carry these, so a secondary `projects` SELECT runs alongside the RPC).
+- Mobile: popover inputs use `grid-cols-1 sm:grid-cols-2` so the two fields stack at ≤640px.
+
+**Fix / Change:** Previously the only path to update a project's progress was the full `/dashboard/submit?edit=<id>` form, which on save re-set `approval_status='pending'` and dropped `published_at` even for moderator edits to approved rows. The inline popover lets reviewers tick the number forward (e.g., "site visit confirmed 60%") without un-publishing the row.
 
 ---
 
@@ -408,17 +408,17 @@ Two separate tabs for moderating AI-discovered child rows.
 Where to find it: `/admin` → tab bar → "Pending updates (N)" and "Pending sources (N)" tabs (rightmost in the tab bar, each with a count badge).
 
 ### Previous
-- "Pending updates" tab: rows from `project_updates` where `approval_status='pending'` and `submitted_by_ai=true`
-- "Pending sources" tab: rows from `project_sources` where same
-- Per-row Approve/Reject + link to parent project
-- Counts shown in tab labels: `Pending updates (N)`
-
-### Current
 - Same Approve / Reject buttons, same fetch (joins to `projects(title, slug)`)
 - **+ Project name promoted to the top of each pending-sources row.** Previously the project title sat in 12px muted text below the status badges and was easy to miss when scanning. Now each row leads with `FOR PROJECT → <linked title>` in bold accent colour; if `projects.slug` is null (orphan row), shows `(orphan — project_id <N>)` in muted italic so the broken FK is visible instead of just showing "—".
 - Source's own title moves below the badges (status / AI / type / created date) — same data, clearer hierarchy.
 
-**Fix / Change:** —
+### Current
+- Same layout, same Approve / Reject flow
+- **+ Three new columns on `project_sources` AND `project_updates`:** `progress_percent` (smallint 0–100, CHECK-constrained), `cited_at` (date), `progress_note` (text). Migration `20260516081858_source_cited_progress.sql` adds them with `IF NOT EXISTS` so it's re-runnable.
+- **+ AI-extracted source rows now carry these citations automatically.** When `analysis-drain` extracts a `reported_progress_percent` from a discovered article, the matching `project_sources` insert row receives `progress_percent` + `cited_at` (sourced from `reported_progress_as_of`). The legacy single-field `projects.reported_progress_*` columns are still written for backwards-compatibility.
+- Pending-sources moderation rows can surface the new fields when a moderator opens the inline detail view (no UI change to the queue list itself this pass — fields render in `DetailRowDialog` when present).
+
+**Fix / Change:** Previously source citations were stored as flat URL/title/type, and progress percentages lived in a single `reported_progress_percent` on the project row. A project with three articles all citing different percentages would only retain the latest. Per-source `progress_percent + cited_at` lets the front-end pick the newest dated citation and lets moderators see the full history.
 
 ---
 
@@ -469,19 +469,22 @@ Where to find it: `/projects` (public URL). When signed in as moderator, the app
 Where to find it: `/projects/<slug>` for any project. Admin-only controls appear in the header (Approve / Reject / Edit / Run analysis) and inline on each child-row in the detail tabs (Funding / Documents / Risks / etc.).
 
 ### Previous
-- Public sees: title, hero image, description, status badge, sector, province, district, budget, dates, contractor, agency, location map, tabs for funding/documents/stakeholders/risks/impact/procurement/compliance/updates/sources/milestones
-- **Admin-only:** approve/reject buttons in the header for pending projects
-- **Admin-only:** edit form (VerifyDialog) for any field
-- **Admin-only:** ai_tag pill (Sherlock / AI / claude-code-local)
-- Reviewer history icon — shows who reviewed what
-- "Generate brief for this project" + "Fetch news" + "Run comprehensive analysis" per-project AI buttons
-- 7 detail tables with per-row moderation (each child row has its own approval_status)
-
-### Current
 - Same display, same admin controls
 - _(no recent changes to this area; the comprehensive analysis path now uses the updated `analysis-drain` code with include_domains and key rotation)_
 
-**Fix / Change:** —
+### Current
+- Same hero, same 7 detail tables, same admin header controls
+- **+ Source-cited progress is now the top-priority signal in the hero `ProgressBreakdown`.** The priority chain is now:
+  1. **Source-cited** — newest `project_sources` row with a non-null `progress_percent` (sort by `cited_at DESC`, tiebreak on `created_at DESC`; approval_status must be `approved` or null)
+  2. **Reported (AI)** — `projects.reported_progress_percent` with `reported_progress_as_of`. Wins over source-cited iff its `as_of` is strictly newer than the source's `cited_at`.
+  3. **Manual** — `projects.progress_percent`
+  4. **Milestones** — completed / total ratio
+  5. **Status** — fallback heuristic
+- **+ One-line summary directly under the hero progress bar:** "X/Y milestones done · last source: N% on YYYY-MM-DD" (each half renders only when its data exists). Replaces the previous behaviour where milestones drove the bar even when a fresher article cited a different percentage.
+- **+ "Source-cited" appears in the All-signals modal** with an external link to the source URL (same pattern as the AI-reported signal).
+- The detail page now passes the already-loaded `sources` array into `ProgressBreakdown` (single extra prop; no extra query).
+
+**Fix / Change:** The bar was being driven by milestone completion ratio even when a recent news article cited a different percentage. Mismatches looked sloppy on highly-tracked projects. Source-cited progress with date-aware priority means the freshest dated signal wins, and the supporting evidence (citation date + URL) is visible to admins without opening the breakdown modal.
 
 ---
 
@@ -492,14 +495,6 @@ Where to find it: `/projects/<slug>` for any project. Admin-only controls appear
 Where to find it: `/analytics` (main page with auto-lede, leaderboards, charts) → "View all →" on the rating card → `/analytics/ratings` (full sortable / filterable table).
 
 ### Previous
-- 4 KPI cards (Tracked / Total budget / Avg progress / Provinces covered)
-- "Projects by sector" horizontal bar chart
-- "Projects by province" horizontal bar chart
-- "Status distribution" pie chart (rainbow 7-colour palette)
-- "Stalest projects" list (top 10 by last_activity_at ascending)
-- Static header "Insights / Analytics"
-
-### Current
 - **+** Auto-generated lede header: "X% of N tracked projects are delayed; <Province> leads at Y%" — derived from `projects.status` + `expected_completion`
 - **+** New section: **Top-rated projects** (`#leaderboard`) — swipable carousel, top 10 by performance score (status + schedule + budget delivery + activity recency, 4 dimensions × 25 pts). Has a **"View all →"** link to `/analytics/ratings` (a new dedicated page with sort + filters).
 - **+** New section: **Best-documented projects** (`#documented`) — swipable carousel, top 10 by data-completeness (10 yes/no signals × 10 pts). Editorial counterpart to the rating leaderboard.
@@ -508,8 +503,16 @@ Where to find it: `/analytics` (main page with auto-lede, leaderboards, charts) 
 - **+** **Worst schedule slips** (`#slips`) — top 10 projects past expected_completion, still in flight; red "Nmo overdue" badge per row.
 - **+** Section anchors (#leaderboard, #documented, #activity, #status, #sectors, #provinces, #slips, #stalest) — deep-linkable from home carousel via `/analytics#xxx`.
 - **+** **`/analytics/ratings`** — new view-all page with sort (rating desc/asc, recently active, budget, title A-Z/Z-A) + filters (sector, province, status). Desktop table view; mobile collapses to card list.
+- **+** FY filter pill on the Total budget KPI (`all` / `__untagged__` / literal "YYYY/YY" — filters the KPI sum and the per-row count) + a **"Budget by fiscal year"** stacked bar chart.
 
-**Fix / Change:** The page leads with a finding instead of a chart taxonomy. Stat-pack became editorial dashboard. Mobile-friendly throughout (table → card-list at sm: breakpoint).
+### Current
+- Same leaderboards, same KPI cards, same activity strip, same FY filter pill, same Budget-by-FY chart
+- **+ FY backfill ran in production.** The `nepal_fy_from_date(date)` SQL function (immutable, pure SQL) derives a BS fiscal year label (e.g. "2081/82") from any AD date using a Shrawan-1 / July-16 cutover. The backfill `UPDATE` populated `projects.fiscal_year` for every approved row that had a non-null `start_date` and a null `fiscal_year`. **Verified on production: 122 rows now have FY, 507 remain untagged (no `start_date` to derive from).**
+- **+ BEFORE INSERT/UPDATE trigger `trg_set_fiscal_year`** auto-fills `projects.fiscal_year` when `NEW.fiscal_year IS NULL` and `start_date` is set. New submissions therefore land with FY populated without contributor effort.
+- **+ Subtitle below the FY chart** ("Derived from start_date when fiscal_year wasn't set. N projects still untagged.") — renders only when `untaggedCount > 0` (projects with no `fiscal_year` AND no `start_date`).
+- **Note for admins:** the trigger only fires when `NEW.fiscal_year IS NULL`. Contributors / reviewers who explicitly set FY in the form override the derivation — the trigger never silently overwrites a user-chosen value.
+
+**Fix / Change:** Before the backfill, ~95% of rows had `fiscal_year=NULL` and the FY chart collapsed into one giant "Untagged" bar — useless for editorial. The trigger keeps the column populated going forward; the migration backfill makes the chart immediately useful. Sanity check: `nepal_fy_from_date('2024-07-15') = '2080/81'`, `nepal_fy_from_date('2024-07-16') = '2081/82'` (Shrawan-1 cutover).
 
 ---
 
@@ -563,18 +566,21 @@ Where to find it: `/admin` → tab bar → "Activity" tab → scroll to the bott
 Where to find it: header nav → "Dashboard" link → opens `/dashboard`. From there, "Submit project" button → multi-step form at `/dashboard/submit`.
 
 ### Previous
-- `/dashboard/submit` form: title, sector, province, district, description, budget, dates, contractor, agency, source URLs, image upload, project type, ESIA status, procurement method, estimated beneficiaries
-- **No field for physical progress** — the form had nothing for it, so manual contributors could see e.g. "70% structural complete" on site but had no way to enter that. The project detail page would render "Not yet reported" until an AI Analysis run later populated `reported_progress_percent` from a citation.
-- Saves with `approval_status='pending'`; the auto-approve trigger promotes high-confidence AI submissions but manual submissions always go through human review
-- File uploads go to Supabase Storage
-
-### Current
 - Same form, same submission flow, same hydration on edit
 - **+ Physical progress (%)** input — number 0–100, optional. Maps to `projects.progress_percent`. Hint text clarifies this is the manual entry; the AI-extracted equivalent (`reported_progress_percent`) is a separate field that carries a quote + source URL.
 - **+ Progress stage label** input — short free text up to 60 chars, optional. Maps to `projects.progress_stage`. For human-readable labels like "Foundation poured", "50% structural", "Punch-list".
 - Both fields are loaded on edit because the form hydration uses `select('*')`, and saved on submit because the insert/update payload already spreads `parsed.data` from the zod schema. No additional plumbing was needed beyond the schema + UI.
 
-**Fix / Change:** ProjectDetail.tsx already preferred `reported_progress_percent` (AI-extracted, has source) and fell back to `progress_percent` (manual). That fallback path was unreachable from any UI before — now contributors and reviewers can populate it directly. Reviewers editing an approved project can also update the manual % as construction advances without waiting for the next AI analysis run.
+### Current
+- Same project-level form, same physical-progress + stage-label inputs at the project level
+- **+ Per-source progress inputs in the Sources row grid.** Each source row now has two extra inputs alongside URL / title / type:
+  - `progress_percent` (number 0–100, optional) — what percentage this source cites
+  - `cited_at` (date, optional) — when the source's reading was taken
+  Empty strings coerce to `null`; the percent coerces to a number on insert. The 4-column row layout collapses to single-column on mobile (`sm:` breakpoint, ≤640px).
+- **+ Backwards-compatible storage.** Both inputs map to the new `project_sources` columns (`progress_percent`, `cited_at`, `progress_note`). Old rows without these fields keep working — `null` means "this source didn't cite progress."
+- On edit, hydration replaces the user's own pending source rows (existing behaviour); approved source rows stay in moderator-only queue.
+
+**Fix / Change:** Manual contributors who paste in a citation like "Kantipur · 2026-04-12 · 65% complete" previously lost the percentage and the date — only the URL + title made it into the DB. Now both numbers ride with the source, and the front-end's `ProgressBreakdown` picks the most recent dated citation when computing the progress bar. Combined with the moderation inline-edit popover, reviewers no longer have to choose between "trust the contributor's number" and "wait for AI to extract it."
 
 ---
 
