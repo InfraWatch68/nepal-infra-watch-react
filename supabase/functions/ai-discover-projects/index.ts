@@ -137,7 +137,17 @@ async function fetchWithTimeout(
 }
 
 const TAVILY_ROTATE_CODES = new Set([401, 429, 432, 433]);
-const TAVILY_TIMEOUT_MS = 30_000;
+// Tavily timeout: shortened from 30s → 15s. Tavily typically returns in 2-6s;
+// anything past 10s is almost always a hung connection that will time out
+// anyway. Bounding it tighter lets a stuck article fail fast and roll over
+// to the next key/cell before the edge function's wall-time guard expires.
+const TAVILY_TIMEOUT_MS = 15_000;
+// AI per-call timeout: shortened from 60s → 22s. Mistral-small returns 800-
+// 1500 tokens for the discovery schema in 4-10s typically; 22s is enough
+// headroom for the long tail without letting one stuck call eat the whole
+// wall-time budget. If the model genuinely can't respond in 22s, rolling to
+// the next provider beats waiting another 38s.
+const AI_TIMEOUT_MS = 22_000;
 // admin client is passed so that exhausted keys can be persisted (moved to
 // the bottom of the rotation in the api_keys table). Falls silent if a key
 // isn't in the table (env-fallback path).
@@ -198,7 +208,17 @@ async function callChatModel(
   }
 
   const callOnce = async (endpoint: string, apiKey: string, model: string) => {
-    for (let attempt = 0; attempt < 2; attempt++) {
+    // Single-attempt path for timeouts/network errors — let the caller rotate
+    // to the next key or provider instead of doubling our worst-case latency.
+    // The previous 2-attempt loop could turn one stuck Mistral request into a
+    // 122s stall (60s + 1.5s backoff + 60s), which alone exceeded the per-
+    // iteration time the wall-time guard could absorb.
+    //
+    // 429s WITHOUT free-tier markers still get one backoff retry below — a
+    // brief rate spike on a single key is recoverable and rolling over loses
+    // a slot in the quota window.
+    let retried429 = false;
+    while (true) {
       let r: Response;
       try {
         r = await fetchWithTimeout(endpoint, {
@@ -208,23 +228,21 @@ async function callChatModel(
           //   JSON. Mistral, OpenAI-compatible Google, and Lovable all accept
           //   the OpenAI-style field; providers that ignore it still return
           //   their normal output, which the json_repair helper salvages.
-          // - max_tokens=8000 doubles the previous 4096 ceiling. The schema
-          //   asks for 250-500 words plus 30+ fields; a 4-paragraph
-          //   description in Mistral-tokens is ~1.5k, leaving headroom for
-          //   the array fields without truncating mid-string.
+          // - max_tokens=4000 was previously 8000. The schema asks for 250-
+          //   500 words plus 30+ fields — ~1.5k tokens for a four-paragraph
+          //   description, plus ~1k for the array fields. 4000 leaves a
+          //   2x headroom while halving worst-case generation latency on
+          //   slow-streaming providers.
           body: JSON.stringify({
             model,
             messages,
-            max_tokens: 8000,
+            max_tokens: 4000,
             response_format: { type: "json_object" },
           }),
-        }, 60_000);
+        }, AI_TIMEOUT_MS);
       } catch (e) {
-        // Timeout or network failure. Treat as transient on first attempt
-        // (retry), error on second (let caller rotate to next key).
         const aborted = (e as Error)?.name === "AbortError";
-        if (attempt === 0) { await new Promise(res => setTimeout(res, 1500)); continue; }
-        return { kind: "transient" as const, status: aborted ? 599 : 598, body: aborted ? "AI fetch timeout after 60s" : "AI fetch network error" };
+        return { kind: "transient" as const, status: aborted ? 599 : 598, body: aborted ? `AI fetch timeout after ${AI_TIMEOUT_MS / 1000}s` : "AI fetch network error" };
       }
       if (r.status === 402) return { kind: "exhausted" as const, status: 402, body: "credits exhausted" };
       if (r.status === 429) {
@@ -232,7 +250,11 @@ async function callChatModel(
         if (body429.includes("free_tier") || body429.includes("RESOURCE_EXHAUSTED")) {
           return { kind: "exhausted" as const, status: 429, body: body429.slice(0, 300) };
         }
-        if (attempt === 0) { await new Promise(res => setTimeout(res, 3000)); continue; }
+        if (!retried429) {
+          retried429 = true;
+          await new Promise(res => setTimeout(res, 2000));
+          continue;
+        }
         return { kind: "transient" as const, status: 429, body: body429.slice(0, 400) };
       }
       if (!r.ok) {
@@ -242,7 +264,6 @@ async function callChatModel(
       const j = await r.json();
       return { kind: "ok" as const, text: (j.choices?.[0]?.message?.content ?? "") as string };
     }
-    return { kind: "error" as const, status: 500, body: "exhausted retries" };
   };
 
   // 1. Try each Mistral key in order. Roll over on exhaustion, persist
@@ -451,15 +472,25 @@ serve(async (req) => {
     let inserted = 0;
     let skipped = 0;
 
-    // Wall-time guard. Supabase edge functions get hard-killed by the
-    // platform around 300s (Sherlock reaper also fires at 300s without
-    // writeback). If we keep iterating up to that ceiling we get reaped
-    // instead of returning gracefully. Bail at 240s with whatever we've
-    // collected so the row writes back as `done` with a noted truncation,
-    // not as `failed` with a reaper error_text. Saptari was hitting this
-    // cap repeatedly across Telecom / Education / Health / Agriculture.
+    // Wall-time guard. The Sherlock reaper marks any 'running' row past 300s
+    // as failed with "row was running for Xs without writeback (edge-function
+    // wall-time exceeded)". We want to finish well under that so writeback
+    // beats the reaper. Budget of 200s + worst-case single iteration ≈ 80s
+    // (15s Tavily + 22s × ~3 provider attempts) gives a ceiling of ~280s,
+    // safely under the reaper's 300s threshold.
+    //
+    // Why not closer to 300s: the reaper cron tick can fire at any point in
+    // the 300-360s window AND the platform itself hard-kills around 400s on
+    // pro. The closer to 300s we cut, the more often a slow single iteration
+    // can flip us past the reaper before writeback. 200s + ~80s ceiling
+    // beats both the reaper AND the hard kill.
+    //
+    // overBudget() is also checked between iterations only — it can't
+    // interrupt an in-flight Tavily/AI call. The tight per-call timeouts
+    // (AI_TIMEOUT_MS, TAVILY_TIMEOUT_MS) bound the single-iteration cost so
+    // this works.
     const wallStartMs = Date.now();
-    const WALL_BUDGET_MS = 240_000;
+    const WALL_BUDGET_MS = 200_000;
     const overBudget = () => Date.now() - wallStartMs > WALL_BUDGET_MS;
 
     // Per-step timing trail. Pushed at each major milestone; the most

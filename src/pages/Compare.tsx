@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { supabase } from '@/integrations/supabase/client';
+import { useAuth } from '@/hooks/useAuth';
 import { SiteHeader } from '@/components/layout/SiteHeader';
 import { SiteFooter } from '@/components/layout/SiteFooter';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Sparkles, Loader2, Download } from 'lucide-react';
 import { exportComparisonReport } from '@/lib/exportPdf';
 import { formatNPR } from '@/lib/parseCoords';
@@ -12,10 +15,13 @@ import { STATUS_LABELS } from '@/lib/constants';
 import { toast } from 'sonner';
 
 export default function Compare() {
+  const navigate = useNavigate();
+  const { user } = useAuth();
   const [projects, setProjects] = useState<any[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [aiText, setAiText] = useState<string>('');
   const [loadingAi, setLoadingAi] = useState(false);
+  const [showSignIn, setShowSignIn] = useState(false);
 
   useEffect(() => {
     supabase.from('projects').select('*').eq('approval_status', 'approved').order('title')
@@ -26,6 +32,7 @@ export default function Compare() {
   const chosen = projects.filter(p => selected.includes(p.id));
 
   const compareWithAi = async () => {
+    if (!user) { setShowSignIn(true); return; }
     if (chosen.length < 2) return toast.error('Select at least 2 projects');
     setLoadingAi(true); setAiText('');
     try {
@@ -104,7 +111,7 @@ export default function Compare() {
                     <h3 className="font-semibold">AI comparison</h3>
                   </div>
                   <div className="flex gap-2">
-                    <Button size="sm" variant="outline" onClick={() => exportComparisonReport(chosen, aiText)} disabled={chosen.length < 1}>
+                    <Button size="sm" variant="outline" onClick={() => exportComparisonReport(chosen, aiText)} disabled={!aiText}>
                       <Download className="h-4 w-4" /> Export PDF
                     </Button>
                     <Button size="sm" onClick={compareWithAi} disabled={loadingAi || chosen.length < 2}>
@@ -120,6 +127,23 @@ export default function Compare() {
         </div>
       </div>
       <SiteFooter />
+
+      <Dialog open={showSignIn} onOpenChange={setShowSignIn}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Sign in required</DialogTitle>
+            <DialogDescription>
+              You need to sign in to use AI features. Create a free account or log in to generate insights and export PDFs.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-2 pt-2">
+            <Button onClick={() => { setShowSignIn(false); navigate('/auth'); }}>
+              Sign in / Sign up
+            </Button>
+            <Button variant="ghost" onClick={() => setShowSignIn(false)}>Cancel</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -5,6 +5,7 @@ import { SiteHeader } from '@/components/layout/SiteHeader';
 import { SiteFooter } from '@/components/layout/SiteFooter';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { AdSlot } from '@/components/AdSlot';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
@@ -45,6 +46,9 @@ type DailyMetric = {
 export default function Analytics() {
   const [projects, setProjects] = useState<any[]>([]);
   const [daily, setDaily] = useState<DailyMetric[]>([]);
+  // 'all' = portfolio total · '__untagged__' = projects with no fiscal_year set ·
+  // anything else is a literal FY string ("2081/82" etc.) sourced from the data.
+  const [fyFilter, setFyFilter] = useState<string>('all');
 
   useEffect(() => {
     supabase.from('projects').select('*').eq('approval_status', 'approved')
@@ -101,6 +105,58 @@ export default function Analytics() {
 
   // ─── KPIs ──────────────────────────────────────────────────────────────────
   const totalBudget = useMemo(() => projects.reduce((s, p) => s + (Number(p.budget_npr) || 0), 0), [projects]);
+
+  // Fiscal year filter for the Total budget KPI. We expose the full sorted list
+  // of FYs present in the data plus an "Untagged" bucket iff at least one
+  // project lacks a fiscal_year — keeps the dropdown honest about what the
+  // portfolio total actually covers.
+  const fiscalYears = useMemo(() => {
+    const set = new Set<string>();
+    for (const p of projects) {
+      const fy = p.fiscal_year?.trim();
+      if (fy) set.add(fy);
+    }
+    return [...set].sort();
+  }, [projects]);
+  const hasUntaggedBudget = useMemo(
+    () => projects.some(p => !p.fiscal_year?.trim()),
+    [projects],
+  );
+  const filteredBudget = useMemo(() => {
+    if (fyFilter === 'all') return totalBudget;
+    return projects
+      .filter(p => fyFilter === '__untagged__'
+        ? !p.fiscal_year?.trim()
+        : p.fiscal_year?.trim() === fyFilter)
+      .reduce((s, p) => s + (Number(p.budget_npr) || 0), 0);
+  }, [projects, totalBudget, fyFilter]);
+  const filteredProjectCount = useMemo(() => {
+    if (fyFilter === 'all') return projects.length;
+    return projects.filter(p => fyFilter === '__untagged__'
+      ? !p.fiscal_year?.trim()
+      : p.fiscal_year?.trim() === fyFilter,
+    ).length;
+  }, [projects, fyFilter]);
+
+  // ─── Budget by fiscal year ─────────────────────────────────────────────────
+  // Groups approved projects by fiscal_year. Projects without a fiscal_year are
+  // collected under "Untagged" so the chart accounts for the full portfolio.
+  const budgetByFY = useMemo(() => {
+    const map = new Map<string, { budget: number; count: number }>();
+    for (const p of projects) {
+      const fy = p.fiscal_year?.trim() || 'Untagged';
+      const prev = map.get(fy) ?? { budget: 0, count: 0 };
+      map.set(fy, { budget: prev.budget + (Number(p.budget_npr) || 0), count: prev.count + 1 });
+    }
+    // Sort tagged FYs in ascending order; put "Untagged" last.
+    return [...map.entries()]
+      .sort(([a], [b]) => {
+        if (a === 'Untagged') return 1;
+        if (b === 'Untagged') return -1;
+        return a.localeCompare(b);
+      })
+      .map(([fy, d]) => ({ fy, budget: d.budget, count: d.count }));
+  }, [projects]);
   const avgProgress = useMemo(() =>
     projects.length ? Math.round(projects.reduce((s, p) => s + (p.progress_percent || 0), 0) / projects.length) : 0,
     [projects],
@@ -222,10 +278,104 @@ export default function Analytics() {
         {/* KPI row */}
         <div className="grid md:grid-cols-4 gap-4">
           <Stat label="Tracked projects" value={projects.length.toString()} />
-          <Stat label="Total budget" value={formatNPR(totalBudget)} />
+          {/* Total budget — filterable by fiscal year. Dropdown only appears
+              when the data has at least one tagged FY (otherwise it would
+              offer just "All" + "Untagged" which adds noise without insight). */}
+          <Card className="p-5">
+            <div className="flex items-start justify-between gap-2">
+              <div className="text-xs uppercase tracking-wider font-mono text-muted-foreground">
+                Total budget
+              </div>
+              {(fiscalYears.length > 0 || hasUntaggedBudget) && (
+                <Select value={fyFilter} onValueChange={setFyFilter}>
+                  <SelectTrigger
+                    aria-label="Filter total budget by fiscal year"
+                    className="h-6 w-auto min-w-[5.5rem] gap-1 px-2 py-0 text-[10px] font-mono uppercase tracking-wider"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All FYs</SelectItem>
+                    {fiscalYears.map(fy => (
+                      <SelectItem key={fy} value={fy}>FY {fy}</SelectItem>
+                    ))}
+                    {hasUntaggedBudget && <SelectItem value="__untagged__">Untagged</SelectItem>}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+            <div className="font-display text-3xl font-bold mt-2">{formatNPR(filteredBudget)}</div>
+            <div className="text-[10px] font-mono text-muted-foreground mt-1">
+              {fyFilter === 'all'
+                ? (fiscalYears.length > 0
+                    ? `Across ${fiscalYears.length} fiscal year${fiscalYears.length === 1 ? '' : 's'}`
+                    : 'All approved projects')
+                : `${filteredProjectCount} project${filteredProjectCount === 1 ? '' : 's'} · ${fyFilter === '__untagged__' ? 'no FY tag' : `FY ${fyFilter}`}`}
+            </div>
+          </Card>
           <Stat label="Avg. progress" value={`${avgProgress}%`} />
           <Stat label="Provinces covered" value={byProvince.length.toString()} />
         </div>
+
+        {/* Budget by fiscal year — shows allocation per Nepal BS fiscal year.
+            Only rendered when at least one project has a fiscal_year set. */}
+        {budgetByFY.some(d => d.fy !== 'Untagged') && (
+          <Card className="p-5" id="budget-fy">
+            <div className="flex items-baseline justify-between mb-4 gap-2 flex-wrap">
+              <h3 className="font-display text-lg font-semibold">Budget by fiscal year</h3>
+              <p className="text-xs text-muted-foreground font-mono">Nepal BS fiscal year · NPR · approved projects</p>
+            </div>
+            <ResponsiveContainer width="100%" height={Math.max(120, budgetByFY.length * 40)}>
+              <BarChart data={budgetByFY} layout="vertical" margin={{ top: 0, right: 16, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" horizontal={false} />
+                <XAxis
+                  type="number"
+                  tick={{ fontSize: 10 }}
+                  tickFormatter={(v: number) => {
+                    if (v === 0) return '0';
+                    if (v >= 1e9) return `${(v / 1e9).toFixed(1)}B`;
+                    if (v >= 1e7) return `${(v / 1e7).toFixed(1)}Cr`;
+                    if (v >= 1e5) return `${(v / 1e5).toFixed(1)}L`;
+                    return String(v);
+                  }}
+                />
+                <YAxis dataKey="fy" type="category" tick={{ fontSize: 11 }} width={68} />
+                <Tooltip
+                  contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))' }}
+                  formatter={(v: number, _k, entry) => [
+                    `${formatNPR(v)}  (${entry.payload.count} project${entry.payload.count === 1 ? '' : 's'})`,
+                    'Budget',
+                  ]}
+                />
+                <Bar dataKey="budget" fill="hsl(var(--accent))" radius={[0, 6, 6, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+            <div className="mt-4 overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-border text-left text-muted-foreground font-mono uppercase tracking-wider">
+                    <th className="pb-1.5 pr-4">Fiscal year</th>
+                    <th className="pb-1.5 pr-4 text-right">Projects</th>
+                    <th className="pb-1.5 pr-4 text-right">Total budget</th>
+                    <th className="pb-1.5 text-right">Avg budget / project</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border/50">
+                  {budgetByFY.map(({ fy, budget, count }) => (
+                    <tr key={fy} className="hover:bg-muted/30">
+                      <td className="py-1.5 pr-4 font-medium">{fy}</td>
+                      <td className="py-1.5 pr-4 text-right font-mono">{count}</td>
+                      <td className="py-1.5 pr-4 text-right font-mono">{budget > 0 ? formatNPR(budget) : '—'}</td>
+                      <td className="py-1.5 text-right font-mono text-muted-foreground">
+                        {budget > 0 && count > 0 ? formatNPR(Math.round(budget / count)) : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        )}
 
         {/* Project rating — top 10 best-performing projects.
             Score = status + schedule adherence + budget delivery + activity
@@ -400,11 +550,12 @@ export default function Analytics() {
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <Card className="p-5">
       <div className="text-xs uppercase tracking-wider font-mono text-muted-foreground">{label}</div>
       <div className="font-display text-3xl font-bold mt-2">{value}</div>
+      {sub && <div className="text-[10px] font-mono text-muted-foreground mt-1">{sub}</div>}
     </Card>
   );
 }

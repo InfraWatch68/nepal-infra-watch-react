@@ -983,8 +983,22 @@ serve(async (req) => {
       .eq("id", projectId).single();
     if (pErr || !project) throw new Error(`Project ${projectId} not found`);
 
+    // Read since_date from the job row so we can scope Tavily searches to the
+    // window since the last analysis run, avoiding re-fetching known sources.
+    const { data: jobRow } = await admin.from("analysis_jobs").select("since_date").eq("id", jobId).maybeSingle();
+    const sinceDate: string | null = (jobRow as any)?.since_date ?? null;
+
     const buckets = await loadBuckets(admin, project);
     if (buckets.length === 0) throw new Error("No enabled buckets in analysis_buckets table");
+
+    // If this job was auto-enqueued with a since_date, override each bucket's
+    // days param so Tavily only returns sources published after that date.
+    // Cap at 180 days so the window never grows absurdly wide. Minimum 1.
+    if (sinceDate) {
+      const dynamicDays = Math.min(180, Math.max(1, Math.ceil((Date.now() - new Date(sinceDate).getTime()) / 86_400_000)));
+      for (const b of buckets) b.payload.days = dynamicDays;
+    }
+
     const initial: Record<string, any> = {};
     for (const b of buckets) initial[b.name] = { state: "queued" };
     await admin.from("project_analysis_runs").update({ bucket_status: initial }).eq("id", runId);

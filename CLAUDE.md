@@ -37,7 +37,7 @@ The Supabase client throws at import time if either is missing — there is no o
 ### App shell (`src/App.tsx`)
 Provider chain (outer → inner): `QueryClientProvider` → `TooltipProvider` → toasters (`Toaster`, `Sonner`) → `BrowserRouter` → `AuthProvider` → `Routes`. **`AuthProvider` lives inside `BrowserRouter`** — keep it that way if you add navigation hooks to it.
 
-Routes wired in `App.tsx`: `/`, `/auth`, `/projects`, `/projects/:slug`, `/map`, `/compare`, `/analytics`, `/dashboard`, `/dashboard/submit`, `/admin`, and `*` → `NotFound`. `src/pages/Index.tsx` exists but is not currently routed.
+Routes wired in `App.tsx`: `/`, `/auth`, `/projects`, `/projects/:slug`, `/map`, `/compare`, `/analytics`, `/analytics/ratings`, `/dashboard`, `/dashboard/submit`, `/admin`, `/admin/guide`, and `*` → `NotFound`. `src/pages/Index.tsx` exists but is not currently routed.
 
 ### Auth & roles (`src/hooks/useAuth.tsx`)
 Four roles: `admin`, `coadmin`, `reviewer`, `contributor`. Roles are loaded from the `user_roles` table on every auth state change. `isReviewer` is true for reviewer/coadmin/admin (escalating). Any role-gated UI should consume `useAuth()` rather than re-querying.
@@ -47,12 +47,18 @@ The role lookup inside `onAuthStateChange` is wrapped in `setTimeout(..., 0)` �
 ### Supabase layer
 - Client: `src/integrations/supabase/client.ts` — singleton, persists session in `localStorage`.
 - Generated DB types: `src/integrations/supabase/types.ts` — typed via `createClient<Database>`.
-- Migrations: `supabase/migrations/*.sql` (timestamp-prefixed). Recent additions cover the coadmin role, AI moderation queue, profiles signup trigger, and global briefs.
-- Edge functions: `supabase/functions/*/index.ts` — Deno runtime. Current functions: `ai-project-insights`, `ai-discover-projects`, `ai-fetch-project-news`, `ai-fetch-news-all`, `ai-generate-brief`, `ai-generate-global-brief`, `ai-comprehensive-analysis`. All use the same triple-provider chat fallback (Mistral → Google → Lovable, controlled by `MISTRAL_API_KEY` / `GOOGLE_AI_API_KEY` / `LOVABLE_API_KEY` env). **Never call AI providers from frontend code** (per README and the existing pattern).
-- `ai-comprehensive-analysis` runs targeted Tavily searches across 5 buckets (news, government `.gov.np`, procurement `ppmo.gov.np` / `bolpatra.gov.np`, audit `oag.gov.np` / `ciaa.gov.np`, international orgs `worldbank.org` / `adb.org` / `jica.go.jp` etc.), feeds results to Mistral with a strict JSON-extraction prompt, and writes structured rows into the 7 detail tables as `submitted_by_ai=true, approval_status='pending'` for moderator approval.
-- Detail-tracking tables (added 2026-05-10): `project_funding`, `project_documents`, `project_stakeholders`, `project_risks`, `project_impact`, `project_procurement`, `project_compliance`. All FK on `bigint project_id`, all carry the same `approval_status` workflow as `project_updates` (RLS mirrors). Surface in the UI via `src/components/ComprehensiveSections.tsx` (rendered inside `ProjectDetail.tsx` below the existing Tabs).
+- Migrations: `supabase/migrations/*.sql` (timestamp-prefixed).
+- Edge functions in `supabase/functions/*/index.ts` (Deno runtime):
+  - AI extraction: `ai-comprehensive-analysis`, `ai-discover-projects`, `ai-project-insights`, `ai-verify-project`, `ai-fetch-project-news`, `ai-fetch-news-all`
+  - Briefs: `ai-generate-brief`, `ai-generate-global-brief`, `generate-daily-briefs`
+  - Analysis queue: `analysis-enqueue`, `analysis-drain`
+  - Ops: `check-api-key`, `send-alert`
+  - Shared helpers in `_shared/` (including `api_keys.ts` for provider key rotation).
+- AI provider keys are sourced from the `api_keys` table (provider/key_value/position/is_exhausted) with env fallback (`MISTRAL_API_KEY` / `MISTRAL_API_KEYS`, `TAVILY_API_KEY` / `TAVILY_API_KEYS`, `GOOGLE_AI_API_KEY`, `LOVABLE_API_KEY`). Edge functions chain Mistral → Google → Lovable. **Never call AI providers from frontend code** (per README and the existing pattern).
+- `ai-comprehensive-analysis` runs targeted Tavily searches across 5 buckets (news, government `.gov.np`, procurement `ppmo.gov.np` / `bolpatra.gov.np`, audit `oag.gov.np` / `ciaa.gov.np`, international orgs `worldbank.org` / `adb.org` / `jica.go.jp` etc.), feeds results to Mistral with a strict JSON-extraction prompt, and writes structured rows into the 7 detail tables as `submitted_by_ai=true, approval_status='pending'` for moderator approval. Bucket definitions live in the `analysis_buckets` table — operators can disable/retune without redeploying.
+- Detail-tracking tables: `project_funding`, `project_documents`, `project_stakeholders`, `project_risks`, `project_impact`, `project_procurement`, `project_compliance`. All FK on `bigint project_id`, all carry the same `approval_status` workflow as `project_updates` (RLS mirrors). Surface in the UI via `src/components/ComprehensiveSections.tsx` (rendered inside `ProjectDetail.tsx` below the existing Tabs).
 - Schema bootstrap for older databases: `supabase/upgrade_existing.sql` (run manually in Supabase SQL Editor).
-- Project id is in `supabase/config.toml`.
+- Project id is in `supabase/config.toml` (`vlioybqqswbohdhpnjym`).
 
 ### Domain constants (`src/lib/constants.ts`)
 `SECTORS`, `PROVINCES`, `DISTRICTS_BY_PROVINCE` (Nepal's 7 provinces / 77 districts), and the project `STATUS_LABELS` / `STATUS_COLORS` maps. Use `districtsFor(province)` rather than re-deriving the district list. Status keys: `proposed`, `approved`, `in_progress`, `delayed`, `completed`, `cancelled`.

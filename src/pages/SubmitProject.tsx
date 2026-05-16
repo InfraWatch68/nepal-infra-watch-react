@@ -10,7 +10,7 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { SECTORS, PROJECT_TYPES, PROVINCES, districtsFor } from '@/lib/constants';
+import { SECTORS, PROJECT_TYPES, PROVINCES, FISCAL_YEARS, districtsFor } from '@/lib/constants';
 import { useMemo } from 'react';
 import { parseCoordinates } from '@/lib/parseCoords';
 import { CoordPickerDialog } from '@/components/CoordPickerDialog';
@@ -46,6 +46,7 @@ const schema = z.object({
   ward: z.coerce.number().int().min(0).max(99).optional(),
   location_text: z.string().max(300).optional(),
   project_type: z.string().max(60).optional(),
+  fiscal_year: z.string().max(10).optional(),
   budget_npr: z.coerce.number().nonnegative().optional(),
   funding_committed_npr: z.coerce.number().nonnegative().optional(),
   estimated_beneficiaries: z.coerce.number().int().nonnegative().optional(),
@@ -300,6 +301,14 @@ export default function SubmitProject() {
                 <Select value={form.project_type ?? ''} onValueChange={v => set('project_type', v)}>
                   <SelectTrigger><SelectValue placeholder="Select type" /></SelectTrigger>
                   <SelectContent>{PROJECT_TYPES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent>
+                </Select>
+              </Field>
+              <Field label="Fiscal year (Nepal BS)" hint='The Nepal BS fiscal year this budget was allocated in, e.g. "2081/82".'>
+                <Select value={form.fiscal_year ?? ''} onValueChange={v => set('fiscal_year', v || undefined)}>
+                  <SelectTrigger><SelectValue placeholder="— select year —" /></SelectTrigger>
+                  <SelectContent>
+                    {[...FISCAL_YEARS].reverse().map(fy => <SelectItem key={fy} value={fy}>{fy}</SelectItem>)}
+                  </SelectContent>
                 </Select>
               </Field>
               <Field label="Budget (NPR)"><Input type="number" min="0" value={form.budget_npr ?? ''} onChange={e => set('budget_npr', e.target.value)} /></Field>

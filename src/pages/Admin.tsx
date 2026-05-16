@@ -20,9 +20,9 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Checkbox } from '@/components/ui/checkbox';
 import { toast } from 'sonner';
-import { Shield, Megaphone, Sparkles, Loader2, ExternalLink, Users as UsersIcon, BookOpen, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Shield, Megaphone, Sparkles, Loader2, ExternalLink, Users as UsersIcon, BookOpen, ChevronLeft, ChevronRight, Search, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { SECTORS, PROVINCES, districtsFor } from '@/lib/constants';
+import { SECTORS, PROVINCES, FISCAL_YEARS, districtsFor } from '@/lib/constants';
 import { VerifyDialog } from '@/components/admin/VerifyDialog';
 import { SherlockManager } from '@/components/admin/SherlockManager';
 import { ProjectModerationTab } from '@/components/admin/ProjectModerationTab';
@@ -125,6 +125,15 @@ export default function Admin() {
   // the admin knows the size of the backlog before clicking.
   const [staleCount, setStaleCount] = useState<number | null>(null);
 
+  // Singleton auto-refresh settings from stale_refresh_config table.
+  const [staleConfig, setStaleConfig] = useState<{
+    incomplete_stale_days: number;
+    complete_stale_days: number;
+    incomplete_auto_enabled: boolean;
+    complete_auto_enabled: boolean;
+  } | null>(null);
+  const [savingStaleConfig, setSavingStaleConfig] = useState(false);
+
   const refresh = async () => {
     const { data } = await supabase.from('projects').select('*').order('created_at', { ascending: false });
     setProjects(data ?? []);
@@ -186,6 +195,29 @@ export default function Admin() {
     setStaleCount(count ?? 0);
   };
   useEffect(() => { if (user && isReviewer) loadStaleCount(); /* eslint-disable-next-line */ }, [user, isReviewer]);
+
+  const loadStaleConfig = async () => {
+    const { data } = await supabase.from('stale_refresh_config').select('*').eq('id', 1).maybeSingle();
+    if (data) {
+      setStaleConfig({
+        incomplete_stale_days: (data as any).incomplete_stale_days ?? 30,
+        complete_stale_days: (data as any).complete_stale_days ?? 90,
+        incomplete_auto_enabled: !!(data as any).incomplete_auto_enabled,
+        complete_auto_enabled: !!(data as any).complete_auto_enabled,
+      });
+    }
+  };
+  useEffect(() => { if (user && (isAdmin || isCoadmin)) loadStaleConfig(); /* eslint-disable-next-line */ }, [user, isAdmin, isCoadmin]);
+
+  const saveStaleConfig = async (next: NonNullable<typeof staleConfig>) => {
+    setSavingStaleConfig(true);
+    const { error } = await supabase.from('stale_refresh_config').upsert({
+      id: 1, ...next, updated_at: new Date().toISOString(),
+    });
+    setSavingStaleConfig(false);
+    if (error) return toast.error(error.message);
+    setStaleConfig(next);
+  };
 
   if (loading) return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
   if (!user) return <Navigate to="/auth" replace />;
@@ -480,6 +512,81 @@ export default function Admin() {
               )}
             </div>
           </div>
+
+          {(isAdmin || isCoadmin) && (
+            <div className="space-y-3 pt-3 border-t border-accent/20">
+              <p className="text-xs text-muted-foreground">
+                <span className="font-semibold text-foreground">Auto-refresh.</span>{' '}
+                When enabled, approved projects not analysed within the stale window are automatically queued for AI analysis once per hour. Searches are scoped to the window since the last run to avoid re-fetching known sources.
+              </p>
+              {staleConfig ? (
+                <div className="grid sm:grid-cols-2 gap-3">
+                  <div className="space-y-2 p-3 rounded-lg border border-border bg-card">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Incomplete Projects</div>
+                    <div className="text-[10px] text-muted-foreground">proposed · approved · in progress · delayed</div>
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        id="incomplete-auto"
+                        checked={staleConfig.incomplete_auto_enabled}
+                        disabled={savingStaleConfig}
+                        onCheckedChange={(v) => saveStaleConfig({ ...staleConfig, incomplete_auto_enabled: v })}
+                      />
+                      <Label htmlFor="incomplete-auto" className="text-sm">Auto</Label>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Label className="text-xs text-muted-foreground whitespace-nowrap">Stale after</Label>
+                      <Select
+                        value={String(staleConfig.incomplete_stale_days)}
+                        disabled={savingStaleConfig}
+                        onValueChange={(v) => saveStaleConfig({ ...staleConfig, incomplete_stale_days: Number(v) })}
+                      >
+                        <SelectTrigger className="h-7 w-24 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {[7, 14, 30, 60, 90, 180].map(d => (
+                            <SelectItem key={d} value={String(d)}>{d} days</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <div className="space-y-2 p-3 rounded-lg border border-border bg-card">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Complete Projects</div>
+                    <div className="text-[10px] text-muted-foreground">completed · cancelled</div>
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        id="complete-auto"
+                        checked={staleConfig.complete_auto_enabled}
+                        disabled={savingStaleConfig}
+                        onCheckedChange={(v) => saveStaleConfig({ ...staleConfig, complete_auto_enabled: v })}
+                      />
+                      <Label htmlFor="complete-auto" className="text-sm">Auto</Label>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Label className="text-xs text-muted-foreground whitespace-nowrap">Stale after</Label>
+                      <Select
+                        value={String(staleConfig.complete_stale_days)}
+                        disabled={savingStaleConfig}
+                        onValueChange={(v) => saveStaleConfig({ ...staleConfig, complete_stale_days: Number(v) })}
+                      >
+                        <SelectTrigger className="h-7 w-24 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {[30, 60, 90, 180, 365].map(d => (
+                            <SelectItem key={d} value={String(d)}>{d} days</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-xs text-muted-foreground italic">Loading settings…</div>
+              )}
+            </div>
+          )}
         </Card>
 
         <ApiKeysPanel />
@@ -618,36 +725,103 @@ function StatusFilterRow({
 // doom-scroll where 200+ rows render into one continuous list.
 const PROJECTS_PAGE_SIZE = 20;
 
+type SortKey = 'created_at' | 'budget_npr' | 'published_at';
+
 function ProjectList({ projects, onReview, onFetchNews, onGenerateBrief, onPushNow, busyRow, canPushNow, refresh }: any) {
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(1);
+  const [searchQ, setSearchQ] = useState('');
+  const [sortBy, setSortBy] = useState<SortKey>('created_at');
+
+  // Filter then sort before paginating.
+  const filtered = useMemo(() => {
+    const q = searchQ.trim().toLowerCase();
+    const base = q
+      ? projects.filter((p: any) =>
+          (p.title ?? '').toLowerCase().includes(q) ||
+          (p.sector ?? '').toLowerCase().includes(q) ||
+          (p.province ?? '').toLowerCase().includes(q) ||
+          (p.district ?? '').toLowerCase().includes(q) ||
+          (p.contractor ?? '').toLowerCase().includes(q) ||
+          (p.implementing_agency ?? '').toLowerCase().includes(q)
+        )
+      : projects;
+    return [...base].sort((a: any, b: any) => {
+      if (sortBy === 'budget_npr') {
+        return (b.budget_npr ?? -1) - (a.budget_npr ?? -1);
+      }
+      if (sortBy === 'published_at') {
+        const ta = a.published_at ? new Date(a.published_at).getTime() : 0;
+        const tb = b.published_at ? new Date(b.published_at).getTime() : 0;
+        return tb - ta;
+      }
+      // default: created_at desc
+      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+    });
+  }, [projects, searchQ, sortBy]);
+
+  // Reset to page 1 when search or sort changes.
+  useEffect(() => { setPage(1); }, [searchQ, sortBy]);
+
   // Every project is selectable now, regardless of approval_status. The
   // "All projects" tab needs bulk-actions on approved rows too (e.g. mass
   // reject a batch that turned out to be junk after publication). The bulk
   // confirm dialog is explicit about the count so destructive moves stay
   // intentional.
-  const allIds = projects.map((p: any) => String(p.id));
+  const allIds = filtered.map((p: any) => String(p.id));
   const some = allIds.some((id: string) => sel.has(id));
   const all = allIds.length > 0 && allIds.every((id: string) => sel.has(id));
   const toggle = (id: string) => setSel(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
   const toggleAll = (v: boolean) => setSel(v ? new Set(allIds) : new Set());
 
-  const totalPages = Math.max(1, Math.ceil(projects.length / PROJECTS_PAGE_SIZE));
-  // Reset to page 1 whenever the underlying list shrinks past the current
-  // page (filter change or bulk-delete). useMemo over [page, totalPages]
-  // would also work; this is cheaper since the list ref changes on every
-  // refresh anyway.
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PROJECTS_PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
   const start = (safePage - 1) * PROJECTS_PAGE_SIZE;
-  const visible = projects.slice(start, start + PROJECTS_PAGE_SIZE);
+  const visible = filtered.slice(start, start + PROJECTS_PAGE_SIZE);
 
   if (projects.length === 0) return <Card className="p-12 text-center text-muted-foreground">Queue empty.</Card>;
   return (
     <Card>
+      <div className="flex flex-col sm:flex-row gap-2 p-3 border-b">
+        <div className="relative flex-1">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+          <Input
+            value={searchQ}
+            onChange={e => setSearchQ(e.target.value)}
+            placeholder="Search by title, sector, province, contractor…"
+            className="pl-8 pr-8 h-8 text-sm"
+          />
+          {searchQ && (
+            <button
+              type="button"
+              onClick={() => setSearchQ('')}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              aria-label="Clear search"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+        <Select value={sortBy} onValueChange={(v) => setSortBy(v as SortKey)}>
+          <SelectTrigger className="h-8 w-full sm:w-44 text-sm">
+            <SelectValue placeholder="Sort by" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="created_at">Date added</SelectItem>
+            <SelectItem value="budget_npr">Budget (high→low)</SelectItem>
+            <SelectItem value="published_at">Approved date</SelectItem>
+          </SelectContent>
+        </Select>
+        {searchQ && (
+          <span className="text-xs text-muted-foreground self-center whitespace-nowrap">
+            {filtered.length} / {projects.length} results
+          </span>
+        )}
+      </div>
       <AdminBulkBar
         table="projects"
         selectedIds={[...sel]}
-        rowCount={projects.length}
+        rowCount={filtered.length}
         allSelected={all}
         someSelected={some}
         onToggleAll={toggleAll}
@@ -680,6 +854,14 @@ function ProjectList({ projects, onReview, onFetchNews, onGenerateBrief, onPushN
                   </div>
                   <Link to={`/projects/${p.slug}`} className="font-semibold hover:text-accent break-words">{p.title}</Link>
                   <p className="text-xs text-muted-foreground line-clamp-2 mt-1">{p.description}</p>
+                  {p.last_comprehensive_analysis_at && (
+                    <span className="text-[10px] text-muted-foreground font-mono mt-0.5 inline-block">
+                      AI: {(() => {
+                        const d = Math.floor((Date.now() - new Date(p.last_comprehensive_analysis_at).getTime()) / 86400000);
+                        return d === 0 ? 'today' : d === 1 ? 'yesterday' : `${d}d ago`;
+                      })()}
+                    </span>
+                  )}
                 </div>
               </div>
               <div className="flex gap-2 shrink-0 flex-wrap justify-start sm:justify-end pl-7 sm:pl-0">
@@ -1025,6 +1207,7 @@ function ReviewDialog({ project, onReview }: any) {
   const [budget, setBudget] = useState<string>(
     project.budget_npr === null || project.budget_npr === undefined ? '' : String(project.budget_npr),
   );
+  const [fiscalYear, setFiscalYear] = useState<string>(project.fiscal_year ?? '');
   const [notes, setNotes] = useState(project.review_notes ?? '');
   const [status, setStatus] = useState(project.status);
   const [isRastraGaurav, setIsRastraGaurav] = useState<boolean>(!!project.is_rastra_gaurav);
@@ -1042,6 +1225,7 @@ function ReviewDialog({ project, onReview }: any) {
     };
     if (budget === '') edits.budget_npr = null;
     else edits.budget_npr = Number(budget);
+    edits.fiscal_year = fiscalYear || null;
     return edits;
   };
 
@@ -1100,6 +1284,16 @@ function ReviewDialog({ project, onReview }: any) {
           <div>
             <Label>Budget (NPR)</Label>
             <Input type="number" value={budget} onChange={e => setBudget(e.target.value)} />
+          </div>
+          <div>
+            <Label>Fiscal year (Nepal BS)</Label>
+            <Select value={fiscalYear || '__none'} onValueChange={v => setFiscalYear(v === '__none' ? '' : v)}>
+              <SelectTrigger><SelectValue placeholder="— none —" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none">— none —</SelectItem>
+                {[...FISCAL_YEARS].reverse().map(fy => <SelectItem key={fy} value={fy}>{fy}</SelectItem>)}
+              </SelectContent>
+            </Select>
           </div>
           <div>
             <Label>Contractor</Label>

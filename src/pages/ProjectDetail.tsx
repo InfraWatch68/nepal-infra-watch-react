@@ -1,5 +1,5 @@
-import { useEffect, useState, useCallback } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { z } from 'zod';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/hooks/useAuth';
@@ -12,7 +12,8 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { AdSlot } from '@/components/AdSlot';
-import { MapPin, Wallet, Calendar, Building2, HardHat, ExternalLink, ShieldCheck, ShieldAlert, Sparkles, Loader2, Download, ChevronLeft, ChevronRight, Check, X, Trash2, AlertTriangle } from 'lucide-react';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
+import { MapPin, Wallet, Calendar, CalendarDays, Building2, HardHat, ExternalLink, ShieldCheck, ShieldAlert, Sparkles, Loader2, Download, ChevronLeft, ChevronRight, Check, X, Trash2, AlertTriangle } from 'lucide-react';
 import { Checkbox } from '@/components/ui/checkbox';
 import { exportProjectReport } from '@/lib/exportPdf';
 import { STATUS_COLORS, STATUS_LABELS } from '@/lib/constants';
@@ -22,11 +23,15 @@ import { cn } from '@/lib/utils';
 import { ProjectMap } from '@/components/ProjectMap';
 import { ComprehensiveSections, SourceLink } from '@/components/ComprehensiveSections';
 import { ReviewHistoryIcon } from '@/components/ReviewHistoryIcon';
+import { ProgressBreakdown } from '@/components/ProgressBreakdown';
+import { scoreByPerformance, scoreByDocumentation, letterGrade } from '@/components/analytics/ProjectLeaderboard';
 import { toast } from 'sonner';
 
 export default function ProjectDetail() {
   const { slug } = useParams();
-  const { isReviewer } = useAuth();
+  const navigate = useNavigate();
+  const { isReviewer, user } = useAuth();
+  const [showSignIn, setShowSignIn] = useState(false);
   const [p, setP] = useState<any>(null);
   const [milestones, setMilestones] = useState<any[]>([]);
   const [updates, setUpdates] = useState<any[]>([]);
@@ -258,6 +263,7 @@ export default function ProjectDetail() {
   };
 
   const generateSummary = async () => {
+    if (!user) { setShowSignIn(true); return; }
     setLoadingAi(true);
     setAiSummary('');
     setAiError('');
@@ -285,7 +291,7 @@ export default function ProjectDetail() {
       <SiteHeader />
 
       <section className="relative gradient-hero text-primary-foreground">
-        <div className="container py-12">
+        <div className="container py-8">
           <div className="flex items-center gap-2 text-xs font-mono uppercase tracking-wider text-primary-foreground/60 mb-4">
             <Link to="/projects" className="hover:text-accent">Projects</Link>
             <span>/</span><span>{p.sector}</span>
@@ -304,19 +310,33 @@ export default function ProjectDetail() {
                     </Badge>
                   );
                 })()}
+                {(() => {
+                  const perf = scoreByPerformance(p);
+                  const { grade } = letterGrade(perf.score);
+                  // Hero sits on a dark navy background — use bright variants that
+                  // stay readable regardless of grade, unlike the muted light-mode cls.
+                  const heroCls: Record<string, string> = {
+                    A: 'border-emerald-400/70 bg-emerald-400/15 text-emerald-300',
+                    B: 'border-sky-400/70 bg-sky-400/15 text-sky-300',
+                    C: 'border-amber-400/70 bg-amber-400/15 text-amber-300',
+                    D: 'border-orange-400/70 bg-orange-400/15 text-orange-300',
+                    F: 'border-red-400/70 bg-red-400/15 text-red-300',
+                  };
+                  return (
+                    <Badge variant="outline" className={cn('text-[10px] font-mono font-semibold', heroCls[grade] ?? heroCls.F)}>
+                      Score {perf.score}/100 · {grade}
+                    </Badge>
+                  );
+                })()}
               </div>
               <h1 className="font-display text-4xl md:text-5xl font-bold leading-tight text-balance">{p.title}</h1>
               <div className="text-primary-foreground/70"><ReviewHistoryIcon targetTable="projects" targetId={p.id} /></div>
               {/* Banner blurb prefers projects.description, then falls back to
                   the latest analysis run's narrative_summary so the hero isn't
                   blank when an AI sweep has populated the detail tables but
-                  no human-curated description exists yet. line-clamp-6 keeps
-                  long narratives from pushing the hero card off-screen — the
-                  full text is still visible inside the AI Project Brief below. */}
+                  no human-curated description exists yet. */}
               {(p.description?.trim() || latestAnalysisRun?.narrative_summary?.trim()) && (
-                <p className="text-lg text-primary-foreground/80 leading-relaxed max-w-3xl whitespace-pre-wrap line-clamp-6">
-                  {p.description?.trim() || latestAnalysisRun.narrative_summary}
-                </p>
+                <DescriptionBlurb text={p.description?.trim() || latestAnalysisRun.narrative_summary} />
               )}
             </div>
             <Card className="bg-primary-glow/40 backdrop-blur border-primary-foreground/10 text-primary-foreground p-5 space-y-3">
@@ -327,56 +347,12 @@ export default function ProjectDetail() {
                   staying at "—" until a moderator manually edits the
                   projects table. */}
               <KV icon={Wallet} label="Budget" value={formatNPR(p.budget_npr ?? aggregates.fundingTotalNpr)} />
+              {p.fiscal_year && <KV icon={CalendarDays} label="Fiscal year" value={`FY ${p.fiscal_year}`} />}
               <KV icon={MapPin} label="Location" value={`${p.district ?? '—'}${p.province ? `, ${p.province}` : ''}`} />
               <KV icon={Building2} label="Implementing agency" value={p.implementing_agency ?? aggregates.implementingAgency ?? '—'} />
               <KV icon={HardHat} label="Contractor" value={p.contractor ?? aggregates.contractor ?? '—'} />
               <KV icon={Calendar} label="Timeline" value={`${p.start_date ?? aggregates.earliestDate ?? 'TBD'} → ${p.expected_completion ?? aggregates.latestDate ?? 'TBD'}`} />
-              {(() => {
-                // Progress is shown only when an AI extraction (or manual
-                // edit) supplies a real number. Two paths:
-                //   1. projects.progress_percent  (manual / curator-set, > 0)
-                //   2. projects.reported_progress_* (extracted from corpus by
-                //      analysis-drain — see migration 20260513250000). When
-                //      present, render "X% reported as of YYYY-MM-DD ↗ source".
-                // No derived heuristics. If no number exists yet, the row
-                // says "Not yet reported" with a hint about Trace History.
-                const fromProject = typeof p.progress_percent === 'number' && p.progress_percent > 0 ? p.progress_percent : null;
-                const reportedValue = typeof p.reported_progress_percent === 'number' ? p.reported_progress_percent : null;
-                const reportedAsOf = typeof p.reported_progress_as_of === 'string' ? p.reported_progress_as_of : null;
-                const reportedSource = typeof p.reported_progress_source_url === 'string' ? p.reported_progress_source_url : null;
-                const reportedQuote = typeof p.reported_progress_quote === 'string' ? p.reported_progress_quote : null;
-                const value = fromProject ?? reportedValue;
-                return (
-                  <div className="pt-3 border-t border-primary-foreground/10">
-                    <div className="flex justify-between text-xs mb-1.5">
-                      <span className="text-primary-foreground/70">Progress</span>
-                      {value != null ? (
-                        <span className="font-mono font-semibold">{value}%</span>
-                      ) : (
-                        <span className="text-[10px] text-primary-foreground/60 italic">Not yet reported</span>
-                      )}
-                    </div>
-                    <div className="h-2 bg-primary-foreground/10 rounded-full overflow-hidden">
-                      {value != null && (
-                        <div className="h-full bg-accent" style={{ width: `${Math.min(100, value)}%` }} />
-                      )}
-                    </div>
-                    {value != null && reportedValue != null && fromProject == null && (
-                      <p className="text-[10px] text-primary-foreground/70 font-mono mt-2 leading-snug" title={reportedQuote ?? ''}>
-                        as of {reportedAsOf ?? '—'}
-                        {reportedSource && (
-                          <> · <a href={reportedSource} target="_blank" rel="noreferrer" className="underline hover:text-accent">source</a></>
-                        )}
-                      </p>
-                    )}
-                    {value == null && (
-                      <p className="text-[10px] text-primary-foreground/60 mt-2 leading-snug">
-                        No overall completion figure cited in the public record yet. Trace History pulls a fresh corpus.
-                      </p>
-                    )}
-                  </div>
-                );
-              })()}
+              <ProgressBreakdown project={p} milestones={milestones} updates={updates} />
             </Card>
           </div>
         </div>
@@ -413,7 +389,7 @@ export default function ProjectDetail() {
                 <Button size="sm" onClick={generateSummary} disabled={loadingAi}>
                   {loadingAi ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Generate'}
                 </Button>
-                <Button size="sm" variant="outline" onClick={() => exportProjectReport(p, aiSummary, milestones, updates, latestAnalysisRun?.narrative_summary ?? null, latestAnalysisRun?.gaps_and_contradictions ?? [])}>
+                <Button size="sm" variant="outline" disabled={!aiSummary} onClick={() => exportProjectReport(p, aiSummary, milestones, updates, latestAnalysisRun?.narrative_summary ?? null, latestAnalysisRun?.gaps_and_contradictions ?? [])}>
                   <Download className="h-4 w-4" /> Export PDF
                 </Button>
               </div>
@@ -455,6 +431,38 @@ export default function ProjectDetail() {
               </p>
             )}
           </Card>
+
+          {(() => {
+            const perf = scoreByPerformance(p);
+            const doc  = scoreByDocumentation(p);
+            const perfGrade = letterGrade(perf.score);
+            const docGrade  = letterGrade(doc.score);
+            const perfLine  = perf.dims.map(d => `${d.label} (${d.points}/${d.max})`).join(' · ');
+            const present   = doc.dims.filter(d => d.points > 0).map(d => d.label);
+            const missing   = doc.dims.filter(d => d.points === 0).map(d => d.label);
+            return (
+              <Card className="p-5 space-y-3">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <div className="text-sm font-semibold">Project scores</div>
+                  <Badge variant="outline" className={cn('text-[10px] font-mono', perfGrade.cls)}>
+                    Performance {perf.score}/100 · {perfGrade.grade}
+                  </Badge>
+                  <Badge variant="outline" className={cn('text-[10px] font-mono', docGrade.cls)}>
+                    Documentation {doc.score}/100 · {docGrade.grade}
+                  </Badge>
+                </div>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  <span className="font-medium text-foreground">Performance ({perf.score}/100 · {perfGrade.grade}):</span>{' '}
+                  Rated across four dimensions — {perfLine}.
+                </p>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  <span className="font-medium text-foreground">Documentation ({doc.score}/100 · {docGrade.grade}):</span>{' '}
+                  {present.length > 0 ? `${present.length} of 10 fields present: ${present.join(', ')}.` : 'No documentation fields filled in.'}{' '}
+                  {missing.length > 0 && `Missing: ${missing.join(', ')}.`}
+                </p>
+              </Card>
+            );
+          })()}
 
           <Card className="p-5">
             <div className="flex items-start justify-between gap-4 mb-4">
@@ -639,6 +647,76 @@ export default function ProjectDetail() {
       </div>
 
       <SiteFooter />
+
+      <Dialog open={showSignIn} onOpenChange={setShowSignIn}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Sign in required</DialogTitle>
+            <DialogDescription>
+              You need to sign in to use AI features. Create a free account or log in to generate briefs and export PDFs.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-2 pt-2">
+            <Button onClick={() => { setShowSignIn(false); navigate('/auth'); }}>
+              Sign in / Sign up
+            </Button>
+            <Button variant="ghost" onClick={() => setShowSignIn(false)}>Cancel</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+function DescriptionBlurb({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [overflows, setOverflows] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const textRef = useRef<HTMLParagraphElement>(null);
+
+  useLayoutEffect(() => {
+    const wrapper = wrapperRef.current;
+    const inner = textRef.current;
+    if (!wrapper || !inner) return;
+    const measure = () => setOverflows(inner.scrollHeight > wrapper.clientHeight + 1);
+    measure();
+    // Recompute on resize since the clamp is viewport-relative (40vh).
+    const ro = new ResizeObserver(measure);
+    ro.observe(wrapper);
+    window.addEventListener('resize', measure);
+    return () => { ro.disconnect(); window.removeEventListener('resize', measure); };
+  }, [text]);
+
+  return (
+    <div className="max-w-3xl">
+      <div
+        ref={wrapperRef}
+        className={cn(
+          'relative',
+          !expanded && 'max-h-[40vh] overflow-hidden'
+        )}
+      >
+        <p
+          ref={textRef}
+          className="text-lg text-primary-foreground/80 leading-relaxed whitespace-pre-wrap"
+        >
+          {text}
+        </p>
+        {!expanded && overflows && (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-primary to-transparent"
+          />
+        )}
+      </div>
+      {(overflows || expanded) && (
+        <button
+          onClick={() => setExpanded(v => !v)}
+          className="mt-2 text-sm font-medium text-accent hover:text-accent/80 transition-colors"
+        >
+          {expanded ? 'See less' : '...see more'}
+        </button>
+      )}
     </div>
   );
 }

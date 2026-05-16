@@ -100,3 +100,14 @@ export const STATUS_COLORS_OVERLAY: Record<string, string> = {
   completed:   'bg-success/95 text-white backdrop-blur-sm shadow-md ring-1 ring-black/10',
   cancelled:   'bg-foreground/80 text-background backdrop-blur-sm shadow-md ring-1 ring-black/10',
 };
+
+// Nepal fiscal years in Bikram Sambat format "YYYY/YY".
+// FY starts Shrawan 1 (≈ mid-July) and ends Ashad end (≈ mid-July next year).
+// List spans historical records (2070/71) through near-future planning (2085/86).
+export const FISCAL_YEARS: readonly string[] = (() => {
+  const out: string[] = [];
+  for (let y = 2070; y <= 2085; y++) {
+    out.push(`${y}/${String(y + 1).slice(2)}`);
+  }
+  return out;
+})();

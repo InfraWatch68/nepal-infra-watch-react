@@ -103,7 +103,7 @@ export function scoreByPerformance(p: any): ScoredProject {
 
 // ─── Documentation rubric (10 × 10 pts) ───────────────────────────────────
 
-function scoreByDocumentation(p: any): ScoredProject {
+export function scoreByDocumentation(p: any): ScoredProject {
   const now = Date.now();
   const dims: Dimension[] = [
     { key: 'budget',     label: 'budget',            points: Number(p.budget_npr) > 0 ? 10 : 0, max: 10 },
