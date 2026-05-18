@@ -30,6 +30,7 @@
 11. [Sherlock — Live Discovery](#sherlock--live-discovery)
 12. [Moderation — Review queue](#moderation--review-queue)
 13. [Moderation — Pending updates / sources](#moderation--pending-updates--sources)
+13. [Moderation — Bulk enrich coordinates & fiscal year](#moderation--bulk-enrich-coordinates--fiscal-year)
 14. [Activity dashboard](#activity-dashboard)
 15. [Browse page (admin perspective)](#browse-page-admin-perspective)
 16. [Project Detail page (admin perspective)](#project-detail-page-admin-perspective)
@@ -163,6 +164,7 @@ Where to find it: `/admin` → scroll past API Keys → **`Local AI tools`** car
 - **+ All 7 detail-table enum lists now include `other`** (it was always valid at the DB level; the prompt was just hiding it). `project_documents.doc_type` also picked up the missing `legal`. AIs no longer have to map to wrong-but-close values when the article describes something unusual.
 - **+ Go Live end-of-grid detection.** When the resume checkpoint exactly matches the last cell of the current grid (`sectors[sectors.length-1]` × `provinces[provinces.length-1]`), the prompt now says: GRID COMPLETE — exit without claiming the session, tell the admin to toggle Start Fresh or narrow scope. Prevents the empty round-trip ChatGPT hit.
 - **+ Shell-escape gotcha section in the header.** Tells the AI to build JSON objects in the runtime and serialise with the language's encoder (`ConvertTo-Json` / `json.dumps` / `JSON.stringify`) rather than interpolating prose into shell strings. Specifically calls out: typographic apostrophe + em-dash + Unicode punctuation breaking here-strings; PowerShell 5.1's default UTF-16 encoding requiring explicit `[System.Text.Encoding]::UTF8.GetBytes` before `Invoke-RestMethod -Body`.
+- **+ (added 2026-05-18) New `enrich-coords-fy` workflow row** — "Enrich coordinates + fiscal year". Two checkboxes inside the row (Coordinates / Fiscal year, both checked by default) + "Copy prompt" button. Self-contained prompt fetches approved projects where the selected field(s) are NULL, web-searches authoritative sources (`.gov.np`, ppmo, bolpatra, news), applies the same ≥ 0.75 confidence + Nepal bounds (lat 26.3–30.5, lng 80.0–88.2) + Nepali FY (`YYYY/YY`) rubric as the server function, and PATCHes only the requested null fields via REST. Mirrors the new server-side bulk-enrich panel on the Moderation status tab.
 - All previous behaviour preserved: two credential slots, Per-cell target semantics, portability hardening, reviewed_at trigger fix, batch rollback, kill switch + heartbeat, cross-mode integration with server Sherlock Live, paste-back fallback.
 
 **Fix / Change:** Two retrospectives' worth of real session failures rolled into the prompts. (1) Schema accuracy — `succeeded` not `done`, `text[]` not prose, `other` is valid everywhere — eliminates the most common HTTP 400s the AI was hitting. (2) Resource discipline — Max projects cap stops Live Check from accidentally chewing through a backlog when a burst of approvals lands; watcher-vs-backlog hint steers admins to the right tool. (3) Operational hygiene — end-of-grid detection avoids empty Go Live sessions; shell-escape notes preempt a class of PowerShell-specific failures.
@@ -419,6 +421,31 @@ Where to find it: `/admin` → tab bar → "Pending updates (N)" and "Pending so
 - Pending-sources moderation rows can surface the new fields when a moderator opens the inline detail view (no UI change to the queue list itself this pass — fields render in `DetailRowDialog` when present).
 
 **Fix / Change:** Previously source citations were stored as flat URL/title/type, and progress percentages lived in a single `reported_progress_percent` on the project row. A project with three articles all citing different percentages would only retain the latest. Per-source `progress_percent + cited_at` lets the front-end pick the newest dated citation and lets moderators see the full history.
+
+---
+
+## Moderation — Bulk enrich coordinates & fiscal year
+
+Bulk AI lookup that fills missing `projects.coordinates` and `projects.fiscal_year` on approved rows. Lives on the Moderation status tab as a collapsible card above the existing per-project moderation list.
+
+Where to find it: `/admin` → tab bar → "Moderation status" tab → top of the tab → **"Bulk enrich missing fields"** card.
+
+### Previous
+_(did not exist — coordinates and fiscal_year were only filled when (a) the submitter typed them, (b) `analysis-drain`'s extraction prompt happened to include them in its `basic_updates` block, or (c) a moderator edited the row manually)_
+
+### Current
+- Card with two checkboxes — **Coordinates** and **Fiscal year** — both checked by default. Live missing-counts next to each checkbox (counted via `select(id, head:true, count:'exact').eq('approval_status','approved').is(<field>, null)`).
+- **Run enrichment** button calls the new `ai-enrich-coords-fy` edge function with `{ fields: <checked> }`. Disabled when no field is selected or both counts are zero.
+- Server function (reviewer+ gated) iterates approved projects missing at least one requested field, runs one Tavily search per project scoped to `.gov.np` / `ppmo.gov.np` / `bolpatra.gov.np`, asks the chat model (Mistral → Google → Lovable fallback chain with the existing `api_keys` rotation) to return strict JSON `{ coordinates: "lat, lng" | null, fiscal_year: "YYYY/YY" | null, confidence: 0.00–1.00, sources: [...] }`.
+- **Validation**: coordinates must fall inside Nepal bounds (lat 26.3–30.5, lng 80.0–88.2); fiscal_year must match Nepali FY format `YYYY/YY`. Values outside the bounds are dropped, not written.
+- **Writes**: direct PATCH to `projects` when `confidence ≥ site_settings.auto_approve_threshold` (default 0.75), and only for requested fields that are currently NULL and that the AI returned non-null. No pending-state staging, no overwrites of existing values.
+- Returns `{ ok, processed, enriched_coords, enriched_fy, skipped_low_conf, skipped_no_data }` → surfaced in a toast on the admin card. Counts re-fetch after the run.
+- Mirror feature in the **Local AI tools** panel as the `enrich-coords-fy` workflow row — same checkboxes, same rubric, runs in the moderator's own AI tool quota.
+
+**Backing function:**
+- `supabase/functions/ai-enrich-coords-fy/index.ts` — reviewer+ auth, CORS preflight, Tavily search, Mistral/Google/Lovable chat fallback, Nepal bounds + Nepali FY validation, null-only direct writes.
+
+**Fix / Change:** Previously the only way to backfill missing coordinates and fiscal years was per-project manual editing or hoping `analysis-drain`'s extraction prompt picked them up (it inconsistently did, since its prompt is optimised for the seven detail tables not the basic columns). The new panel makes it a one-click bulk action with the same key-rotation, confidence threshold, and value-validation discipline as the rest of the AI pipeline.
 
 ---
 

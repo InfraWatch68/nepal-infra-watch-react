@@ -84,6 +84,7 @@ export default function SubmitProject() {
     setSources(rows => rows.map((r, idx) => idx === i ? { ...r, ...patch } : r));
   const addSource = () => setSources(rows => [...rows, { url: '', title: '', source_type: 'article' }]);
   const removeSource = (i: number) => setSources(rows => rows.filter((_, idx) => idx !== i));
+  const districtOptions = useMemo(() => districtsFor(form.province), [form.province]);
 
   // Load existing project on edit mode. Restricted to submitter or moderators
   // by RLS; we additionally guard the form to read-only for everyone else.
@@ -135,7 +136,6 @@ export default function SubmitProject() {
   if (!authLoading && !user) {
     return <Navigate to="/auth?mode=signup&next=/dashboard/submit" replace />;
   }
-  const districtOptions = useMemo(() => districtsFor(form.province), [form.province]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();

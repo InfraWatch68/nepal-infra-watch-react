@@ -30,6 +30,7 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
 
 export default function ProjectRatings() {
   const [projects, setProjects] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
   const [sort, setSort] = useState<SortKey>('score-desc');
   const [sectorFilter, setSectorFilter] = useState<string>('all');
   const [provinceFilter, setProvinceFilter] = useState<string>('all');
@@ -37,7 +38,8 @@ export default function ProjectRatings() {
 
   useEffect(() => {
     supabase.from('projects').select('*').eq('approval_status', 'approved')
-      .then(({ data }) => setProjects(data ?? []));
+      .then(({ data }) => setProjects(data ?? []))
+      .finally(() => setLoading(false));
   }, []);
 
   // Score every project, then filter, then sort. Memoised to avoid
@@ -100,7 +102,7 @@ export default function ProjectRatings() {
             <div className="space-y-1 w-full lg:w-auto">
               <label className="text-[10px] uppercase tracking-wider font-mono text-muted-foreground">Sort by</label>
               <Select value={sort} onValueChange={(v) => setSort(v as SortKey)}>
-                <SelectTrigger className="w-full lg:w-[210px]"><SelectValue /></SelectTrigger>
+                <SelectTrigger aria-label="Sort project ratings" className="w-full lg:w-[210px]"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {SORT_OPTIONS.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
                 </SelectContent>
@@ -109,7 +111,7 @@ export default function ProjectRatings() {
             <div className="space-y-1 w-full lg:w-auto">
               <label className="text-[10px] uppercase tracking-wider font-mono text-muted-foreground">Sector</label>
               <Select value={sectorFilter} onValueChange={setSectorFilter}>
-                <SelectTrigger className="w-full lg:w-[180px]"><SelectValue /></SelectTrigger>
+                <SelectTrigger aria-label="Filter ratings by sector" className="w-full lg:w-[180px]"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All sectors</SelectItem>
                   {SECTORS.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}
@@ -119,7 +121,7 @@ export default function ProjectRatings() {
             <div className="space-y-1 w-full lg:w-auto">
               <label className="text-[10px] uppercase tracking-wider font-mono text-muted-foreground">Province</label>
               <Select value={provinceFilter} onValueChange={setProvinceFilter}>
-                <SelectTrigger className="w-full lg:w-[160px]"><SelectValue /></SelectTrigger>
+                <SelectTrigger aria-label="Filter ratings by province" className="w-full lg:w-[160px]"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All provinces</SelectItem>
                   {PROVINCES.map(p => <SelectItem key={p} value={p}>{p}</SelectItem>)}
@@ -129,7 +131,7 @@ export default function ProjectRatings() {
             <div className="space-y-1 w-full lg:w-auto">
               <label className="text-[10px] uppercase tracking-wider font-mono text-muted-foreground">Status</label>
               <Select value={statusFilter} onValueChange={setStatusFilter}>
-                <SelectTrigger className="w-full lg:w-[160px]"><SelectValue /></SelectTrigger>
+                <SelectTrigger aria-label="Filter ratings by status" className="w-full lg:w-[160px]"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All statuses</SelectItem>
                   {Object.entries(STATUS_LABELS).map(([k, l]) => <SelectItem key={k} value={k}>{l}</SelectItem>)}
@@ -157,7 +159,16 @@ export default function ProjectRatings() {
               </tr>
             </thead>
             <tbody>
-              {rows.length === 0 && (
+              {loading && (
+                Array.from({ length: 5 }).map((_, i) => (
+                  <tr key={i} className="border-b border-border/60">
+                    <td colSpan={7} className="px-4 py-4">
+                      <div className="h-4 w-full rounded bg-muted animate-pulse" />
+                    </td>
+                  </tr>
+                ))
+              )}
+              {!loading && rows.length === 0 && (
                 <tr><td colSpan={7} className="px-4 py-8 text-center text-xs text-muted-foreground">No projects match the current filters.</td></tr>
               )}
               {rows.map((p, i) => {
@@ -221,7 +232,16 @@ export default function ProjectRatings() {
 
         {/* Mobile card-list view */}
         <div className="md:hidden space-y-3">
-          {rows.length === 0 && (
+          {loading && (
+            Array.from({ length: 3 }).map((_, i) => (
+              <div key={i} className="p-4 rounded-md border border-border bg-background">
+                <div className="h-4 w-1/3 rounded bg-muted animate-pulse mb-3" />
+                <div className="h-5 w-full rounded bg-muted animate-pulse mb-2" />
+                <div className="h-3 w-2/3 rounded bg-muted animate-pulse" />
+              </div>
+            ))
+          )}
+          {!loading && rows.length === 0 && (
             <div className="text-center text-xs text-muted-foreground py-6">No projects match the current filters.</div>
           )}
           {rows.map((p, i) => {

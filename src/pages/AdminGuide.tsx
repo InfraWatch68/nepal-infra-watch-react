@@ -166,13 +166,13 @@ export default function AdminGuide() {
     const isAddition = txt.startsWith('+') || txt.startsWith('+ ');
     if (isAddition) {
       return (
-        <li className="not-prose flex gap-2 items-start my-1.5 pl-0 list-none">
+        <li className="not-prose flex gap-2 items-start my-1.5 pl-0 list-none max-w-full break-words">
           <Plus className="h-3.5 w-3.5 text-success shrink-0 mt-1" />
-          <div className="text-sm">{p.children}</div>
+          <div className="min-w-0 text-sm break-words">{p.children}</div>
         </li>
       );
     }
-    return <li>{p.children}</li>;
+    return <li className="break-words">{p.children}</li>;
   };
 
   return (
@@ -254,7 +254,7 @@ export default function AdminGuide() {
       </div>
 
       <div className="container py-6 md:py-10">
-        <div className="grid grid-cols-1 md:grid-cols-[220px_1fr] lg:grid-cols-[260px_1fr] gap-6 lg:gap-10">
+        <div className="grid grid-cols-1 md:grid-cols-[220px_minmax(0,1fr)] lg:grid-cols-[260px_minmax(0,1fr)] gap-6 lg:gap-10">
           {/* Desktop sticky TOC. Hidden on mobile (controlled by the
               disclosure above). Sticky at the top of the viewport beneath
               the site header (which is ~64px tall). */}
@@ -289,13 +289,14 @@ export default function AdminGuide() {
               out from the surrounding prose flow. */}
           <article className={cn(
             'prose prose-sm sm:prose-base max-w-none min-w-0',
+            'break-words prose-li:break-words prose-ul:max-w-full prose-ul:overflow-x-hidden',
             'prose-headings:font-display prose-headings:scroll-mt-24',
             'prose-h1:text-3xl prose-h1:mb-4',
             'prose-h2:text-2xl prose-h2:mt-14 prose-h2:mb-4 prose-h2:pb-3 prose-h2:border-b prose-h2:border-border',
             'prose-p:leading-relaxed',
             'prose-a:text-accent prose-a:no-underline hover:prose-a:underline',
-            'prose-code:font-mono prose-code:text-[0.85em] prose-code:bg-muted prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:border prose-code:border-border/60 prose-code:before:content-none prose-code:after:content-none',
-            'prose-pre:bg-muted prose-pre:border prose-pre:border-border prose-pre:text-xs',
+            'prose-code:font-mono prose-code:text-[0.85em] prose-code:bg-muted prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:border prose-code:border-border/60 prose-code:before:content-none prose-code:after:content-none prose-code:whitespace-normal',
+            'prose-pre:bg-muted prose-pre:border prose-pre:border-border prose-pre:text-xs prose-pre:overflow-x-auto',
             'prose-blockquote:border-l-accent prose-blockquote:bg-muted/30 prose-blockquote:py-2 prose-blockquote:not-italic',
             'prose-table:text-xs sm:prose-table:text-sm prose-table:border prose-table:border-border prose-table:rounded prose-table:overflow-hidden',
             'prose-th:bg-muted prose-th:font-mono prose-th:text-xs prose-th:uppercase prose-th:tracking-wider',

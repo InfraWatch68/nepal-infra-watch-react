@@ -15,7 +15,7 @@
 // to make but not HOW; the AI picks whichever HTTPS-capable tool it has,
 // or falls back to returning a JSON block for the admin to paste back.
 
-export type LocalAiTask = "menu" | "discover" | "go-live" | "analyze" | "live-check" | "refresh-stale" | "brief" | "fetch-news" | "verify";
+export type LocalAiTask = "menu" | "discover" | "go-live" | "analyze" | "live-check" | "refresh-stale" | "enrich-coords-fy" | "brief" | "fetch-news" | "verify";
 
 // One project's row passed into the multi-select-driven workflows. The
 // admin's Local-AI panel pre-fetches this metadata from the DB so the AI
@@ -62,6 +62,7 @@ export type LocalAiInput = {
   // Refresh Stale (one-shot batch over the backlog).
   refreshStaleMax?: number;       // hard cap on projects processed in one run
   refreshStaleDays?: number;      // "stale" threshold in days (default 30)
+  fields?: string[];
   // Go Live resume — when set, the prompt tells the AI to start AFTER this
   // (sector, province) cell in column-major order, skipping everything up
   // through it. The panel populates this from the most recent local Go Live
@@ -1504,6 +1505,92 @@ reads it and decides whether to edit the project record manually.
 Begin.`;
 }
 
+function buildEnrichCoordsFy(input: LocalAiInput): string {
+  const batchId = input.batchId ?? genBatchId();
+  const requested = (input.fields && input.fields.length > 0 ? input.fields : ["coordinates", "fiscal_year"])
+    .filter(f => f === "coordinates" || f === "fiscal_year");
+  const fields = requested.length > 0 ? requested : ["coordinates", "fiscal_year"];
+  return `${buildHeader(batchId)}
+## Task: Enrich coordinates + fiscal year
+
+Requested fields: ${fields.map(f => `\`${f}\``).join(", ")}.
+
+Use web search plus Supabase REST writes to fill confirmed missing values on
+approved projects. This task writes directly to \`projects\`; it does not add
+approval workflow rows.
+
+### REST endpoints
+
+Fetch candidates:
+\`\`\`http
+GET ${SUPABASE_URL}/rest/v1/projects?approval_status=eq.approved&or=(coordinates.is.null,fiscal_year.is.null)&select=id,title,sector,province,district,coordinates,fiscal_year&order=id.asc
+\`\`\`
+
+Patch one project:
+\`\`\`http
+PATCH ${SUPABASE_URL}/rest/v1/projects?id=eq.<PROJECT_ID>
+{
+  "coordinates": "27.7172, 85.3240",
+  "fiscal_year": "2081/82"
+}
+\`\`\`
+
+Only include keys you are actually updating. Never overwrite an existing
+non-null value. Never patch a field that was not requested above.
+
+### Extraction schema
+
+\`\`\`json
+{
+  "coordinates": "lat, lng or null",
+  "fiscal_year": "2081/82 or null",
+  "confidence": 0.0,
+  "sources": [{"url": "https://..."}]
+}
+\`\`\`
+
+### Research instructions
+
+1. GET the candidate list from Supabase using the service-role key.
+2. For each project missing at least one requested field, search authoritative
+   sources first:
+   - \`"<title>" <sector> "<district>" Nepal site:gov.np\`
+   - \`"<title>" <sector> "<district>" Nepal site:bolpatra.gov.np\`
+   - \`"<title>" <sector> "<district>" Nepal site:ppmo.gov.np\`
+   - If those fail, search established Nepali news.
+3. Coordinates must be decimal degrees inside Nepal:
+   - latitude 26.3 to 30.5
+   - longitude 80.0 to 88.2
+   Use \`"lat, lng"\` with 4-6 decimals. Skip coordinates unless the source
+   explicitly gives the project/site location or a named facility you can
+   confidently geocode from authoritative context.
+4. Fiscal year must be Nepali FY format, for example \`2081/82\`. Prefer an
+   explicit Nepali FY from budget, tender, or government pages. Convert AD
+   years only when unambiguous, using mid-July as the FY boundary.
+5. Confidence threshold: write only when \`confidence >= 0.75\`.
+   - 0.90-1.00: government/procurement source states the exact value.
+   - 0.75-0.89: strong source plus corroborating context, no conflict.
+   - 0.50-0.74: plausible but not explicit enough; skip.
+   - below 0.50: weak or conflicting; skip.
+6. PATCH \`projects\` with only confirmed requested fields that are currently
+   null. If both fields are confirmed for the same project, patch both in one
+   request.
+
+### Final summary
+
+Print exactly this JSON shape at the end:
+
+\`\`\`json
+{
+  "enriched_coords": 0,
+  "enriched_fy": 0,
+  "skipped_low_conf": 0
+}
+\`\`\`
+
+Begin by fetching candidates now.`;
+}
+
 export function buildLocalAiPrompt(task: LocalAiTask, input: LocalAiInput = {}): string {
   const builders: Record<LocalAiTask, (i: LocalAiInput) => string> = {
     menu: buildMenu,
@@ -1512,6 +1599,7 @@ export function buildLocalAiPrompt(task: LocalAiTask, input: LocalAiInput = {}):
     analyze: buildAnalyze,
     "live-check": buildLiveCheck,
     "refresh-stale": buildRefreshStale,
+    "enrich-coords-fy": buildEnrichCoordsFy,
     brief: buildBrief,
     "fetch-news": buildFetchNews,
     verify: buildVerify,
@@ -1532,6 +1620,7 @@ export const LOCAL_AI_TASKS: Array<{ key: LocalAiTask; label: string; blurb: str
   { key: "analyze", label: "Analyze projects (deep)", blurb: "Loops over selected projects. Each one gets the full Run-AI-Analysis + Trace-History pipeline: 5-bucket research, 7 detail tables, 3 timeline tables (milestones / updates / sources), narrative summary, gaps." },
   { key: "live-check", label: "Live Check (on-approval analysis)", blurb: "Polls Supabase every 60s for newly-approved projects that lack a comprehensive analysis. Runs the full Analyze pipeline on each. Catches BOTH manual-moderator approvals and auto-approve-trigger approvals (both now stamp reviewed_at). Mirrors the server-side auto-analysis trigger — turn the website toggle OFF when you're using this." },
   { key: "refresh-stale", label: "Refresh stale (backlog sweep)", blurb: "Pulls approved projects with no analysis (or analysis older than 30 days) and runs the full Analyze pipeline on each. One-shot batch — not a polling loop. Mirrors the admin panel's \"Refresh stale approved projects\" button. Use this to chew through the backlog Live Check won't touch." },
+  { key: "enrich-coords-fy", label: "Enrich coordinates + fiscal year", blurb: "Fetches approved projects missing coordinates or fiscal year, researches authoritative sources, and patches confirmed values directly via Supabase REST." },
   { key: "brief", label: "Generate briefs", blurb: "Multi-brief batch over approved projects in a scope → write to global_briefs with importance scoring. Mirrors generate-daily-briefs." },
   { key: "fetch-news", label: "Fetch news", blurb: "Recent news for one project → write project_updates + project_sources. Mirrors ai-fetch-project-news." },
   { key: "verify", label: "Verify project", blurb: "Read-only audit of one project against fresh web sources → returns a JSON report. Mirrors ai-verify-project." },

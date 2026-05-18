@@ -5,9 +5,11 @@ import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { useAuth } from '@/hooks/useAuth';
-import { Loader2, ChevronDown, ChevronRight, Check, RefreshCw, ExternalLink } from 'lucide-react';
+import { Loader2, ChevronDown, ChevronRight, Check, RefreshCw, ExternalLink, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 
@@ -65,6 +67,116 @@ const StatChips = ({ approved, pending }: { approved: number; pending: number })
     </Badge>
   </span>
 );
+
+const BulkEnrichmentCard = () => {
+  const [open, setOpen] = useState(true);
+  const [includeCoords, setIncludeCoords] = useState(true);
+  const [includeFy, setIncludeFy] = useState(true);
+  const [counts, setCounts] = useState({ coordinates: 0, fiscal_year: 0 });
+  const [countsLoading, setCountsLoading] = useState(true);
+  const [running, setRunning] = useState(false);
+
+  const loadCounts = useCallback(async () => {
+    setCountsLoading(true);
+    const [coords, fy] = await Promise.all([
+      supabase
+        .from('projects')
+        .select('id', { count: 'exact', head: true })
+        .eq('approval_status', 'approved')
+        .is('coordinates', null),
+      supabase
+        .from('projects')
+        .select('id', { count: 'exact', head: true })
+        .eq('approval_status', 'approved')
+        .is('fiscal_year' as any, null),
+    ]);
+    setCountsLoading(false);
+    if (coords.error || fy.error) {
+      toast.error(`Enrichment counts failed: ${coords.error?.message ?? fy.error?.message}`);
+      return;
+    }
+    setCounts({ coordinates: coords.count ?? 0, fiscal_year: fy.count ?? 0 });
+  }, []);
+
+  useEffect(() => { loadCounts(); }, [loadCounts]);
+
+  const selectedFields = useMemo(() => {
+    const out: string[] = [];
+    if (includeCoords) out.push('coordinates');
+    if (includeFy) out.push('fiscal_year');
+    return out;
+  }, [includeCoords, includeFy]);
+
+  const selectedMissing = (includeCoords ? counts.coordinates : 0) + (includeFy ? counts.fiscal_year : 0);
+  const canRun = selectedFields.length > 0 && selectedMissing > 0 && !running;
+
+  const run = async () => {
+    if (!canRun) return;
+    setRunning(true);
+    const { data, error } = await supabase.functions.invoke('ai-enrich-coords-fy', {
+      body: { fields: selectedFields },
+    });
+    setRunning(false);
+    if (error) {
+      toast.error(`Enrichment failed: ${error.message}`);
+      return;
+    }
+    const r: any = data ?? {};
+    const total = Number(r.enriched_projects ?? (Number(r.enriched_coords ?? 0) + Number(r.enriched_fy ?? 0)));
+    toast.success(
+      `Enriched ${total} projects (coords: ${Number(r.enriched_coords ?? 0)}, FY: ${Number(r.enriched_fy ?? 0)}). Skipped ${Number(r.skipped_low_conf ?? 0)} for low confidence.`
+    );
+    loadCounts();
+  };
+
+  return (
+    <Card className="p-0 overflow-hidden border-accent/30 bg-accent/5">
+      <Collapsible open={open} onOpenChange={setOpen}>
+        <CollapsibleTrigger className="w-full px-3 py-2 flex items-center justify-between gap-3 text-left hover:bg-accent/10 transition-colors">
+          <div className="flex items-center gap-2 min-w-0">
+            {open ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
+            <Sparkles className="h-3.5 w-3.5 text-accent" />
+            <div className="min-w-0">
+              <div className="text-sm font-semibold">Bulk enrich missing fields</div>
+              <div className="text-[11px] text-muted-foreground">
+                Approved projects missing coordinates or fiscal year
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <Badge variant="outline" className="text-[10px] font-mono border-accent/40 text-accent">
+              {countsLoading ? '...' : counts.coordinates + counts.fiscal_year} missing
+            </Badge>
+          </div>
+        </CollapsibleTrigger>
+        <CollapsibleContent className="border-t border-accent/20 p-3">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-4 flex-wrap">
+              <label className="flex items-center gap-2 text-xs cursor-pointer">
+                <Checkbox checked={includeCoords} onCheckedChange={(v) => setIncludeCoords(!!v)} />
+                <span className="font-medium">Coordinates</span>
+                <Badge variant="outline" className="text-[10px] font-mono">
+                  {countsLoading ? '...' : counts.coordinates} projects missing
+                </Badge>
+              </label>
+              <label className="flex items-center gap-2 text-xs cursor-pointer">
+                <Checkbox checked={includeFy} onCheckedChange={(v) => setIncludeFy(!!v)} />
+                <span className="font-medium">Fiscal year</span>
+                <Badge variant="outline" className="text-[10px] font-mono">
+                  {countsLoading ? '...' : counts.fiscal_year} projects missing
+                </Badge>
+              </label>
+            </div>
+            <Button size="sm" className="h-8 text-xs" onClick={run} disabled={!canRun}>
+              {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+              {running ? `Processing ${selectedMissing} missing fields...` : 'Run enrichment'}
+            </Button>
+          </div>
+        </CollapsibleContent>
+      </Collapsible>
+    </Card>
+  );
+};
 
 const EditProgressPopover = ({
   row,
@@ -254,6 +366,8 @@ export function ProjectModerationTab() {
 
   return (
     <div className="space-y-3">
+      <BulkEnrichmentCard />
+
       {/* Top strip: totals + global threshold + global approve.
           Mirrors the Sherlock queue header (counts on the left, action on the right). */}
       <div className="flex items-center justify-between flex-wrap gap-2 p-2 rounded-md border bg-card">

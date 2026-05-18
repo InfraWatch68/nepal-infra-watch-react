@@ -543,6 +543,8 @@ function WorkflowRow({ task, label, blurb, serviceKey, projects, projectsLoading
   // missing or older than `rsDays` days. `rsMax` caps the run.
   const [rsMax, setRsMax] = useState<number>(20);
   const [rsDays, setRsDays] = useState<number>(30);
+  const [enrichCoords, setEnrichCoords] = useState<boolean>(true);
+  const [enrichFy, setEnrichFy] = useState<boolean>(true);
 
   // Checkpoint discovery — only runs for the Go Live row. Now primary
   // source is sherlock_live_state (id=1) which BOTH the server cron and
@@ -642,9 +644,17 @@ function WorkflowRow({ task, label, blurb, serviceKey, projects, projectsLoading
       liveCheckMaxProjects: lcMaxProjects,
       refreshStaleMax: rsMax,
       refreshStaleDays: rsDays,
+      fields: [
+        ...(enrichCoords ? ["coordinates"] : []),
+        ...(enrichFy ? ["fiscal_year"] : []),
+      ],
     };
     if (task === "analyze" && selectedProjects.length === 0) {
       toast.error("Pick at least one project before copying the Analyze prompt.");
+      return;
+    }
+    if (task === "enrich-coords-fy" && !enrichCoords && !enrichFy) {
+      toast.error("Pick at least one field to enrich.");
       return;
     }
 
@@ -950,6 +960,30 @@ function WorkflowRow({ task, label, blurb, serviceKey, projects, projectsLoading
           </div>
           <p className="text-[10px] text-muted-foreground font-mono leading-snug col-span-2">
             Pulls up to <span className="text-foreground">{rsMax}</span> approved projects with no analysis (or analysis older than {rsDays} days) and runs the full 10-table Analyze pipeline on each, oldest first. One-shot — not a polling loop.
+          </p>
+        </div>
+      )}
+
+      {task === "enrich-coords-fy" && (
+        <div className="flex items-center gap-4 flex-wrap">
+          <label className="flex items-center gap-2 text-xs cursor-pointer">
+            <Checkbox
+              checked={enrichCoords}
+              onCheckedChange={(v) => setEnrichCoords(!!v)}
+              className="h-3.5 w-3.5"
+            />
+            Coordinates
+          </label>
+          <label className="flex items-center gap-2 text-xs cursor-pointer">
+            <Checkbox
+              checked={enrichFy}
+              onCheckedChange={(v) => setEnrichFy(!!v)}
+              className="h-3.5 w-3.5"
+            />
+            Fiscal year
+          </label>
+          <p className="text-[10px] text-muted-foreground font-mono leading-snug basis-full">
+            Copies a REST-capable prompt that fetches approved projects missing either field and patches only confirmed requested values.
           </p>
         </div>
       )}

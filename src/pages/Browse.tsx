@@ -148,31 +148,31 @@ export default function Browse() {
           <Card className="p-4 mb-6 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
             <div className="sm:col-span-2 md:col-span-3 lg:col-span-2 relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <Input value={q} onChange={e => setQ(e.target.value)} placeholder="Search title, contractor, agency..." className="pl-9" />
+              <Input aria-label="Search projects" value={q} onChange={e => setQ(e.target.value)} placeholder="Search title, contractor, agency..." className="pl-9" />
             </div>
             <Select value={sector} onValueChange={setSector}>
-              <SelectTrigger><SelectValue placeholder="Sector" /></SelectTrigger>
+              <SelectTrigger aria-label="Filter by sector"><SelectValue placeholder="Sector" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All sectors</SelectItem>
                 {SECTORS.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}
               </SelectContent>
             </Select>
             <Select value={province} onValueChange={v => { setProvince(v); setDistrict('all'); }}>
-              <SelectTrigger><SelectValue placeholder="Province" /></SelectTrigger>
+              <SelectTrigger aria-label="Filter by province"><SelectValue placeholder="Province" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All provinces</SelectItem>
                 {PROVINCES.map(p => <SelectItem key={p} value={p}>{p}</SelectItem>)}
               </SelectContent>
             </Select>
             <Select value={district} onValueChange={setDistrict}>
-              <SelectTrigger><SelectValue placeholder="District" /></SelectTrigger>
+              <SelectTrigger aria-label="Filter by district"><SelectValue placeholder="District" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">{province === 'all' ? 'All districts' : `All in ${province}`}</SelectItem>
                 {districtOptions.map(d => <SelectItem key={d} value={d}>{d}</SelectItem>)}
               </SelectContent>
             </Select>
             <Select value={municipality} onValueChange={setMunicipality} disabled={province === 'all' || district === 'all' || munQuery.isLoading}>
-              <SelectTrigger>
+              <SelectTrigger aria-label="Filter by municipality">
                 <SelectValue placeholder={
                   province === 'all' ? 'Pick province first'
                   : district === 'all' ? 'Pick district first'
@@ -192,14 +192,14 @@ export default function Browse() {
               </SelectContent>
             </Select>
             <Select value={status} onValueChange={setStatus}>
-              <SelectTrigger><SelectValue placeholder="Status" /></SelectTrigger>
+              <SelectTrigger aria-label="Filter by project status"><SelectValue placeholder="Status" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">Any status</SelectItem>
                 {Object.entries(STATUS_LABELS).map(([k, v]) => <SelectItem key={k} value={k}>{v}</SelectItem>)}
               </SelectContent>
             </Select>
             <Select value={sort} onValueChange={(v) => setSort(v as SortKey)}>
-              <SelectTrigger><SelectValue placeholder="Sort" /></SelectTrigger>
+              <SelectTrigger aria-label="Sort projects"><SelectValue placeholder="Sort" /></SelectTrigger>
               <SelectContent>
                 {SORT_OPTIONS.map(o => <SelectItem key={o.v} value={o.v}>{o.label}</SelectItem>)}
               </SelectContent>

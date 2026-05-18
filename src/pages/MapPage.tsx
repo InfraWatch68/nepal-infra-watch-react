@@ -7,10 +7,12 @@ import { Card } from '@/components/ui/card';
 
 export default function MapPage() {
   const [projects, setProjects] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
   useEffect(() => {
     supabase.from('projects').select('id,slug,title,latitude,longitude,status,sector')
       .eq('approval_status', 'approved').not('latitude', 'is', null)
-      .then(({ data }) => setProjects(data ?? []));
+      .then(({ data }) => setProjects(data ?? []))
+      .finally(() => setLoading(false));
   }, []);
 
   return (
@@ -24,8 +26,21 @@ export default function MapPage() {
         </div>
       </section>
       <div className="container py-4 sm:py-6 flex-1">
-        <Card className="overflow-hidden h-[60vh] sm:h-[calc(100vh-280px)] sm:min-h-[500px]">
-          <ProjectMap projects={projects} />
+        <Card className="relative overflow-hidden h-[60vh] sm:h-[calc(100vh-280px)] sm:min-h-[500px]">
+          {loading ? (
+            <div className="h-full w-full bg-muted/50 animate-pulse" aria-label="Loading project map" />
+          ) : projects.length === 0 ? (
+            <div className="h-full flex items-center justify-center p-6 text-center">
+              <div>
+                <h2 className="font-display text-xl font-semibold mb-2">No geo-tagged projects yet</h2>
+                <p className="text-sm text-muted-foreground max-w-md">
+                  Approved projects with latitude and longitude will appear here.
+                </p>
+              </div>
+            </div>
+          ) : (
+            <ProjectMap projects={projects} />
+          )}
         </Card>
       </div>
       <SiteFooter />
