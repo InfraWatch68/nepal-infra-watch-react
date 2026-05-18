@@ -31,7 +31,7 @@ function parseEnvFallback(envSingle: string, envMulti: string): string[] {
   const seen = new Set<string>();
   const s = (Deno.env.get(envSingle) ?? '').trim();
   if (s) { out.push(s); seen.add(s); }
-  const m = (Deno.env.get(envMulti) ?? '').split(',').map(k => k.trim()).filter(Boolean);
+  const m = envMulti ? (Deno.env.get(envMulti) ?? '').split(',').map(k => k.trim()).filter(Boolean) : [];
   for (const k of m) if (!seen.has(k)) { out.push(k); seen.add(k); }
   return out;
 }
@@ -127,8 +127,10 @@ export async function markSucceeded(
 // rotation logic in ai-discover-projects and analysis-drain.
 export function isExhaustionStatus(provider: ProviderName, status: number, bodySnippet?: string): boolean {
   if (provider === 'tavily') {
-    // 401 unauthorized (invalid/revoked), 429 rate, 432 plan-limit, 433 paygo
-    return status === 401 || status === 429 || status === 432 || status === 433;
+    // Only true quota signals mark a key exhausted. 401 unauthorized means
+    // the key is invalid/revoked — callers should rotate without marking.
+    // 429 rate, 432 plan-limit, 433 paygo are real quota responses.
+    return status === 429 || status === 432 || status === 433;
   }
   if (provider === 'mistral') {
     // 402 credits exhausted; 429 if body contains free_tier or RESOURCE_EXHAUSTED

@@ -175,15 +175,21 @@ async function tavilySearch(
       markSucceeded(admin, 'tavily', keys[i]).catch(() => {});
       return { response: res, keyIndex: i, usedKey: keys[i] };
     }
-    // Persist exhaustion — key sinks to bottom for future invocations.
+    lastStatus = res.status;
+    // 401 = invalid/revoked key — rotate without marking exhausted so a
+    // single bad key doesn't burn the whole rotation.
+    if (res.status === 401) {
+      await res.text().catch(() => "");
+      continue;
+    }
+    // Real quota signals (429/432/433) persist exhaustion so the key sinks
+    // to the bottom for future invocations.
     const reason = res.status === 432 ? '432 plan-limit'
       : res.status === 433 ? '433 paygo-limit'
-      : res.status === 401 ? '401 unauthorized'
       : res.status === 429 ? '429 rate-limit'
       : `HTTP ${res.status}`;
     markExhausted(admin, 'tavily', keys[i], reason).catch(() => {});
-    lastStatus = res.status;
-    await res.text();
+    await res.text().catch(() => "");
   }
   return { exhausted: true, lastStatus };
 }

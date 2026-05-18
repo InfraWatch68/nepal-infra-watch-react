@@ -31,6 +31,7 @@ import { AdminRemovalPanel } from '@/components/admin/AdminRemovalPanel';
 import { ReviewHistoryIcon } from '@/components/ReviewHistoryIcon';
 import { ApiKeysPanel } from '@/components/admin/ApiKeysPanel';
 import { LocalAIPanel } from '@/components/admin/LocalAIPanel';
+import { AnalysisJobsMonitor } from '@/components/admin/AnalysisJobsMonitor';
 
 const APPROVAL_COLORS: Record<string, string> = {
   pending: 'bg-warning/15 text-warning',
@@ -633,7 +634,9 @@ export default function Admin() {
           <TabsContent value="activity" className="mt-4">
             <ActivityDashboardTab />
           </TabsContent>
-          <TabsContent value="moderation" className="mt-4">
+          <TabsContent value="moderation" className="mt-4 space-y-4">
+            {/* No dedicated AI/Analysis tab exists; Moderation is the closest admin workflow for analysis queue visibility. */}
+            <AnalysisJobsMonitor />
             <ProjectModerationTab />
           </TabsContent>
           <TabsContent value="updates" className="mt-4">

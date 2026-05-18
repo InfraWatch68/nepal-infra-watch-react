@@ -24,6 +24,7 @@ import { ProjectMap } from '@/components/ProjectMap';
 import { ComprehensiveSections, SourceLink } from '@/components/ComprehensiveSections';
 import { ReviewHistoryIcon } from '@/components/ReviewHistoryIcon';
 import { ProgressBreakdown } from '@/components/ProgressBreakdown';
+import { VerifyDialog } from '@/components/admin/VerifyDialog';
 import { scoreByPerformance, scoreByDocumentation, letterGrade } from '@/components/analytics/ProjectLeaderboard';
 import { toast } from 'sonner';
 import { projectCoverImage } from '@/lib/projectImages';
@@ -482,10 +483,13 @@ export default function ProjectDetail() {
                 </div>
               </div>
               {isReviewer && (
-                <Button size="sm" variant="outline" onClick={runTraceHistory} disabled={traceBusy || traceInFlight} title="Fetch milestones, updates, citations, and images from the public record. Shares the analysis queue with Run AI Analysis.">
-                  {traceBusy || traceInFlight ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                  {traceInFlight ? 'Tracing…' : 'Trace History'}
-                </Button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <VerifyDialog projectId={p.id} projectTitle={p.title} />
+                  <Button size="sm" variant="outline" onClick={runTraceHistory} disabled={traceBusy || traceInFlight} title="Fetch milestones, updates, citations, and images from the public record. Shares the analysis queue with Run AI Analysis.">
+                    {traceBusy || traceInFlight ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                    {traceInFlight ? 'Tracing…' : 'Trace History'}
+                  </Button>
+                </div>
               )}
             </div>
 

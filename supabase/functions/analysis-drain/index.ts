@@ -55,14 +55,18 @@ async function tavily(admin: any, keys: string[], payload: Record<string, unknow
       markSucceeded(admin, 'tavily', keys[i]).catch(() => {});
       return { res, keyIndex: i };
     }
+    lastStatus = res.status;
+    // 401 = invalid/revoked key — rotate without marking exhausted.
+    if (res.status === 401) {
+      await res.text().catch(() => "");
+      continue;
+    }
     const reason = res.status === 432 ? '432 plan-limit'
       : res.status === 433 ? '433 paygo-limit'
-      : res.status === 401 ? '401 unauthorized'
       : res.status === 429 ? '429 rate-limit'
       : `HTTP ${res.status}`;
     markExhausted(admin, 'tavily', keys[i], reason).catch(() => {});
-    lastStatus = res.status;
-    await res.text();
+    await res.text().catch(() => "");
   }
   return { exhausted: true, lastStatus } as const;
 }

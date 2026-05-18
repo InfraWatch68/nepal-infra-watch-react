@@ -13,7 +13,12 @@ const json = (body: unknown, status = 200) =>
 type FieldName = "coordinates" | "fiscal_year";
 type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
 
-const EXHAUSTION_CODES = new Set([401, 402, 429, 432, 433]);
+// Tavily rotate codes — keep 401 separate so an invalid key rotates without
+// burning the rotation. 402/429/432/433 are real quota signals.
+const TAVILY_ROTATE_CODES = new Set([401, 402, 429, 432, 433]);
+const TAVILY_EXHAUST_CODES = new Set([402, 429, 432, 433]);
+// Exhaustion codes for chat providers (Mistral, Google, Lovable)
+const CHAT_EXHAUST_CODES = new Set([402, 429]);
 
 async function tavily(admin: any, keys: string[], query: string) {
   let lastStatus = 0;
@@ -29,13 +34,16 @@ async function tavily(admin: any, keys: string[], query: string) {
         include_answer: false,
       }),
     });
-    if (!EXHAUSTION_CODES.has(res.status)) {
+    if (!TAVILY_ROTATE_CODES.has(res.status)) {
       markSucceeded(admin, "tavily", keys[i]).catch(() => {});
       return { res, keyIndex: i };
     }
     lastStatus = res.status;
     const body = await res.text().catch(() => "");
-    markExhausted(admin, "tavily", keys[i], `${res.status} ${body.slice(0, 100)}`).catch(() => {});
+    if (TAVILY_EXHAUST_CODES.has(res.status)) {
+      markExhausted(admin, "tavily", keys[i], `${res.status} ${body.slice(0, 100)}`).catch(() => {});
+    }
+    // 401 falls through: rotate without persisting exhaustion.
   }
   return { exhausted: true, lastStatus } as const;
 }
@@ -48,7 +56,7 @@ async function callOpenAiCompatible(endpoint: string, key: string, model: string
   });
   if (!r.ok) {
     const body = await r.text().catch(() => "");
-    return { kind: EXHAUSTION_CODES.has(r.status) ? "exhausted" as const : "error" as const, status: r.status, body: body.slice(0, 500) };
+    return { kind: CHAT_EXHAUST_CODES.has(r.status) ? "exhausted" as const : "error" as const, status: r.status, body: body.slice(0, 500) };
   }
   const j = await r.json();
   return { kind: "ok" as const, text: (j.choices?.[0]?.message?.content ?? "") as string };
@@ -139,20 +147,28 @@ serve(async (req) => {
 
   try {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-    const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
-    const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    // Prefer the explicit secret (works on new-key-format projects where
+    // SUPABASE_SERVICE_ROLE_KEY auto-injection may be empty).
+    const SERVICE_KEY =
+      Deno.env.get("INFRA_SERVICE_ROLE_JWT") || Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
+    const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") || "";
 
     const jwt = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "");
     if (!jwt) return json({ error: "Unauthorized" }, 401);
 
-    const userClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    // Verify caller JWT using anon client + user JWT in headers (mirrors ai-verify-project).
+    const userClient = createClient(SUPABASE_URL, ANON_KEY || jwt, {
       global: { headers: { Authorization: `Bearer ${jwt}` } },
     });
     const { data: userData, error: userErr } = await userClient.auth.getUser();
     if (userErr || !userData?.user) return json({ error: "Unauthorized" }, 401);
     const userId = userData.user.id;
 
-    const { data: roles } = await userClient.from("user_roles").select("role").eq("user_id", userId);
+    // Service-role admin client for all RLS-bypass operations.
+    if (!SERVICE_KEY) return json({ error: "Service key not configured" }, 500);
+    const admin = createClient(SUPABASE_URL, SERVICE_KEY);
+
+    const { data: roles } = await admin.from("user_roles").select("role").eq("user_id", userId);
     const isReviewer = (roles ?? []).some((r: any) =>
       r.role === "reviewer" || r.role === "coadmin" || r.role === "admin"
     );
@@ -161,8 +177,8 @@ serve(async (req) => {
     const body = await req.json().catch(() => ({}));
     const fields = cleanFields(body);
     if (fields.length === 0) return json({ error: "fields must include coordinates or fiscal_year" }, 400);
+    const limit = typeof body?.limit === "number" && body.limit > 0 ? Math.min(body.limit, 50) : 10;
 
-    const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
     const { data: settings } = await admin
       .from("site_settings")
       .select("auto_approve_threshold")
@@ -179,7 +195,8 @@ serve(async (req) => {
       .from("projects")
       .select("id, title, sector, province, district, coordinates, fiscal_year")
       .eq("approval_status", "approved")
-      .or("coordinates.is.null,fiscal_year.is.null");
+      .or("coordinates.is.null,fiscal_year.is.null")
+      .limit(limit);
     if (rowErr) return json({ error: rowErr.message }, 500);
 
     let processed = 0;

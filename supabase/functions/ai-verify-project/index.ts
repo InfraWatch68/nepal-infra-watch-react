@@ -6,6 +6,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { getKeys, markExhausted, markSucceeded } from "../_shared/api_keys.ts";
 import { tryParseJsonObject } from "../_shared/json_repair.ts";
 
 const corsHeaders = {
@@ -15,27 +16,61 @@ const corsHeaders = {
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
-function parseTavilyKeys(): string[] {
-  const multi = (Deno.env.get("TAVILY_API_KEYS") ?? "").split(",").map(k => k.trim()).filter(Boolean);
-  if (multi.length > 0) return multi;
-  const single = Deno.env.get("TAVILY_API_KEY") ?? "";
-  return single ? [single] : [];
+const TAVILY_EXHAUSTION_CODES = new Set([429, 432, 433]);
+const TAVILY_UNAUTHORIZED_CODE = 401;
+function tavilyExhaustionReason(status: number): string {
+  if (status === 432) return "432 plan-limit";
+  if (status === 433) return "433 paygo-limit";
+  if (status === 429) return "429 rate-limit";
+  return `HTTP ${status}`;
 }
-// Rotate on Tavily quota/auth codes: 429 rate, 432 plan, 433 paygo, 401 unauth.
-const TAVILY_ROTATE_CODES = new Set([401, 429, 432, 433]);
-async function tavily(keys: string[], payload: Record<string, unknown>) {
+
+async function tavily(admin: unknown, keys: string[], payload: Record<string, unknown>) {
   let lastStatus = 0;
+  let quotaFailures = 0;
+  let authFailures = 0;
   for (let i = 0; i < keys.length; i++) {
-    const res = await fetch("https://api.tavily.com/search", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...payload, api_key: keys[i] }),
-    });
-    if (!TAVILY_ROTATE_CODES.has(res.status)) return { res };
-    lastStatus = res.status;
-    await res.text();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await fetch("https://api.tavily.com/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...payload, api_key: keys[i] }),
+      });
+
+      if (res.status >= 500) {
+        lastStatus = res.status;
+        if (attempt === 0) {
+          await res.text().catch(() => "");
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          continue;
+        }
+        return { res };
+      }
+
+      if (res.status === TAVILY_UNAUTHORIZED_CODE) {
+        authFailures += 1;
+        lastStatus = res.status;
+        const body = await res.text().catch(() => "");
+        console.warn(`Tavily key index ${i} unauthorized; rotating without exhaustion mark: ${body.slice(0, 120)}`);
+        break;
+      }
+
+      if (TAVILY_EXHAUSTION_CODES.has(res.status)) {
+        quotaFailures += 1;
+        lastStatus = res.status;
+        const body = await res.text().catch(() => "");
+        markExhausted(admin, "tavily", keys[i], `${tavilyExhaustionReason(res.status)} ${body.slice(0, 100)}`).catch(() => {});
+        break;
+      }
+
+      if (res.ok) markSucceeded(admin, "tavily", keys[i]).catch(() => {});
+      return { res };
+    }
   }
-  return { exhausted: true, lastStatus } as const;
+  if (quotaFailures > 0 && quotaFailures + authFailures >= keys.length) {
+    return { exhausted: true, lastStatus } as const;
+  }
+  return { unavailable: true, lastStatus } as const;
 }
 
 type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
@@ -92,9 +127,6 @@ serve(async (req) => {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
     const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
     const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const tavilyKeys = parseTavilyKeys();
-    if (tavilyKeys.length === 0) return json({ error: "No Tavily API keys configured" }, 500);
-
     const jwt = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "");
     if (!jwt) return json({ error: "Unauthorized" }, 401);
     const userClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global: { headers: { Authorization: `Bearer ${jwt}` } } });
@@ -109,6 +141,9 @@ serve(async (req) => {
     if (!Number.isFinite(projectId) || projectId <= 0) return json({ error: "projectId required" }, 400);
 
     const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    const tavilyKeys = await getKeys(admin, "tavily");
+    if (tavilyKeys.length === 0) return json({ error: "No Tavily API keys configured" }, 500);
+
     const { data: project, error: pErr } = await admin
       .from("projects")
       .select("id, title, sector, province, district, description, implementing_agency, contractor, budget_npr, start_date, expected_completion")
@@ -125,8 +160,9 @@ serve(async (req) => {
     const hits: Array<{ title: string; url: string; content: string; bucket: string }> = [];
     const warnings: string[] = [];
     for (const b of buckets) {
-      const r = await tavily(tavilyKeys, b.payload);
-      if ("exhausted" in r) { warnings.push(`Tavily exhausted on ${b.name} (last status ${r.lastStatus})`); continue; }
+      const r = await tavily(admin, tavilyKeys, b.payload);
+      if ("exhausted" in r) throw new Error("All Tavily keys exhausted");
+      if ("unavailable" in r) { warnings.push(`Tavily ${b.name}: all keys unavailable (last status ${r.lastStatus})`); continue; }
       if (!r.res.ok) { warnings.push(`Tavily ${b.name}: HTTP ${r.res.status}`); continue; }
       const j = await r.res.json();
       for (const item of (j.results ?? []) as any[]) {
