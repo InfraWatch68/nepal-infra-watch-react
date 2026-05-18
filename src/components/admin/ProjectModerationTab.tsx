@@ -8,8 +8,19 @@ import { Input } from '@/components/ui/input';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog';
 import { useAuth } from '@/hooks/useAuth';
-import { Loader2, ChevronDown, ChevronRight, Check, RefreshCw, ExternalLink, Sparkles } from 'lucide-react';
+import { Loader2, ChevronDown, ChevronRight, Check, RefreshCw, ExternalLink, Sparkles, Search } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 
@@ -31,6 +42,23 @@ type ProjectRow = {
   buckets: Record<BucketName, BucketStats>;
   progress_percent: number | null;
   progress_stage: string | null;
+};
+
+type DuplicatePair = {
+  project_a_id: number;
+  project_b_id: number;
+  title_a: string;
+  title_b: string;
+  similarity_score: number;
+  district: string | null;
+  province: string | null;
+  sector: string | null;
+  status_a: string | null;
+  status_b: string | null;
+  created_a: string | null;
+  created_b: string | null;
+  slug_a?: string | null;
+  slug_b?: string | null;
 };
 
 // Fixed display order for the 9 buckets. Sources/updates render last because
@@ -172,6 +200,311 @@ const BulkEnrichmentCard = () => {
               {running ? `Processing ${selectedMissing} missing fields...` : 'Run enrichment'}
             </Button>
           </div>
+        </CollapsibleContent>
+      </Collapsible>
+    </Card>
+  );
+};
+
+const formatDate = (value: string | null | undefined) => {
+  if (!value) return 'Unknown date';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return 'Unknown date';
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+};
+
+const movedSummary = (result: any) => {
+  const moved = (result?.moved_rows_per_table ?? {}) as Record<string, number>;
+  const labels: Record<string, string> = {
+    project_funding: 'funding',
+    project_documents: 'documents',
+    project_stakeholders: 'stakeholders',
+    project_risks: 'risks',
+    project_impact: 'impact',
+    project_procurement: 'procurement',
+    project_compliance: 'compliance',
+    project_updates: 'updates',
+    project_sources: 'sources',
+    project_milestones: 'milestones',
+    analysis_jobs: 'analysis jobs',
+    project_analysis_runs: 'analysis runs',
+    project_reviews: 'reviews',
+  };
+  const parts = Object.entries(moved)
+    .filter(([, count]) => Number(count) > 0)
+    .slice(0, 4)
+    .map(([table, count]) => `${count} ${labels[table] ?? table}`);
+  return parts.length > 0 ? ` - moved ${parts.join(', ')}` : '';
+};
+
+const ProjectCompareCard = ({
+  id,
+  title,
+  status,
+  district,
+  province,
+  sector,
+  created,
+  slug,
+}: {
+  id: number;
+  title: string;
+  status: string | null;
+  district: string | null;
+  province: string | null;
+  sector: string | null;
+  created: string | null;
+  slug?: string | null;
+}) => (
+  <div className="rounded-md border bg-card p-2.5 min-w-0 space-y-1.5">
+    <div className="flex items-start justify-between gap-2">
+      <div className="min-w-0">
+        <div className="text-[10px] font-mono text-muted-foreground">#{id}</div>
+        <div className="text-xs font-semibold leading-snug">{title}</div>
+      </div>
+      {status && (
+        <Badge variant="outline" className="text-[10px] shrink-0">
+          {status}
+        </Badge>
+      )}
+    </div>
+    <div className="text-[11px] text-muted-foreground">
+      {[district, province, sector].filter(Boolean).join(' - ') || 'No location metadata'}
+    </div>
+    <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+      <span>{formatDate(created)}</span>
+      {slug ? (
+        <Link to={`/projects/${slug}`} target="_blank" rel="noreferrer" className="hover:text-accent inline-flex items-center gap-1">
+          Open <ExternalLink className="h-3 w-3" />
+        </Link>
+      ) : null}
+    </div>
+  </div>
+);
+
+const ConfirmActionButton = ({
+  label,
+  description,
+  variant = 'outline',
+  disabled,
+  onConfirm,
+}: {
+  label: string;
+  description: string;
+  variant?: 'outline' | 'destructive';
+  disabled?: boolean;
+  onConfirm: () => void;
+}) => (
+  <AlertDialog>
+    <AlertDialogTrigger asChild>
+      <Button size="sm" variant={variant} className="h-7 text-[11px] shrink-0" disabled={disabled}>
+        {label}
+      </Button>
+    </AlertDialogTrigger>
+    <AlertDialogContent>
+      <AlertDialogHeader>
+        <AlertDialogTitle>Confirm duplicate action</AlertDialogTitle>
+        <AlertDialogDescription>{description}</AlertDialogDescription>
+      </AlertDialogHeader>
+      <AlertDialogFooter>
+        <AlertDialogCancel>Cancel</AlertDialogCancel>
+        <AlertDialogAction onClick={onConfirm}>Confirm</AlertDialogAction>
+      </AlertDialogFooter>
+    </AlertDialogContent>
+  </AlertDialog>
+);
+
+const DuplicateDetectionCard = () => {
+  const [open, setOpen] = useState(true);
+  const [pairs, setPairs] = useState<DuplicatePair[]>([]);
+  const [hasScanned, setHasScanned] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [sortDesc, setSortDesc] = useState(true);
+
+  const sortedPairs = useMemo(() => {
+    return [...pairs].sort((a, b) => (
+      sortDesc
+        ? b.similarity_score - a.similarity_score
+        : a.similarity_score - b.similarity_score
+    ));
+  }, [pairs, sortDesc]);
+
+  const scan = async () => {
+    setLoading(true);
+    const { data, error } = await (supabase as any).rpc('find_duplicate_projects', { p_min_similarity: 0.55 });
+    if (error) {
+      setLoading(false);
+      toast.error(`Duplicate scan failed: ${error.message}`);
+      return;
+    }
+
+    const found = (data ?? []) as DuplicatePair[];
+    const ids = Array.from(new Set(found.flatMap(p => [p.project_a_id, p.project_b_id])));
+    let slugs = new Map<number, string | null>();
+    if (ids.length > 0) {
+      const { data: projectRows, error: slugError } = await supabase
+        .from('projects')
+        .select('id, slug')
+        .in('id', ids);
+      if (slugError) {
+        toast.error(`Project links failed: ${slugError.message}`);
+      } else {
+        slugs = new Map((projectRows ?? []).map((p: any) => [p.id, p.slug]));
+      }
+    }
+
+    setPairs(found.map(p => ({
+      ...p,
+      slug_a: slugs.get(p.project_a_id) ?? null,
+      slug_b: slugs.get(p.project_b_id) ?? null,
+    })));
+    setHasScanned(true);
+    setLoading(false);
+  };
+
+  const removePair = (a: number, b: number) => {
+    setPairs(prev => prev.filter(p => p.project_a_id !== a || p.project_b_id !== b));
+  };
+
+  const merge = async (pair: DuplicatePair, canonicalId: number, duplicateId: number) => {
+    const key = `merge-${canonicalId}-${duplicateId}`;
+    setBusyKey(key);
+    removePair(pair.project_a_id, pair.project_b_id);
+    const { data, error } = await (supabase as any).rpc('merge_projects', {
+      p_canonical_id: canonicalId,
+      p_duplicate_id: duplicateId,
+    });
+    setBusyKey(null);
+    if (error) {
+      toast.error(`Merge failed: ${error.message}`);
+      setPairs(prev => [...prev, pair]);
+      return;
+    }
+    toast.success(`Merged into project #${canonicalId}${movedSummary(data)}`);
+  };
+
+  const softDelete = async (pair: DuplicatePair, duplicateId: number) => {
+    const key = `delete-${duplicateId}`;
+    setBusyKey(key);
+    removePair(pair.project_a_id, pair.project_b_id);
+    const { error } = await (supabase as any).rpc('delete_duplicate_project', {
+      p_duplicate_id: duplicateId,
+      p_reason: 'duplicate',
+    });
+    setBusyKey(null);
+    if (error) {
+      toast.error(`Delete failed: ${error.message}`);
+      setPairs(prev => [...prev, pair]);
+      return;
+    }
+    toast.success(`Soft-deleted project #${duplicateId} as duplicate`);
+  };
+
+  return (
+    <Card className="p-0 overflow-hidden border-accent/30 bg-accent/5">
+      <Collapsible open={open} onOpenChange={setOpen}>
+        <CollapsibleTrigger className="w-full px-3 py-2 flex items-center justify-between gap-3 text-left hover:bg-accent/10 transition-colors">
+          <div className="flex items-center gap-2 min-w-0">
+            {open ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
+            <Search className="h-3.5 w-3.5 text-accent" />
+            <div className="min-w-0">
+              <div className="text-sm font-semibold">Find duplicates</div>
+              <div className="text-[11px] text-muted-foreground">
+                Fuzzy title matches in the same district
+              </div>
+            </div>
+          </div>
+          <Badge variant="outline" className="text-[10px] font-mono border-accent/40 text-accent">
+            {hasScanned ? `${pairs.length} pairs` : 'not scanned'}
+          </Badge>
+        </CollapsibleTrigger>
+        <CollapsibleContent className="border-t border-accent/20 p-3 space-y-3">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="text-xs text-muted-foreground">
+              {hasScanned ? `Found ${pairs.length} candidate pair${pairs.length === 1 ? '' : 's'} - review below` : 'Scan approved and pending projects for likely duplicates.'}
+            </div>
+            <div className="flex items-center gap-2">
+              <Button size="sm" variant="ghost" className="h-8 text-xs" onClick={() => setSortDesc(v => !v)} disabled={pairs.length < 2}>
+                Similarity {sortDesc ? 'high to low' : 'low to high'}
+              </Button>
+              <Button size="sm" className="h-8 text-xs" onClick={scan} disabled={loading}>
+                {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
+                {loading ? 'Scanning...' : 'Scan for duplicates'}
+              </Button>
+            </div>
+          </div>
+
+          {hasScanned && sortedPairs.length === 0 ? (
+            <p className="text-xs text-muted-foreground italic">No candidate duplicate pairs found.</p>
+          ) : (
+            <div className="space-y-2">
+              {sortedPairs.map(pair => {
+                const pairKey = `${pair.project_a_id}-${pair.project_b_id}`;
+                const disabled = busyKey != null;
+                return (
+                  <div key={pairKey} className="rounded-md border bg-background/70 p-2.5 space-y-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] gap-2 items-center">
+                      <ProjectCompareCard
+                        id={pair.project_a_id}
+                        title={pair.title_a}
+                        status={pair.status_a}
+                        district={pair.district}
+                        province={pair.province}
+                        sector={pair.sector}
+                        created={pair.created_a}
+                        slug={pair.slug_a}
+                      />
+                      <div className="flex sm:flex-col items-center justify-center gap-1 text-accent">
+                        <Badge variant="outline" className="text-[10px] font-mono border-accent/40 text-accent">
+                          {Math.round(Number(pair.similarity_score || 0) * 100)}%
+                        </Badge>
+                        <ChevronRight className="h-4 w-4 rotate-90 sm:rotate-0" />
+                      </div>
+                      <ProjectCompareCard
+                        id={pair.project_b_id}
+                        title={pair.title_b}
+                        status={pair.status_b}
+                        district={pair.district}
+                        province={pair.province}
+                        sector={pair.sector}
+                        created={pair.created_b}
+                        slug={pair.slug_b}
+                      />
+                    </div>
+                    <div className="flex flex-row gap-1.5 overflow-x-auto pb-1">
+                      <ConfirmActionButton
+                        label="Merge -> keep A"
+                        description="Move all detail rows from B into A and delete B. This cannot be undone."
+                        disabled={disabled}
+                        onConfirm={() => merge(pair, pair.project_a_id, pair.project_b_id)}
+                      />
+                      <ConfirmActionButton
+                        label="Merge -> keep B"
+                        description="Move all detail rows from A into B and delete A. This cannot be undone."
+                        disabled={disabled}
+                        onConfirm={() => merge(pair, pair.project_b_id, pair.project_a_id)}
+                      />
+                      <ConfirmActionButton
+                        label="Delete A"
+                        description="Soft-delete A by marking it rejected with duplicate as the review reason."
+                        variant="destructive"
+                        disabled={disabled}
+                        onConfirm={() => softDelete(pair, pair.project_a_id)}
+                      />
+                      <ConfirmActionButton
+                        label="Delete B"
+                        description="Soft-delete B by marking it rejected with duplicate as the review reason."
+                        variant="destructive"
+                        disabled={disabled}
+                        onConfirm={() => softDelete(pair, pair.project_b_id)}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </CollapsibleContent>
       </Collapsible>
     </Card>
@@ -367,6 +700,7 @@ export function ProjectModerationTab() {
   return (
     <div className="space-y-3">
       <BulkEnrichmentCard />
+      <DuplicateDetectionCard />
 
       {/* Top strip: totals + global threshold + global approve.
           Mirrors the Sherlock queue header (counts on the left, action on the right). */}

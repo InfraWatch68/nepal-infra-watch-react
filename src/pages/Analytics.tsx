@@ -6,16 +6,15 @@ import { SiteFooter } from '@/components/layout/SiteFooter';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { AdSlot } from '@/components/AdSlot';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
   AreaChart, Area,
 } from 'recharts';
-import { CalendarClock, ArrowRight } from 'lucide-react';
+import { CalendarClock, ArrowRight, ChevronDown } from 'lucide-react';
 import { formatNPR } from '@/lib/parseCoords';
-import { freshnessLabel, FRESHNESS_CLASSES } from '@/lib/freshness';
 import { STATUS_LABELS } from '@/lib/constants';
-import { cn } from '@/lib/utils';
 import { ProjectLeaderboard, DocumentationLeaderboard, LeaderboardIcon, DocumentationIcon } from '@/components/analytics/ProjectLeaderboard';
 
 // Status colors using project CSS vars — ordered by lifecycle so the stacked
@@ -208,11 +207,11 @@ export default function Analytics() {
       .slice(0, 10);
   }, [projects]);
 
-  // ─── Stalest (existing, unchanged) ─────────────────────────────────────────
+  // Stalest analysis backlog: never analysed first, then oldest analysis.
   const stalest = useMemo(() => [...projects]
     .sort((a, b) => {
-      const la = a.last_activity_at ? Date.parse(a.last_activity_at) : 0;
-      const lb = b.last_activity_at ? Date.parse(b.last_activity_at) : 0;
+      const la = a.last_comprehensive_analysis_at ? Date.parse(a.last_comprehensive_analysis_at) : 0;
+      const lb = b.last_comprehensive_analysis_at ? Date.parse(b.last_comprehensive_analysis_at) : 0;
       return la - lb;
     })
     .slice(0, 10),
@@ -321,10 +320,11 @@ export default function Analytics() {
         {/* Budget by fiscal year — shows allocation per Nepal BS fiscal year.
             Only rendered when at least one project has a fiscal_year set. */}
         {budgetByFY.some(d => d.fy !== 'Untagged') && (
-          <Card className="p-5" id="budget-fy">
-            <div className="flex items-baseline justify-between mb-4 gap-2 flex-wrap">
+          <Collapsible defaultOpen={false} id="budget-fy">
+          <Card className="overflow-hidden">
+            <CollapsibleTrigger className="group flex w-full items-center justify-between gap-3 p-5 text-left hover:bg-muted/30">
               <div>
-                <h3 className="font-display text-lg font-semibold">Budget by fiscal year</h3>
+                <h3 className="font-display text-lg font-semibold">Fiscal year breakdown</h3>
                 {untaggedCount > 0 && (
                   <p className="text-xs text-muted-foreground">
                     Derived from start_date when fiscal_year wasn't set. {untaggedCount} project{untaggedCount !== 1 ? 's' : ''} still untagged.
@@ -332,7 +332,9 @@ export default function Analytics() {
                 )}
               </div>
               <p className="text-xs text-muted-foreground font-mono">Nepal BS fiscal year · NPR · approved projects</p>
-            </div>
+              <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+            </CollapsibleTrigger>
+            <CollapsibleContent className="px-5 pb-5">
             <ResponsiveContainer width="100%" height={Math.max(120, budgetByFY.length * 40)}>
               <BarChart data={budgetByFY} layout="vertical" margin={{ top: 0, right: 16, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" horizontal={false} />
@@ -382,7 +384,9 @@ export default function Analytics() {
                 </tbody>
               </table>
             </div>
+            </CollapsibleContent>
           </Card>
+          </Collapsible>
         )}
 
         {/* Project rating — top 10 best-performing projects.
@@ -532,17 +536,24 @@ export default function Analytics() {
           {/* Stalest data — kept; renamed heading so it's distinguishable from "Worst slips" */}
           <Card className="p-5" id="stalest">
             <h3 className="font-display text-lg font-semibold mb-1">Stalest data</h3>
-            <p className="text-xs text-muted-foreground mb-3 font-mono">Approved projects with the oldest tracked activity — flag these for an editor refresh.</p>
+            <p className="text-xs text-muted-foreground mb-3 font-mono">Approved projects with the oldest comprehensive analysis — never analysed first.</p>
             <div className="divide-y divide-border/60">
               {stalest.map((p) => {
-                const fr = freshnessLabel(p.last_activity_at);
+                const lastAnalysedAt = p.last_comprehensive_analysis_at ? new Date(p.last_comprehensive_analysis_at) : null;
+                const days = lastAnalysedAt
+                  ? Math.max(0, Math.floor((Date.now() - lastAnalysedAt.getTime()) / 86400000))
+                  : null;
                 return (
                   <Link key={p.id} to={`/projects/${p.slug}`} className="flex items-center justify-between gap-3 py-2 hover:bg-muted/30 -mx-2 px-2 rounded">
-                    <div className="min-w-0">
+                    <div className="min-w-0 flex-1">
                       <div className="text-sm font-medium truncate">{p.title}</div>
-                      <div className="text-[11px] text-muted-foreground font-mono truncate">{p.sector}{p.province ? ` · ${p.province}` : ''}</div>
+                      <div className="text-[11px] text-muted-foreground font-mono truncate">
+                        Last analysed {lastAnalysedAt ? lastAnalysedAt.toISOString().slice(0, 10) : 'Never'}
+                      </div>
                     </div>
-                    <Badge variant="outline" className={cn('text-[10px] font-mono shrink-0', FRESHNESS_CLASSES[fr.color])}>{fr.text}</Badge>
+                    <Badge variant="outline" className="text-[10px] font-mono shrink-0">
+                      {days == null ? 'Never' : `${days}d ago`}
+                    </Badge>
                   </Link>
                 );
               })}
@@ -567,3 +578,4 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
     </Card>
   );
 }
+

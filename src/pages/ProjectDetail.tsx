@@ -26,6 +26,7 @@ import { ReviewHistoryIcon } from '@/components/ReviewHistoryIcon';
 import { ProgressBreakdown } from '@/components/ProgressBreakdown';
 import { scoreByPerformance, scoreByDocumentation, letterGrade } from '@/components/analytics/ProjectLeaderboard';
 import { toast } from 'sonner';
+import { projectCoverImage } from '@/lib/projectImages';
 
 export default function ProjectDetail() {
   const { slug } = useParams();
@@ -363,9 +364,11 @@ export default function ProjectDetail() {
           {/* Image gallery — sits inside the main column so it aligns with the
               cards below and lets the sidebar ad slot float to the right at
               identical width. Hidden when the project has no pictures yet. */}
-          {Array.isArray(p.image_urls) && p.image_urls.length > 0 && (
-            <ProjectImageGallery images={p.image_urls} title={p.title} />
-          )}
+          <ProjectImageGallery
+            images={[p.cover_image_url, ...(Array.isArray(p.image_urls) ? p.image_urls : [])].filter(Boolean)}
+            fallbackImage={projectCoverImage(p)}
+            title={p.title}
+          />
 
           {/* AI Project Brief — single home for the full AI-generated story
               about the project. Generate composes:
@@ -935,19 +938,20 @@ function RecordBulkBar({
 // (no overlay), thumbnail strip with active highlight. Auto-skips images
 // that fail to load (Tavily occasionally returns hotlink-protected URLs).
 // Click main image to open in a new tab for full-size view.
-function ProjectImageGallery({ images, title }: { images: string[]; title: string }) {
+function ProjectImageGallery({ images, fallbackImage, title }: { images: string[]; fallbackImage: string; title: string }) {
   const [active, setActive] = useState(0);
   const [broken, setBroken] = useState<Set<number>>(new Set());
+  const displayImages = images.length > 0 ? images : [fallbackImage];
   // Auto-skip broken entries when the active index lands on one.
   useEffect(() => {
     if (!broken.has(active)) return;
-    for (let i = 0; i < images.length; i++) if (!broken.has(i)) { setActive(i); return; }
-  }, [active, broken, images.length]);
-  const total = images.length;
+    for (let i = 0; i < displayImages.length; i++) if (!broken.has(i)) { setActive(i); return; }
+  }, [active, broken, displayImages.length]);
+  const total = displayImages.length;
   const usableCount = total - broken.size;
   if (usableCount === 0) return null;
   // Active index among usable images (for the "3 of 11" counter).
-  const usablePosition = images.slice(0, active + 1).filter((_, i) => !broken.has(i)).length;
+  const usablePosition = displayImages.slice(0, active + 1).filter((_, i) => !broken.has(i)).length;
   const next = () => {
     for (let step = 1; step <= total; step++) {
       const i = (active + step) % total;
@@ -975,15 +979,15 @@ function ProjectImageGallery({ images, title }: { images: string[]; title: strin
 
         {/* Hero image. aspect 16:9 is gentler than the old 16:7 banner. */}
         <a
-          href={images[active]}
+          href={displayImages[active]}
           target="_blank"
           rel="noreferrer"
           className="block relative aspect-[16/9] bg-card rounded-lg overflow-hidden ring-1 ring-border group"
           aria-label="Open image full size in new tab"
         >
           <img
-            key={images[active]}
-            src={images[active]}
+            key={displayImages[active]}
+            src={displayImages[active]}
             alt={`${title} — photo ${active + 1}`}
             className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.01]"
             referrerPolicy="no-referrer"
@@ -1017,7 +1021,7 @@ function ProjectImageGallery({ images, title }: { images: string[]; title: strin
         {/* Thumbnail strip. Active state via border + slight scale; broken hidden. */}
         {usableCount > 1 && (
           <div className="flex gap-2 mt-3 overflow-x-auto pb-1 -mx-0.5 px-0.5 scrollbar-thin">
-            {images.map((u, i) => broken.has(i) ? null : (
+            {displayImages.map((u, i) => broken.has(i) ? null : (
               <button
                 key={u + i}
                 type="button"

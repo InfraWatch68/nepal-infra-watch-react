@@ -31,6 +31,7 @@
 12. [Moderation — Review queue](#moderation--review-queue)
 13. [Moderation — Pending updates / sources](#moderation--pending-updates--sources)
 13. [Moderation — Bulk enrich coordinates & fiscal year](#moderation--bulk-enrich-coordinates--fiscal-year)
+13. [Moderation — Find duplicates](#moderation--find-duplicates)
 14. [Activity dashboard](#activity-dashboard)
 15. [Browse page (admin perspective)](#browse-page-admin-perspective)
 16. [Project Detail page (admin perspective)](#project-detail-page-admin-perspective)
@@ -446,6 +447,30 @@ _(did not exist — coordinates and fiscal_year were only filled when (a) the su
 - `supabase/functions/ai-enrich-coords-fy/index.ts` — reviewer+ auth, CORS preflight, Tavily search, Mistral/Google/Lovable chat fallback, Nepal bounds + Nepali FY validation, null-only direct writes.
 
 **Fix / Change:** Previously the only way to backfill missing coordinates and fiscal years was per-project manual editing or hoping `analysis-drain`'s extraction prompt picked them up (it inconsistently did, since its prompt is optimised for the seven detail tables not the basic columns). The new panel makes it a one-click bulk action with the same key-rotation, confidence threshold, and value-validation discipline as the rest of the AI pipeline.
+
+---
+
+## Moderation — Find duplicates
+
+Duplicate-detection and merge/delete workflow for approved and pending project rows. Lives on the Moderation status tab as a collapsible card between the bulk-enrich card and the existing per-project moderation list.
+
+Where to find it: `/admin` → tab bar → "Moderation status" tab → top of the tab → **"Find duplicates"** card.
+
+### Previous
+_(did not exist — duplicate cleanup required direct database work or manual rejection from another admin surface)_
+
+### Current
+- **Detection rule:** "Scan for duplicates" calls `find_duplicate_projects(0.55)`. The RPC compares unordered project pairs where `a.id < b.id`, both rows are `approved` or `pending`, both share the same non-null district, and `pg_trgm.similarity(lower(title_a), lower(title_b)) >= 0.55`.
+- Results show candidate pairs sorted by highest similarity first. Each pair renders project A and project B side by side with title, approval-status badge, district/province/sector, created date, and a link to the project detail page.
+- **Merge semantics:** "Merge → keep A" or "Merge → keep B" calls `merge_projects(canonical, duplicate)`. The RPC reparents all rows with `project_id` from the duplicate to the canonical project across `project_funding`, `project_documents`, `project_stakeholders`, `project_risks`, `project_impact`, `project_procurement`, `project_compliance`, `project_updates`, `project_sources`, `project_milestones`, `analysis_jobs`, and `project_analysis_runs`. Project-level `project_reviews` history is retargeted too.
+- During merge, the canonical project backfills null basic fields from the duplicate where available: description, coordinates, fiscal year, dates, budget, cover image, province/district/sector, status, progress percent, and progress stage. Reported progress fields are copied only when useful, and `last_comprehensive_analysis_at` keeps the newest timestamp. The duplicate project row is then hard-deleted.
+- **Soft-delete semantics:** "Delete A" / "Delete B" calls `delete_duplicate_project(id, 'duplicate')`. This does not delete the row; it sets `approval_status='rejected'`, stamps the review reason/notes with `duplicate`, and updates `reviewed_at`.
+- All three RPCs are `SECURITY DEFINER` and gated by `is_moderator()`. They do not change project-row RLS policies and do not store dismissal memory, so unresolved candidate pairs can reappear on the next scan.
+
+**Backing migration:**
+- `supabase/migrations/20260518120000_duplicate_detection.sql` — enables `pg_trgm`, adds a trigram GIN index on `lower(projects.title)`, and creates `find_duplicate_projects`, `merge_projects`, and `delete_duplicate_project`.
+
+**Fix / Change:** Moderators can now resolve likely duplicate projects in the admin UI without ad-hoc SQL. Merge keeps child detail records attached to the canonical project, while delete remains a reversible moderation action by marking the duplicate rejected instead of removing it.
 
 ---
 

@@ -7,10 +7,12 @@ import { formatNPR } from '@/lib/parseCoords';
 import { freshnessLabel, FRESHNESS_CLASSES_OVERLAY } from '@/lib/freshness';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/hooks/useAuth';
+import { projectCoverImage } from '@/lib/projectImages';
 
 export function ProjectCard({ p }: { p: any }) {
   const { isReviewer } = useAuth();
   const freshness = freshnessLabel(p.last_activity_at);
+  const coverImage = projectCoverImage(p);
   return (
     <Link to={`/projects/${p.slug}`} className="relative block">
       {isReviewer && (
@@ -25,13 +27,7 @@ export function ProjectCard({ p }: { p: any }) {
       )}
       <Card className="group h-full overflow-hidden hover:shadow-elegant transition-all duration-300 hover:-translate-y-0.5 border-border/60">
         <div className="relative aspect-[16/9] overflow-hidden bg-muted">
-          {p.cover_image_url ? (
-            <img src={p.cover_image_url} alt={p.title} className="w-full h-full object-cover transition-transform group-hover:scale-105" />
-          ) : (
-            <div className="w-full h-full gradient-hero flex items-center justify-center">
-              <span className="font-display text-3xl text-primary-foreground/40">{p.sector?.[0]}</span>
-            </div>
-          )}
+          <img src={coverImage} alt={p.title} className="w-full h-full object-cover transition-transform group-hover:scale-105" />
           <div className="absolute top-3 left-3 flex gap-1.5 flex-wrap">
             <Badge className={cn("text-[10px] uppercase tracking-wider font-mono border-0", STATUS_COLORS_OVERLAY[p.status])}>
               {STATUS_LABELS[p.status]}
