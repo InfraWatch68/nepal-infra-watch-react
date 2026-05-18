@@ -2,7 +2,17 @@
   "permissions": {
     "allow": [
       "Bash(curl -s -o /dev/null -w \"%{http_code}\" -X POST \"https://vlioybqqswbohdhpnjym.supabase.co/functions/v1/ai-discover-projects\" -H \"Authorization: Bearer bad_token\" -H \"Content-Type: application/json\" -d '{}')",
-      "Bash(curl -s -o /dev/null -w \"%{http_code}\" -X POST \"https://vlioybqqswbohdhpnjym.supabase.co/functions/v1/ai-fetch-project-news\" -H \"Authorization: Bearer bad_token\" -H \"Content-Type: application/json\" -d '{}')"
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" -X POST \"https://vlioybqqswbohdhpnjym.supabase.co/functions/v1/ai-fetch-project-news\" -H \"Authorization: Bearer bad_token\" -H \"Content-Type: application/json\" -d '{}')",
+      "Bash(xargs grep -l \"project_updates\\\\|ProjectUpdate\")",
+      "Skill(codex:rescue)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(node *)",
+      "Bash(where.exe supabase *)",
+      "Bash(supabase --version)",
+      "Bash(npx --no-install supabase --version)",
+      "Bash(git check-ignore *)"
     ]
   }
 }

@@ -20,6 +20,8 @@ supabase/.env
 
 # Local working notes (not for upstream)
 .claude/feature_backlog.md
+fixlog.md
+audit-report*.json
 
 # Editor directories and files
 .vscode/*
