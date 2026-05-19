@@ -12,6 +12,14 @@ const json = (body: unknown, status = 200) =>
 
 type FieldName = "coordinates" | "fiscal_year";
 type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
+type ProjectResult = {
+  project_id: number;
+  title: string | null;
+  processed: boolean;
+  enriched_coords: boolean;
+  enriched_fy: boolean;
+  skipped_reason?: "low_confidence" | "no_data" | "update_failed";
+};
 
 // Tavily rotate codes — keep 401 separate so an invalid key rotates without
 // burning the rotation. 402/429/432/433 are real quota signals.
@@ -25,9 +33,11 @@ async function tavily(admin: any, keys: string[], query: string) {
   for (let i = 0; i < keys.length; i++) {
     const res = await fetch("https://api.tavily.com/search", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${keys[i]}`,
+      },
       body: JSON.stringify({
-        api_key: keys[i],
         query,
         search_depth: "advanced",
         max_results: 5,
@@ -109,15 +119,34 @@ function cleanFields(input: any): FieldName[] {
   return out;
 }
 
-function validCoords(value: any): string | null {
-  if (typeof value !== "string") return null;
-  const m = value.trim().match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
-  if (!m) return null;
-  const lat = Number(m[1]);
-  const lng = Number(m[2]);
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+function validCoords(value: any): { coordinates: string; latitude: number; longitude: number } | null {
+  let lat: number | null = null;
+  let lng: number | null = null;
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    const simple = trimmed.match(/^\s*(-?\d+(?:\.\d+)?)\s*[,;\s]\s*(-?\d+(?:\.\d+)?)\s*$/);
+    const hem = trimmed.match(/(-?\d+(?:\.\d+)?)\s*(?:deg|degrees|°)?\s*([NS])\s*[,;\s]+(-?\d+(?:\.\d+)?)\s*(?:deg|degrees|°)?\s*([EW])/i);
+    const m = simple ?? hem;
+    if (!m) return null;
+    lat = Number(m[1]);
+    lng = Number(m[3] ?? m[2]);
+    if (hem) {
+      if (String(m[2]).toUpperCase() === "S") lat = -lat;
+      if (String(m[4]).toUpperCase() === "W") lng = -lng;
+    }
+  } else if (value && typeof value === "object") {
+    lat = Number(value.lat ?? value.latitude);
+    lng = Number(value.lng ?? value.lon ?? value.longitude);
+  }
+
+  if (lat == null || lng == null || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
   if (lat < 26.3 || lat > 30.5 || lng < 80.0 || lng > 88.2) return null;
-  return `${lat.toFixed(6).replace(/\.?0+$/, "")}, ${lng.toFixed(6).replace(/\.?0+$/, "")}`;
+  return {
+    coordinates: `${lat.toFixed(6).replace(/\.?0+$/, "")}, ${lng.toFixed(6).replace(/\.?0+$/, "")}`,
+    latitude: Number(lat.toFixed(6)),
+    longitude: Number(lng.toFixed(6)),
+  };
 }
 
 function validFy(value: any): string | null {
@@ -178,6 +207,9 @@ serve(async (req) => {
     const fields = cleanFields(body);
     if (fields.length === 0) return json({ error: "fields must include coordinates or fiscal_year" }, 400);
     const limit = typeof body?.limit === "number" && body.limit > 0 ? Math.min(body.limit, 50) : 10;
+    const projectId = typeof body?.projectId === "number" || typeof body?.project_id === "number"
+      ? Number(body.projectId ?? body.project_id)
+      : null;
 
     const { data: settings } = await admin
       .from("site_settings")
@@ -191,12 +223,19 @@ serve(async (req) => {
     const tavilyKeys = await getKeys(admin, "tavily");
     if (tavilyKeys.length === 0) return json({ error: "No Tavily API keys configured" }, 500);
 
-    const { data: rows, error: rowErr } = await admin
+    const missingFilters: string[] = [];
+    if (fields.includes("coordinates")) missingFilters.push("coordinates.is.null");
+    if (fields.includes("fiscal_year")) missingFilters.push("fiscal_year.is.null");
+
+    let rowQuery = admin
       .from("projects")
       .select("id, title, sector, province, district, coordinates, fiscal_year")
       .eq("approval_status", "approved")
-      .or("coordinates.is.null,fiscal_year.is.null")
-      .limit(limit);
+      .or(missingFilters.join(","));
+    if (projectId != null) rowQuery = rowQuery.eq("id", projectId);
+    else rowQuery = rowQuery.order("id", { ascending: true }).limit(limit);
+
+    const { data: rows, error: rowErr } = await rowQuery;
     if (rowErr) return json({ error: rowErr.message }, 500);
 
     let processed = 0;
@@ -205,18 +244,28 @@ serve(async (req) => {
     let enriched_fy = 0;
     let skipped_low_conf = 0;
     let skipped_no_data = 0;
+    const project_results: ProjectResult[] = [];
 
     for (const project of (rows ?? []) as any[]) {
       const wantsCoords = fields.includes("coordinates") && project.coordinates == null;
       const wantsFy = fields.includes("fiscal_year") && project.fiscal_year == null;
       if (!wantsCoords && !wantsFy) continue;
       processed += 1;
+      const result: ProjectResult = {
+        project_id: Number(project.id),
+        title: project.title ?? null,
+        processed: true,
+        enriched_coords: false,
+        enriched_fy: false,
+      };
 
       const query = `${project.title ?? ""} ${project.sector ?? ""} "${project.district ?? ""}" Nepal site:gov.np OR site:bolpatra.gov.np OR site:ppmo.gov.np`;
       const search = await tavily(admin, tavilyKeys, query);
       if ("exhausted" in search) return json({ error: `Tavily keys exhausted (${search.lastStatus})` }, 429);
       if (!search.res.ok) {
         skipped_no_data += 1;
+        result.skipped_reason = "no_data";
+        project_results.push(result);
         continue;
       }
       const searchJson = await search.res.json();
@@ -227,6 +276,8 @@ serve(async (req) => {
         .join("\n\n");
       if (!hits) {
         skipped_no_data += 1;
+        result.skipped_reason = "no_data";
+        project_results.push(result);
         continue;
       }
 
@@ -253,6 +304,8 @@ serve(async (req) => {
       const parsed = tryParseJsonObject<any>(ai.text ?? "");
       if (!parsed.ok) {
         skipped_no_data += 1;
+        result.skipped_reason = "no_data";
+        project_results.push(result);
         continue;
       }
       const confidence = typeof parsed.value.confidence === "number" ? parsed.value.confidence : 0;
@@ -261,27 +314,44 @@ serve(async (req) => {
       if (confidence < threshold) {
         if (coords || fy) skipped_low_conf += 1;
         else skipped_no_data += 1;
+        result.skipped_reason = coords || fy ? "low_confidence" : "no_data";
+        project_results.push(result);
         continue;
       }
-      const patch: Record<string, string> = {};
-      if (coords) patch.coordinates = coords;
+      const patch: Record<string, string | number> = {};
+      if (coords) {
+        patch.coordinates = coords.coordinates;
+        patch.latitude = coords.latitude;
+        patch.longitude = coords.longitude;
+      }
       if (fy) patch.fiscal_year = fy;
       if (Object.keys(patch).length === 0) {
         skipped_no_data += 1;
+        result.skipped_reason = "no_data";
+        project_results.push(result);
         continue;
       }
 
       const { error: updateErr } = await admin.from("projects").update(patch).eq("id", project.id);
       if (updateErr) {
         skipped_no_data += 1;
+        result.skipped_reason = "update_failed";
+        project_results.push(result);
         continue;
       }
       enriched_projects += 1;
-      if (patch.coordinates) enriched_coords += 1;
-      if (patch.fiscal_year) enriched_fy += 1;
+      if (patch.coordinates) {
+        enriched_coords += 1;
+        result.enriched_coords = true;
+      }
+      if (patch.fiscal_year) {
+        enriched_fy += 1;
+        result.enriched_fy = true;
+      }
+      project_results.push(result);
     }
 
-    return json({ ok: true, processed, enriched_projects, enriched_coords, enriched_fy, skipped_low_conf, skipped_no_data });
+    return json({ ok: true, processed, enriched_projects, enriched_coords, enriched_fy, skipped_low_conf, skipped_no_data, project_results });
   } catch (e) {
     console.error("ai-enrich-coords-fy error:", e);
     return json({ error: e instanceof Error ? e.message : "Unknown error" }, 500);

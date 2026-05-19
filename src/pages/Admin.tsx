@@ -20,7 +20,7 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Checkbox } from '@/components/ui/checkbox';
 import { toast } from 'sonner';
-import { Shield, Megaphone, Sparkles, Loader2, ExternalLink, Users as UsersIcon, BookOpen, ChevronLeft, ChevronRight, Search, X } from 'lucide-react';
+import { Shield, Megaphone, Sparkles, Loader2, ExternalLink, Users as UsersIcon, BookOpen, ChevronLeft, ChevronRight, Search, X, RefreshCw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { SECTORS, PROVINCES, FISCAL_YEARS, districtsFor } from '@/lib/constants';
 import { VerifyDialog } from '@/components/admin/VerifyDialog';
@@ -48,6 +48,13 @@ const APPROVAL_DOT: Record<string, string> = {
   pending: 'bg-warning',
   rejected: 'bg-destructive',
 };
+
+type StaleProjectRow = {
+  id: number | string;
+  title: string | null;
+  last_comprehensive_analysis_at: string | null;
+};
+
 function StatusDot({ status }: { status: string }) {
   return <span className={cn('inline-block h-2.5 w-2.5 rounded-full shrink-0', APPROVAL_DOT[status] ?? 'bg-muted')} aria-label={status} />;
 }
@@ -184,8 +191,8 @@ export default function Admin() {
   useEffect(() => { if (user && isReviewer) refresh(); /* eslint-disable-next-line */ }, [user, isReviewer, isAdmin, isCoadmin]);
 
   // Same cutoff as runBulkComprehensive — head:true skips body, count:'exact'
-  // returns the full match count regardless of the page-size cap that the
-  // bulk runner uses (10). Re-run on mount + after each bulk run.
+  // returns the full match count regardless of which bulk button is clicked.
+  // Re-run on mount + after each bulk run.
   const loadStaleCount = async () => {
     const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
     const { count } = await supabase
@@ -381,17 +388,37 @@ export default function Admin() {
     );
   };
 
-  const runBulkComprehensive = async () => {
-    // Pick approved projects that have never been analysed, or whose last
-    // analysis is older than 30 days. Cap at 10 to keep one run reasonable.
+  const fetchStaleProjects = async (limit: number | null) => {
     const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-    const { data: stale, error } = await supabase
+    const select = 'id, title, last_comprehensive_analysis_at';
+    const baseQuery = () => supabase
       .from('projects')
-      .select('id, title, last_comprehensive_analysis_at')
+      .select(select)
       .eq('approval_status', 'approved')
       .or(`last_comprehensive_analysis_at.is.null,last_comprehensive_analysis_at.lt.${cutoff}`)
-      .order('last_comprehensive_analysis_at', { ascending: true, nullsFirst: true })
-      .limit(10);
+      .order('last_comprehensive_analysis_at', { ascending: true, nullsFirst: true });
+
+    if (limit != null) {
+      const { data, error } = await baseQuery().limit(limit);
+      return { stale: (data ?? []) as StaleProjectRow[], error };
+    }
+
+    const all: StaleProjectRow[] = [];
+    const pageSize = 1000;
+    for (let from = 0; ; from += pageSize) {
+      const { data, error } = await baseQuery().range(from, from + pageSize - 1);
+      if (error) return { stale: all, error };
+      all.push(...((data ?? []) as StaleProjectRow[]));
+      if (!data || data.length < pageSize) break;
+    }
+    return { stale: all, error: null };
+  };
+
+  const runBulkComprehensive = async (limit: number | null) => {
+    // Pick approved projects that have never been analysed, or whose last
+    // analysis is older than 30 days. The capped button handles 10; the
+    // full refresh drains every stale row that feeds documentation scoring.
+    const { stale, error } = await fetchStaleProjects(limit);
     if (error) return toast.error(error.message);
     if (!stale || stale.length === 0) return toast.success('No stale projects — all approved projects are up-to-date.');
 
@@ -488,14 +515,23 @@ export default function Admin() {
           <div className="space-y-2 pt-3 border-t border-accent/20">
             <p className="text-xs text-muted-foreground">
               <span className="font-semibold text-foreground">Refresh stale projects.</span>{' '}
-              Enqueues a comprehensive analysis for up to 10 approved projects whose last analysis is missing or older than 30 days. Jobs flow through the analysis queue — each one populates funding/documents/stakeholders/risks/impact/procurement/compliance plus the milestones/updates/sources/images. New rows land as pending review.
+              Enqueues comprehensive analysis for approved projects whose last analysis is missing or older than 30 days. These runs refresh the same core facts, evidence, timeline, and deep-detail tables used by the documentation score. New rows land as pending review.
             </p>
             <div className="flex gap-2 flex-wrap items-center">
-              <Button disabled={!!bulkProgress} onClick={runBulkComprehensive} variant="outline">
+              <Button disabled={!!bulkProgress} onClick={() => runBulkComprehensive(10)} variant="outline">
                 {bulkProgress ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
                 {bulkProgress
                   ? `Enqueueing ${bulkProgress.done + 1} / ${bulkProgress.total}${bulkProgress.current ? ` — ${bulkProgress.current.slice(0, 40)}…` : ''}`
-                  : 'Refresh stale approved projects'}
+                  : 'Refresh 10 stale projects'}
+              </Button>
+              <Button
+                disabled={!!bulkProgress || staleCount === 0}
+                onClick={() => runBulkComprehensive(null)}
+                variant="outline"
+                title="Refresh every stale approved project that contributes to documentation-score inputs"
+              >
+                {bulkProgress ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                Refresh all doc-score data
               </Button>
               {staleCount != null && !bulkProgress && (
                 <Badge
@@ -506,7 +542,7 @@ export default function Admin() {
                   )}
                   title={staleCount === 0
                     ? 'All approved projects analysed within the last 30 days.'
-                    : `${staleCount} approved project${staleCount === 1 ? ' has' : 's have'} no analysis or one older than 30 days. The bulk run handles up to 10 per click.`}
+                    : `${staleCount} approved project${staleCount === 1 ? ' has' : 's have'} no analysis or one older than 30 days.`}
                 >
                   {staleCount} stale
                 </Badge>
